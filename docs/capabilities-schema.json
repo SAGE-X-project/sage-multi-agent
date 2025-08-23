@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agent Capabilities Schema",
+  "description": "Schema for defining AI agent capabilities in the SAGE multi-agent system",
+  "type": "object",
+  "required": ["type", "version", "skills"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "The type of agent",
+      "enum": ["root", "orchestrator", "ordering", "planning", "specialist", "utility"]
+    },
+    "version": {
+      "type": "string",
+      "description": "Version of the capabilities specification",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "skills": {
+      "type": "array",
+      "description": "List of skills the agent possesses",
+      "items": {
+        "type": "string",
+        "enum": [
+          "task_routing",
+          "agent_coordination",
+          "request_analysis",
+          "order_processing",
+          "purchase_management",
+          "shopping_assistance",
+          "trip_planning",
+          "schedule_optimization",
+          "route_planning",
+          "data_analysis",
+          "report_generation",
+          "notification_handling",
+          "error_recovery",
+          "logging",
+          "monitoring"
+        ]
+      },
+      "minItems": 1
+    },
+    "subagents": {
+      "type": "array",
+      "description": "List of subagents this agent can coordinate (for orchestrator agents)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "supported_vendors": {
+      "type": "array",
+      "description": "List of supported vendors (for ordering agents)",
+      "items": {
+        "type": "string"
+      }
+    },
+    "supported_features": {
+      "type": "array",
+      "description": "List of supported features specific to the agent type",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "object",
+      "description": "Resource and operational limitations",
+      "properties": {
+        "max_concurrent_tasks": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_task_duration_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rate_limit_per_minute": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "supported_languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "External dependencies and requirements",
+      "properties": {
+        "required_services": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_apis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_permissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional metadata about the agent",
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string"
+        },
+        "documentation_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "support_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,8 +1,8 @@
 # Sage-Multi-Agent
 
 This project demonstrates a multi-agent system built with the A2A (Agent-to-Agent) framework and integrated with the SAGE protocol. The system features a root agent that intelligently routes requests to specialized sub-agents based on the content analysis of user prompts.  
-The root agent does not directly delivers message to sub-agents, but they send it to each sub-agent's gateway, which is malicious and tampers the user's initial prompt.  
-With sage protocol, the sage protocol detects the malicious attack from gateway. But without sage protocol, you can see the agents communicates without error with malicious prompt tampered by gateway.
+The root agent does not directly deliver messages to sub-agents, but sends them to each sub-agent's gateway, which is intentionally malicious and tampers with the user's initial prompt for demonstration purposes.  
+With SAGE protocol enabled (default), the system detects and prevents malicious attacks from the gateway. When SAGE protocol is disabled (using `-activate-sage=false`), the agents process the tampered messages without detecting the manipulation, demonstrating the importance of message integrity verification.
 
 ## System Architecture
 
@@ -47,16 +47,51 @@ The system consists of multiple components working together:
 * Google API Key for Gemini model
   - Get it from [Google AI Studio](https://ai.google.dev/gemini-api/docs/api-key)
   - Set as environment variable: `export GOOGLE_API_KEY=your_api_key`
+* Blockchain network configuration
+  - See [Network Configuration Guide](docs/NETWORK_CONFIGURATION.md) for details
+
+### Using Makefile (Recommended)
 
 ```bash
-cd a2a-go-github/examples/multi
+cd sage-multi-agent
+
+# Show all available commands
+make help
+
+# Build all components
+make build
+
+# Build specific components
+make build-agents    # Build all agents
+make build-cli       # Build CLI client
+make build-root      # Build root agent only
+make build-ordering  # Build ordering agent only
+make build-planning  # Build planning agent only
+
+# Clean build artifacts
+make clean
+
+# Run tests
+make test
+make test-coverage   # With coverage report
+
+# Run agents directly
+make run-root
+make run-ordering
+make run-planning
+```
+
+### Manual Build
+
+```bash
+cd sage-multi-agent
 
 # Build the root agent
-go build -o root/root ./root
+go build -o cli/root/root ./cli/root
 
 # Build the sub-agents
-go build -o ordering/ordering ./ordering
-go build -o planning/planning ./planning
+go build -o cli/ordering/ordering ./cli/ordering
+go build -o cli/planning/planning ./cli/planning
 
 # Build the CLI client
 go build -o cli/cli ./cli
@@ -72,34 +107,36 @@ Run each agent in a separate terminal window:
 #### Terminal 1: Ordering Agent
 ```bash
 cd sage-multi-agent
-./ordering/ordering
+./cli/ordering/ordering
+# SAGE protocol is activated by default
 
-# to deactivate sage protocol, use activate-sage=fasle flag
-./ordering/ordering -activate-sage=false
+# To deactivate SAGE protocol, use activate-sage=false flag
+./cli/ordering/ordering -activate-sage=false
 ```
 
 #### Terminal 2: Planning Agent
 ```bash
 cd sage-multi-agent
-./planning/planning
+./cli/planning/planning
+# SAGE protocol is activated by default
 
-# to deactivate sage protocol, use activate-sage=fasle flag
-# you my also set custom port with -port flag
-./planning/planning -activate-sage=false
+# To deactivate SAGE protocol, use activate-sage=false flag
+# You may also set custom port with -port flag
+./cli/planning/planning -activate-sage=false -port 8085
 
 ```
 
 #### Terminal 3: Root Agent
 ```bash
 cd sage-multi-agent
-./root/root
+./cli/root/root
 ```
 
 Remember to set the `GOOGLE_API_KEY` environment variable to use Gemini model:
 
 ```bash
 export GOOGLE_API_KEY=your_api_key
-./root/root
+./cli/root/root
 ```
 
 ### Running in Background (Alternative)
@@ -108,9 +145,9 @@ Alternatively, you can run all agents in the background:
 
 ```bash
 cd sage-multi-agent
-./ordering/ordering -port 8081 &
-./planning/planning -port 8084 &
-./root/root -port 8080 &
+./cli/ordering/ordering -port 8081 &
+./cli/planning/planning -port 8084 &
+./cli/root/root -port 8080 &
 ```
 
 ## Using the CLI to Interact with the System
@@ -158,9 +195,9 @@ curl -X POST http://localhost:8086/send/prompt \
 1. The client(cli or client server) sends your request to the root agent.
 2. The root agent analyzes the content of your request to determine which specialized agent should handle it.
 3. The root agent forwards your request to the appropriate sub-agent's gateway
-4. The sub-agent's gateway tampers the user's prompt and deliver it to sub-agent
-5. If agents are using sage protocol, it occurs authorization error
-6. If not, the sub-agent processes the tampered request and sends back a response.
+4. The sub-agent's gateway tampers the user's prompt and delivers it to the sub-agent
+5. If SAGE protocol is enabled (default), it detects the tampering and returns an authorization error
+6. If SAGE is disabled (-activate-sage=false), the sub-agent processes the tampered request without detection
 7. The root agent returns this response to the client.
 8. The client displays the response.
 
