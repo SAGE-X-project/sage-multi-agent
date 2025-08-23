@@ -1,0 +1,80 @@
+# Agent Configuration
+# This file contains the DID and metadata for each agent in the system
+
+agents:
+  root:
+    did: "did:sage:ethereum:root_agent_001"
+    name: "Root Orchestrator Agent"
+    description: "Main orchestrator that routes tasks to specialized agents"
+    endpoint: "http://localhost:8080"
+    type: "orchestrator"
+    capabilities:
+      type: "root"
+      skills:
+        - "task_routing"
+        - "agent_coordination"
+        - "request_analysis"
+      version: "1.0.0"
+      subagents:
+        - "ordering"
+        - "planning"
+    key_file: "keys/root_agent.key"
+
+  ordering:
+    did: "did:sage:ethereum:ordering_agent_001"
+    name: "Ordering Agent"
+    description: "Specialized agent for handling orders and purchases"
+    endpoint: "http://localhost:8083"
+    type: "specialist"
+    capabilities:
+      type: "ordering"
+      skills:
+        - "order_processing"
+        - "purchase_management"
+        - "shopping_assistance"
+      version: "1.0.0"
+      supported_vendors:
+        - "amazon"
+        - "ebay"
+        - "local_stores"
+    key_file: "keys/ordering_agent.key"
+
+  planning:
+    did: "did:sage:ethereum:planning_agent_001"
+    name: "Planning Agent"
+    description: "Specialized agent for trip and schedule planning"
+    endpoint: "http://localhost:8084"
+    type: "specialist"
+    capabilities:
+      type: "planning"
+      skills:
+        - "trip_planning"
+        - "schedule_optimization"
+        - "route_planning"
+      version: "1.0.0"
+      supported_features:
+        - "multi_destination"
+        - "budget_optimization"
+        - "time_constraints"
+    key_file: "keys/planning_agent.key"
+
+  client:
+    did: "did:sage:ethereum:client_agent_001"
+    name: "Client Agent"
+    description: "Frontend client agent for user interactions"
+    endpoint: "http://localhost:8085"
+    type: "client"
+    capabilities:
+      type: "client"
+      skills:
+        - "user_interaction"
+        - "request_handling"
+        - "response_formatting"
+      version: "1.0.0"
+    key_file: "keys/client_agent.key"
+
+# Network Configuration
+network:
+  chain: "local"  # local, ethereum, sepolia, kaia, kairos
+  confirmation_blocks: 3
+  gas_limit: 500000
