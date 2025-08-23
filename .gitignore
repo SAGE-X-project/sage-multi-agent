@@ -1,0 +1,175 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# Build directories
+bin/
+dist/
+build/
+
+# Binary files (from direct builds)
+/cli/cli
+/cli/root/root
+/cli/ordering/ordering
+/cli/planning/planning
+/cli/register/register
+/client/client
+/client/enhanced_client
+/root
+/ordering
+/planning
+/cli
+/register
+/client
+/enhanced_client
+/main
+/enhanced_main
+
+# IDE specific files
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Keys and secrets
+keys/
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+private_key.txt
+generated_agent_keys.json
+all_keys.json
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+.temp/
+tmp/
+temp/
+
+# PID files
+.pids
+*.pid
+
+# Cache directories
+.cache/
+cache/
+
+# Debug files
+debug
+debug.test
+*.prof
+*.trace
+
+# Configuration files with sensitive data
+configs/*_local.yaml
+configs/*.local.yaml
+agent_config_local.yaml
+agent_registration_local.yaml
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Blockchain/Ethereum related
+keystore/
+geth/
+.ethereum/
+
+# Node modules (if any frontend integration)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python virtual environment (if any Python scripts)
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Backup files
+*.bak
+*.backup
+*.old
+backup/
+
+# Generated documentation
+docs/_build/
+docs/site/
+
+# Contract artifacts (keep only source)
+artifacts/
+typechain/
+typechain-types/
+
+# Hardhat files (if using)
+cache/
+artifacts/
+
+# Test output
+test-results/
+test-reports/
+
+# Performance profiling
+*.pprof
+*.heap
+*.allocs
+*.block
+*.mutex
+
+# Custom ignore patterns for this project
+/generated_*
+/all_keys.json
