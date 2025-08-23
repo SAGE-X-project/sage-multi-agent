@@ -29,6 +29,9 @@ type Client struct {
 
 	// Buffered channel of outbound messages
 	send chan []byte
+	
+	// Channel to signal when client is done
+	done chan struct{}
 }
 
 // NewClient creates a new client instance
@@ -37,6 +40,7 @@ func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 		hub:  hub,
 		conn: conn,
 		send: make(chan []byte, 256),
+		done: make(chan struct{}),
 	}
 }
 
@@ -81,6 +85,7 @@ func (c *Client) readPump() {
 	defer func() {
 		c.hub.unregister <- c
 		c.conn.Close()
+		close(c.done) // Signal that client is done
 	}()
 
 	c.conn.SetReadLimit(maxMessageSize)
