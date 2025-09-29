@@ -5,7 +5,7 @@
 set -e
 
 echo "======================================"
-echo "🚀 Starting Fixed Backend Services"
+echo " Starting Fixed Backend Services"
 echo "======================================"
 echo ""
 
@@ -25,9 +25,9 @@ cd "$PROJECT_ROOT"
 # Load local environment
 if [ -f ".env.local" ]; then
     export $(grep -v '^#' .env.local | xargs)
-    echo -e "${GREEN}✅ Loaded .env.local${NC}"
+    echo -e "${GREEN} Loaded .env.local${NC}"
 else
-    echo -e "${YELLOW}⚠️  No .env.local found, using defaults${NC}"
+    echo -e "${YELLOW}  No .env.local found, using defaults${NC}"
 fi
 
 # Export configuration paths
@@ -48,7 +48,7 @@ start_service() {
     
     # Check if process is still running
     if ! ps -p $pid > /dev/null 2>&1; then
-        echo -e "${RED}❌ $name failed to start${NC}"
+        echo -e "${RED} $name failed to start${NC}"
         return 1
     fi
     
@@ -66,38 +66,38 @@ echo ""
 # Start Client Server
 if start_service "Client Server" \
     "go run client/main.go --port 8086 --root-url http://localhost:8080"; then
-    echo -e "${GREEN}✅ Client Server started${NC}"
+    echo -e "${GREEN} Client Server started${NC}"
 else
-    echo -e "${RED}❌ Client Server failed${NC}"
+    echo -e "${RED} Client Server failed${NC}"
 fi
 
 # Start Root Agent with fixed code and skip verification
 if start_service "Root Agent (Fixed)" \
     "go run cli/root/main_fixed.go --port 8080 --ordering-url http://localhost:8083 --planning-url http://localhost:8084 --skip-verification"; then
-    echo -e "${GREEN}✅ Root Agent started${NC}"
+    echo -e "${GREEN} Root Agent started${NC}"
 else
-    echo -e "${RED}❌ Root Agent failed${NC}"
+    echo -e "${RED} Root Agent failed${NC}"
 fi
 
 # Start Ordering Agent
 if start_service "Ordering Agent" \
     "go run cli/ordering/main.go --port 8083"; then
-    echo -e "${GREEN}✅ Ordering Agent started${NC}"
+    echo -e "${GREEN} Ordering Agent started${NC}"
 else
-    echo -e "${RED}❌ Ordering Agent failed${NC}"
+    echo -e "${RED} Ordering Agent failed${NC}"
 fi
 
 # Start Planning Agent
 if start_service "Planning Agent" \
     "go run cli/planning/main.go --port 8084"; then
-    echo -e "${GREEN}✅ Planning Agent started${NC}"
+    echo -e "${GREEN} Planning Agent started${NC}"
 else
-    echo -e "${RED}❌ Planning Agent failed${NC}"
+    echo -e "${RED} Planning Agent failed${NC}"
 fi
 
 echo ""
 echo "======================================"
-echo -e "${GREEN}✅ Backend services starting!${NC}"
+echo -e "${GREEN} Backend services starting!${NC}"
 echo "======================================"
 echo ""
 echo "Services:"

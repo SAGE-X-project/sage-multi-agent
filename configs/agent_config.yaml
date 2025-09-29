@@ -58,6 +58,25 @@ agents:
         - "time_constraints"
     key_file: "keys/planning_agent.key"
 
+  payment:
+    did: "did:sage:ethereum:payment_agent_001"
+    name: "Payment Agent"
+    description: "Specialized agent for handling cryptocurrency payments"
+    endpoint: "http://localhost:8083"
+    type: "specialist"
+    capabilities:
+      type: "payment"
+      skills:
+        - "crypto_payment"
+        - "wallet_management"
+        - "transaction_processing"
+      version: "1.0.0"
+      supported_currencies:
+        - "ETH"
+        - "USDC"
+        - "USDT"
+    key_file: "keys/payment_agent.key"
+
   client:
     did: "did:sage:ethereum:client_agent_001"
     name: "Client Agent"

@@ -5,7 +5,7 @@
 set -e
 
 echo "======================================"
-echo "🚀 Starting Simplified Backend Services"
+echo " Starting Simplified Backend Services"
 echo "======================================"
 echo ""
 
@@ -24,9 +24,9 @@ cd "$PROJECT_ROOT"
 # Load local environment
 if [ -f ".env.local" ]; then
     export $(grep -v '^#' .env.local | xargs)
-    echo -e "${GREEN}✅ Loaded .env.local${NC}"
+    echo -e "${GREEN} Loaded .env.local${NC}"
 else
-    echo -e "${YELLOW}⚠️  No .env.local found, using defaults${NC}"
+    echo -e "${YELLOW}  No .env.local found, using defaults${NC}"
 fi
 
 # Function to start a service
@@ -62,7 +62,7 @@ start_service "Planning Agent" \
 
 echo ""
 echo "======================================"
-echo -e "${GREEN}✅ All backend services started!${NC}"
+echo -e "${GREEN} All backend services started!${NC}"
 echo "======================================"
 echo ""
 echo "Services running:"

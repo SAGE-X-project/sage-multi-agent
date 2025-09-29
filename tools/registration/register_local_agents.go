@@ -91,11 +91,11 @@ func main() {
 	}
 
 	// Register each agent
-	fmt.Println("🚀 Starting Agent Registration on Local Blockchain")
+	fmt.Println(" Starting Agent Registration on Local Blockchain")
 	fmt.Println("================================================")
-	fmt.Printf("📍 Contract: %s\n", *contractAddr)
-	fmt.Printf("🔗 RPC: %s\n", *rpcURL)
-	fmt.Printf("👤 Registrar: %s\n", manager.fromAddress.Hex())
+	fmt.Printf(" Contract: %s\n", *contractAddr)
+	fmt.Printf(" RPC: %s\n", *rpcURL)
+	fmt.Printf(" Registrar: %s\n", manager.fromAddress.Hex())
 	fmt.Println("================================================\n")
 
 	for _, agent := range demoData.Agents {
@@ -108,31 +108,31 @@ func main() {
 			}
 		}
 		if agentKey == nil {
-			log.Printf("❌ No key found for agent %s", agent.Name)
+			log.Printf(" No key found for agent %s", agent.Name)
 			continue
 		}
 
 		if err := manager.RegisterAgentWithKey(agent, agentKey); err != nil {
-			log.Printf("❌ Failed to register %s: %v", agent.Name, err)
+			log.Printf(" Failed to register %s: %v", agent.Name, err)
 			continue
 		}
-		fmt.Printf("✅ Successfully registered %s\n", agent.Name)
+		fmt.Printf(" Successfully registered %s\n", agent.Name)
 		time.Sleep(2 * time.Second) // Wait between registrations
 	}
 
 	fmt.Println("\n================================================")
-	fmt.Println("🎉 Agent Registration Complete!")
+	fmt.Println(" Agent Registration Complete!")
 	fmt.Println("================================================")
 
 	// Verify registrations
-	fmt.Println("\n📋 Verifying Registrations:")
+	fmt.Println("\n Verifying Registrations:")
 	for _, agent := range demoData.Agents {
 		if registered, err := manager.VerifyRegistration(agent.DID); err != nil {
-			fmt.Printf("  ❌ %s: Error checking - %v\n", agent.Name, err)
+			fmt.Printf("   %s: Error checking - %v\n", agent.Name, err)
 		} else if registered {
-			fmt.Printf("  ✅ %s: Registered\n", agent.Name)
+			fmt.Printf("   %s: Registered\n", agent.Name)
 		} else {
-			fmt.Printf("  ❌ %s: Not found\n", agent.Name)
+			fmt.Printf("   %s: Not found\n", agent.Name)
 		}
 	}
 }
@@ -221,7 +221,7 @@ func NewRegistrationManager(rpcURL, contractAddr, privateKeyHex, abiPath string)
 }
 
 func (rm *RegistrationManager) RegisterAgentWithKey(agent DemoAgent, agentKey *AgentKeyData) error {
-	fmt.Printf("\n📝 Registering %s...\n", agent.Name)
+	fmt.Printf("\n Registering %s...\n", agent.Name)
 	fmt.Printf("   DID: %s\n", agent.DID)
 	fmt.Printf("   Type: %s\n", agent.Metadata.Type)
 	fmt.Printf("   Endpoint: %s\n", agent.Metadata.Endpoint)

@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/types"
 	"github.com/sage-x-project/sage/core/rfc9421"
 )
 

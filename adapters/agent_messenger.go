@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sage-multi-agent/config"
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/types"
 	"github.com/sage-x-project/sage/core/rfc9421"
 )
 

@@ -33,9 +33,9 @@ build_component() {
     
     echo -e "${GREEN}Building $name...${NC}"
     if go build -o "$output" "$source"; then
-        echo -e "${GREEN}✅ $name built successfully${NC}"
+        echo -e "${GREEN} $name built successfully${NC}"
     else
-        echo -e "${RED}❌ Failed to build $name${NC}"
+        echo -e "${RED} Failed to build $name${NC}"
         exit 1
     fi
 }
@@ -64,7 +64,7 @@ build_component "Enhanced Client Server" "./client/enhanced_main.go" "bin/enhanc
 
 echo ""
 echo "======================================"
-echo -e "${GREEN}✅ All components built successfully!${NC}"
+echo -e "${GREEN} All components built successfully!${NC}"
 echo "======================================"
 echo ""
 echo "Binaries are available in the 'bin/' directory:"

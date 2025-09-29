@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/config"
 	"github.com/sage-x-project/sage/core"
 	"github.com/sage-x-project/sage/core/rfc9421"
 	"github.com/sage-x-project/sage/did"

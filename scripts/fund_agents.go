@@ -89,7 +89,7 @@ func main() {
 	}
 
 	fmt.Printf("========================================\n")
-	fmt.Printf("💰 Agent Funding Tool\n")
+	fmt.Printf(" Agent Funding Tool\n")
 	fmt.Printf("========================================\n")
 	fmt.Printf("Funding Account: %s\n", fundingAddress.Hex())
 	fmt.Printf("Balance: %s ETH\n", weiToEther(balance))
@@ -116,20 +116,20 @@ func main() {
 			keyPath = fmt.Sprintf("%s/%s_agent.key", *keysDir, agentType)
 			keyData, err = ioutil.ReadFile(keyPath)
 			if err != nil {
-				fmt.Printf("⚠️  Could not read key for %s: %v\n", agentType, err)
+				fmt.Printf("  Could not read key for %s: %v\n", agentType, err)
 				continue
 			}
 		}
 
 		var keyInfo AgentKeyInfo
 		if err := json.Unmarshal(keyData, &keyInfo); err != nil {
-			fmt.Printf("⚠️  Could not parse key for %s: %v\n", agentType, err)
+			fmt.Printf("  Could not parse key for %s: %v\n", agentType, err)
 			continue
 		}
 
 		// Skip if no address
 		if keyInfo.Address == "" {
-			fmt.Printf("⚠️  No address found for %s agent\n", agentType)
+			fmt.Printf("  No address found for %s agent\n", agentType)
 			continue
 		}
 
@@ -138,22 +138,22 @@ func main() {
 		// Check agent's current balance
 		agentBalance, err := client.BalanceAt(context.Background(), agentAddress, nil)
 		if err != nil {
-			fmt.Printf("❌ Failed to get balance for %s: %v\n", agentType, err)
+			fmt.Printf(" Failed to get balance for %s: %v\n", agentType, err)
 			continue
 		}
 
-		fmt.Printf("📊 %s Agent:\n", strings.Title(agentType))
+		fmt.Printf(" %s Agent:\n", strings.Title(agentType))
 		fmt.Printf("   Address: %s\n", agentAddress.Hex())
 		fmt.Printf("   Current Balance: %s ETH\n", weiToEther(agentBalance))
 
 		// Skip if already has sufficient balance
 		if agentBalance.Cmp(amountWei) >= 0 {
-			fmt.Printf("   ✅ Already has sufficient balance\n\n")
+			fmt.Printf("    Already has sufficient balance\n\n")
 			continue
 		}
 
 		if *dryRun {
-			fmt.Printf("   🔍 [DRY RUN] Would send %s ETH\n\n", *amountEther)
+			fmt.Printf("    [DRY RUN] Would send %s ETH\n\n", *amountEther)
 			totalFunded++
 			continue
 		}
@@ -161,21 +161,21 @@ func main() {
 		// Get nonce
 		nonce, err := client.PendingNonceAt(context.Background(), fundingAddress)
 		if err != nil {
-			fmt.Printf("   ❌ Failed to get nonce: %v\n\n", err)
+			fmt.Printf("    Failed to get nonce: %v\n\n", err)
 			continue
 		}
 
 		// Get gas price
 		gasPrice, err := client.SuggestGasPrice(context.Background())
 		if err != nil {
-			fmt.Printf("   ❌ Failed to get gas price: %v\n\n", err)
+			fmt.Printf("    Failed to get gas price: %v\n\n", err)
 			continue
 		}
 
 		// Get chain ID
 		chainID, err := client.NetworkID(context.Background())
 		if err != nil {
-			fmt.Printf("   ❌ Failed to get chain ID: %v\n\n", err)
+			fmt.Printf("    Failed to get chain ID: %v\n\n", err)
 			continue
 		}
 
@@ -192,41 +192,41 @@ func main() {
 		// Sign transaction
 		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), fundingPrivateKey)
 		if err != nil {
-			fmt.Printf("   ❌ Failed to sign transaction: %v\n\n", err)
+			fmt.Printf("    Failed to sign transaction: %v\n\n", err)
 			continue
 		}
 
 		// Send transaction
 		err = client.SendTransaction(context.Background(), signedTx)
 		if err != nil {
-			fmt.Printf("   ❌ Failed to send transaction: %v\n\n", err)
+			fmt.Printf("    Failed to send transaction: %v\n\n", err)
 			continue
 		}
 
-		fmt.Printf("   💸 Sent %s ETH\n", *amountEther)
+		fmt.Printf("    Sent %s ETH\n", *amountEther)
 		fmt.Printf("   TX Hash: %s\n", signedTx.Hash().Hex())
 
 		// Wait for confirmation
 		receipt, err := bind.WaitMined(context.Background(), client, signedTx)
 		if err != nil {
-			fmt.Printf("   ⚠️  Failed to wait for confirmation: %v\n\n", err)
+			fmt.Printf("     Failed to wait for confirmation: %v\n\n", err)
 			continue
 		}
 
 		if receipt.Status == 0 {
-			fmt.Printf("   ❌ Transaction failed\n\n")
+			fmt.Printf("    Transaction failed\n\n")
 			continue
 		}
 
-		fmt.Printf("   ✅ Confirmed in block %d\n\n", receipt.BlockNumber.Uint64())
+		fmt.Printf("    Confirmed in block %d\n\n", receipt.BlockNumber.Uint64())
 		totalFunded++
 	}
 
 	fmt.Printf("========================================\n")
 	if *dryRun {
-		fmt.Printf("🔍 DRY RUN COMPLETE - Would fund %d agents\n", totalFunded)
+		fmt.Printf(" DRY RUN COMPLETE - Would fund %d agents\n", totalFunded)
 	} else {
-		fmt.Printf("✅ Successfully funded %d agents\n", totalFunded)
+		fmt.Printf(" Successfully funded %d agents\n", totalFunded)
 	}
 	fmt.Printf("========================================\n")
 }

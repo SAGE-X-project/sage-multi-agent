@@ -61,7 +61,7 @@ func main() {
 		Agents: []AgentKey{},
 	}
 
-	fmt.Println("🔑 Generating secp256k1 keys for agents...")
+	fmt.Println(" Generating secp256k1 keys for agents...")
 	fmt.Println(strings.Repeat("=", 51))
 
 	for _, agent := range demo.Agents {
@@ -116,7 +116,7 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("✅ Generated key for %s\n", agent.Name)
+		fmt.Printf(" Generated key for %s\n", agent.Name)
 		fmt.Printf("   Address: %s\n", address.Hex())
 		fmt.Printf("   Public Key: %s\n", publicKeyHex)
 		fmt.Printf("   Saved to: %s\n", keyFile)
@@ -135,7 +135,7 @@ func main() {
 	}
 
 	fmt.Println(strings.Repeat("=", 51))
-	fmt.Printf("🎉 Key generation complete!\n")
-	fmt.Printf("📁 Keys saved to: %s\n", *outputDir)
-	fmt.Printf("📋 All keys: %s\n", allKeysFile)
+	fmt.Printf(" Key generation complete!\n")
+	fmt.Printf(" Keys saved to: %s\n", *outputDir)
+	fmt.Printf(" All keys: %s\n", allKeysFile)
 }

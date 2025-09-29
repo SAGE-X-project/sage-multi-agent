@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
 // EnhancedLogServer manages WebSocket connections with production features

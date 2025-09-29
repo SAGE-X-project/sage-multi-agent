@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
 // SAGEManager manages SAGE signing and verification for the entire system

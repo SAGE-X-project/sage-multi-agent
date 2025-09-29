@@ -1,8 +1,8 @@
-module github.com/sage-multi-agent
+module github.com/sage-x-project/sage-multi-agent
 
-go 1.23.0
+go 1.24.4
 
-toolchain go1.23.1
+toolchain go1.24.7
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
@@ -34,6 +34,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
+	github.com/cloudflare/circl v1.6.1 // indirect
 	github.com/consensys/gnark-crypto v0.18.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.3.0 // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20240724233137-53bbb0ceb27a // indirect

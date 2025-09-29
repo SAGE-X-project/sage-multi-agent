@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/config"
 )
 
 // AgentServer simulates an agent server with SAGE capabilities
@@ -69,7 +69,7 @@ func main() {
 
 	// Enable SAGE globally
 	sageManager.SetEnabled(true)
-	fmt.Println("\n✅ SAGE Protocol Enabled")
+	fmt.Println("\n SAGE Protocol Enabled")
 
 	// Load agent configuration
 	agentConfig, err := config.LoadAgentConfig("")
@@ -98,7 +98,7 @@ func main() {
 			messageSigner:  signer,
 		}
 		
-		fmt.Printf("✅ Initialized %s agent with SAGE\n", agentType)
+		fmt.Printf(" Initialized %s agent with SAGE\n", agentType)
 	}
 
 	fmt.Println("\n==============================================")
@@ -142,17 +142,17 @@ func main() {
 		
 		signedMessage, err := fromAgent.messageSigner.SignMessage(ctx, message, metadata)
 		if err != nil {
-			fmt.Printf("   ❌ Signing failed: %v\n", err)
+			fmt.Printf("    Signing failed: %v\n", err)
 			continue
 		}
 		
 		if signedMessage == nil {
-			fmt.Printf("   ⚠️ SAGE is disabled\n")
+			fmt.Printf("    SAGE is disabled\n")
 			continue
 		}
 		
 		successfulSigns++
-		fmt.Printf("   ✅ Message signed (ID: %s)\n", signedMessage.MessageID[:16])
+		fmt.Printf("    Message signed (ID: %s)\n", signedMessage.MessageID[:16])
 		fmt.Printf("      Algorithm: %s\n", signedMessage.Algorithm)
 		fmt.Printf("      Signature: %d bytes\n", len(signedMessage.Signature))
 		
@@ -162,24 +162,24 @@ func main() {
 		// Verify the message (simulating the receiving agent)
 		verifyResult, err := verifier.VerifyMessage(ctx, signedMessage)
 		if err != nil {
-			fmt.Printf("   ❌ Verification error: %v\n", err)
+			fmt.Printf("    Verification error: %v\n", err)
 			failedVerifications++
 			continue
 		}
 		
 		if verifyResult.Verified {
 			successfulVerifications++
-			fmt.Printf("   ✅ Signature verified\n")
+			fmt.Printf("    Signature verified\n")
 			if details := verifyResult.Details; len(details) > 0 {
 				fmt.Printf("      Agent: %s\n", details["agent_name"])
 			}
 		} else {
 			failedVerifications++
-			fmt.Printf("   ❌ Verification failed: %s\n", verifyResult.Error)
+			fmt.Printf("    Verification failed: %s\n", verifyResult.Error)
 			
 			// In skip-on-error mode, message would still be processed
 			if verifier.IsEnabled() {
-				fmt.Printf("   ⚠️ Message would be processed anyway (skip-on-error mode)\n")
+				fmt.Printf("    Message would be processed anyway (skip-on-error mode)\n")
 			}
 		}
 		
@@ -213,20 +213,20 @@ func main() {
 	if err != nil {
 		fmt.Printf("   Error: %v\n", err)
 	} else if disabledMsg == nil {
-		fmt.Println("   ✅ Signing skipped when SAGE disabled (expected behavior)")
+		fmt.Println("    Signing skipped when SAGE disabled (expected behavior)")
 	} else {
-		fmt.Println("   ❌ Unexpected: message was signed with SAGE disabled")
+		fmt.Println("    Unexpected: message was signed with SAGE disabled")
 	}
 	
 	// Re-enable SAGE
-	fmt.Println("\n🟢 Re-enabling SAGE...")
+	fmt.Println("\n Re-enabling SAGE...")
 	sageManager.SetEnabled(true)
 	
 	enabledMsg, err := testSigner.SignMessage(ctx, "Test with SAGE enabled", nil)
 	if err != nil {
-		fmt.Printf("   ❌ Error: %v\n", err)
+		fmt.Printf("    Error: %v\n", err)
 	} else if enabledMsg != nil {
-		fmt.Println("   ✅ Signing works when SAGE enabled")
+		fmt.Println("    Signing works when SAGE enabled")
 		fmt.Printf("   Message ID: %s\n", enabledMsg.MessageID)
 	}
 	
@@ -239,11 +239,11 @@ func main() {
 		headers, err := agent.messageSigner.SignRequest(ctx, "POST", "/api/message", 
 			[]byte(`{"action": "test", "data": "sample"}`))
 		if err != nil {
-			fmt.Printf("❌ %s agent failed to sign request: %v\n", agentType, err)
+			fmt.Printf(" %s agent failed to sign request: %v\n", agentType, err)
 			continue
 		}
 		
-		fmt.Printf("✅ %s agent signed HTTP request\n", agentType)
+		fmt.Printf(" %s agent signed HTTP request\n", agentType)
 		fmt.Printf("   Headers: %d\n", len(headers))
 		fmt.Printf("   X-Agent-DID: %s\n", headers["X-Agent-DID"])
 		fmt.Printf("   X-Signature-Algorithm: %s\n", headers["X-Signature-Algorithm"])
@@ -252,11 +252,11 @@ func main() {
 		body := []byte(`{"action": "test", "data": "sample"}`)
 		verifyResult, err := verifier.VerifyRequestHeaders(ctx, headers, body)
 		if err != nil {
-			fmt.Printf("   ❌ Header verification error: %v\n", err)
+			fmt.Printf("    Header verification error: %v\n", err)
 		} else if verifyResult.Verified {
-			fmt.Printf("   ✅ Request signature verified\n")
+			fmt.Printf("    Request signature verified\n")
 		} else {
-			fmt.Printf("   ❌ Request verification failed: %s\n", verifyResult.Error)
+			fmt.Printf("    Request verification failed: %s\n", verifyResult.Error)
 		}
 	}
 	
