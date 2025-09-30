@@ -7,8 +7,8 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/config"
 )
 
 // Test messages for random selection
@@ -60,7 +60,7 @@ func main() {
 	
 	// Enable SAGE
 	sageManager.SetEnabled(true)
-	fmt.Println("\n✅ SAGE Protocol enabled for all agents")
+	fmt.Println("\n SAGE Protocol enabled for all agents")
 	
 	// Create agent messenger
 	messenger := adapters.NewAgentMessenger(sageManager, verifierHelper, agentConfig)
@@ -90,12 +90,12 @@ func main() {
 		// Send message
 		conversation, err := messenger.SendMessage(ctx, fromAgent, toAgent, message, false)
 		if err != nil {
-			fmt.Printf("  ❌ Failed: %v\n", err)
+			fmt.Printf("   Failed: %v\n", err)
 			continue
 		}
 		
-		fmt.Printf("  ✅ Sent successfully (ID: %s)\n", conversation.ConversationID)
-		fmt.Printf("  📝 Details:\n")
+		fmt.Printf("   Sent successfully (ID: %s)\n", conversation.ConversationID)
+		fmt.Printf("   Details:\n")
 		fmt.Printf("     From DID: %s\n", conversation.Request.FromAgentDID)
 		fmt.Printf("     To DID: %s\n", conversation.Request.ToAgentDID)
 		fmt.Printf("     Algorithm: %s\n", conversation.Request.Algorithm)
@@ -119,10 +119,10 @@ func main() {
 	
 	conversation, err := messenger.SendMessage(ctx, fromAgent, toAgent, requestMessage, true)
 	if err != nil {
-		fmt.Printf("  ❌ Failed to send request: %v\n", err)
+		fmt.Printf("   Failed to send request: %v\n", err)
 	} else {
-		fmt.Printf("  ✅ Request sent (ID: %s)\n", conversation.ConversationID)
-		fmt.Printf("  ⏳ Expecting response...\n")
+		fmt.Printf("   Request sent (ID: %s)\n", conversation.ConversationID)
+		fmt.Printf("   Expecting response...\n")
 		
 		// Simulate creating a response
 		fmt.Printf("\n[Response] %s → %s\n", toAgent, fromAgent)
@@ -135,10 +135,10 @@ func main() {
 			responseBody,
 		)
 		if err != nil {
-			fmt.Printf("  ❌ Failed to create response: %v\n", err)
+			fmt.Printf("   Failed to create response: %v\n", err)
 		} else {
-			fmt.Printf("  ✅ Response created (ID: %s)\n", response.ResponseID)
-			fmt.Printf("  📝 Response Details:\n")
+			fmt.Printf("   Response created (ID: %s)\n", response.ResponseID)
+			fmt.Printf("   Response Details:\n")
 			fmt.Printf("     Body: %s\n", response.Body)
 			fmt.Printf("     In Response To: %s\n", response.InResponseTo.OriginalRequestID)
 			fmt.Printf("     Original Sender: %s\n", response.InResponseTo.OriginalSenderDID)
@@ -149,14 +149,14 @@ func main() {
 			// Handle the response
 			err = messenger.HandleResponse(ctx, response, signedResponse)
 			if err != nil {
-				fmt.Printf("  ❌ Failed to handle response: %v\n", err)
+				fmt.Printf("   Failed to handle response: %v\n", err)
 			} else {
-				fmt.Printf("  ✅ Response handled successfully\n")
+				fmt.Printf("   Response handled successfully\n")
 				
 				// Verify conversation is complete
 				conv, exists := messenger.GetConversation(conversation.ConversationID)
 				if exists && conv.Status == "completed" {
-					fmt.Printf("  ✅ Conversation completed successfully\n")
+					fmt.Printf("   Conversation completed successfully\n")
 				}
 			}
 		}
@@ -182,11 +182,11 @@ func main() {
 		
 		conversation, err := messenger.SendMessage(ctx, step.from, step.to, step.message, false)
 		if err != nil {
-			fmt.Printf("  ❌ Failed: %v\n", err)
+			fmt.Printf("   Failed: %v\n", err)
 			break
 		}
 		
-		fmt.Printf("  ✅ Sent (ID: %s)\n", conversation.ConversationID)
+		fmt.Printf("   Sent (ID: %s)\n", conversation.ConversationID)
 		time.Sleep(300 * time.Millisecond)
 	}
 	
@@ -212,13 +212,13 @@ func main() {
 	fmt.Printf("  Pending: %d\n", pending)
 	
 	fmt.Println("\nKey Features Demonstrated:")
-	fmt.Println("  ✅ RFC-9421 compliant message signing")
-	fmt.Println("  ✅ Agent DID identification (contract registered)")
-	fmt.Println("  ✅ Timestamp and nonce for replay protection")
-	fmt.Println("  ✅ Algorithm specification (ECDSA-secp256k1)")
-	fmt.Println("  ✅ Request-Response correlation")
-	fmt.Println("  ✅ Message digest for integrity verification")
-	fmt.Println("  ✅ Multi-agent conversation chains")
+	fmt.Println("   RFC-9421 compliant message signing")
+	fmt.Println("   Agent DID identification (contract registered)")
+	fmt.Println("   Timestamp and nonce for replay protection")
+	fmt.Println("   Algorithm specification (ECDSA-secp256k1)")
+	fmt.Println("   Request-Response correlation")
+	fmt.Println("   Message digest for integrity verification")
+	fmt.Println("   Multi-agent conversation chains")
 	
-	fmt.Println("\n✨ Agent messaging with SAGE protocol test completed!")
+	fmt.Println("\n Agent messaging with SAGE protocol test completed!")
 }

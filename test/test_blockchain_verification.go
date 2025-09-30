@@ -7,9 +7,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/config"
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/types"
 	"github.com/sage-x-project/sage/core/rfc9421"
 	"github.com/sage-x-project/sage/did"
 )
@@ -50,7 +50,7 @@ func main() {
 		log.Fatalf("DID manager is nil")
 	}
 	
-	fmt.Println("✅ Connected to blockchain")
+	fmt.Println(" Connected to blockchain")
 	
 	// Test agent registration status
 	fmt.Println("\n2. Checking Agent Registration Status")
@@ -73,12 +73,12 @@ func main() {
 		// Try to resolve agent from blockchain
 		agentMetadata, err := didManager.ResolveAgent(ctx, did.AgentDID(cfg.DID))
 		if err != nil {
-			fmt.Printf("  ❌ Not registered on blockchain: %v\n", err)
+			fmt.Printf("   Not registered on blockchain: %v\n", err)
 			continue
 		}
 		
 		if agentMetadata != nil {
-			fmt.Printf("  ✅ Registered on blockchain\n")
+			fmt.Printf("   Registered on blockchain\n")
 			fmt.Printf("     Name: %s\n", agentMetadata.Name)
 			fmt.Printf("     Active: %v\n", agentMetadata.IsActive)
 			fmt.Printf("     Owner: %s\n", agentMetadata.Owner)
@@ -87,9 +87,9 @@ func main() {
 			// Check if we can get the public key
 			pubKey, err := didManager.ResolvePublicKey(ctx, did.AgentDID(cfg.DID))
 			if err != nil {
-				fmt.Printf("     ❌ Failed to get public key: %v\n", err)
+				fmt.Printf("      Failed to get public key: %v\n", err)
 			} else if pubKey != nil {
-				fmt.Printf("     ✅ Public key retrieved\n")
+				fmt.Printf("      Public key retrieved\n")
 			}
 		}
 	}
@@ -111,7 +111,7 @@ func main() {
 	verifier := sageManager.GetVerifier()
 	verifier.SetSkipOnError(false) // Reject messages that fail verification
 	
-	fmt.Println("✅ SAGE enabled with strict verification (skipOnError=false)")
+	fmt.Println(" SAGE enabled with strict verification (skipOnError=false)")
 	
 	// Test signing
 	fmt.Println("\n4. Testing Message Signing and Verification")
@@ -134,7 +134,7 @@ func main() {
 		log.Fatalf("Failed to sign message: %v", err)
 	}
 	
-	fmt.Printf("✅ Message signed by root agent\n")
+	fmt.Printf(" Message signed by root agent\n")
 	fmt.Printf("   Message ID: %s\n", signedMessage.MessageID)
 	fmt.Printf("   Algorithm: %s\n", signedMessage.Algorithm)
 	
@@ -145,7 +145,7 @@ func main() {
 	verifyResult, err := verifier.VerifyMessage(ctx, signedMessage)
 	
 	if err != nil {
-		fmt.Printf("❌ Verification error: %v\n", err)
+		fmt.Printf(" Verification error: %v\n", err)
 		fmt.Printf("   This means the message would be REJECTED\n")
 		
 		// Check if it's a blockchain connection issue
@@ -158,13 +158,13 @@ func main() {
 			}
 		}
 	} else if verifyResult.Verified {
-		fmt.Printf("✅ Message verified successfully using blockchain!\n")
+		fmt.Printf(" Message verified successfully using blockchain!\n")
 		fmt.Printf("   Agent DID: %s\n", verifyResult.AgentDID)
 		for key, value := range verifyResult.Details {
 			fmt.Printf("   %s: %s\n", key, value)
 		}
 	} else {
-		fmt.Printf("❌ Verification failed\n")
+		fmt.Printf(" Verification failed\n")
 		fmt.Printf("   Error: %s\n", verifyResult.Error)
 		fmt.Printf("   Message would be REJECTED\n")
 	}
@@ -183,17 +183,17 @@ func main() {
 		if err != nil {
 			log.Printf("Failed to sign ordering message: %v", err)
 		} else {
-			fmt.Printf("✅ Ordering agent signed message\n")
+			fmt.Printf(" Ordering agent signed message\n")
 			
 			// Verify ordering agent's message
 			orderingVerifyResult, err := verifier.VerifyMessage(ctx, orderingSignedMsg)
 			if err != nil {
-				fmt.Printf("❌ Ordering message verification error: %v\n", err)
+				fmt.Printf(" Ordering message verification error: %v\n", err)
 				fmt.Printf("   Message would be REJECTED by receiving agent\n")
 			} else if orderingVerifyResult.Verified {
-				fmt.Printf("✅ Ordering message verified successfully!\n")
+				fmt.Printf(" Ordering message verified successfully!\n")
 			} else {
-				fmt.Printf("❌ Ordering message verification failed: %s\n", orderingVerifyResult.Error)
+				fmt.Printf(" Ordering message verification failed: %s\n", orderingVerifyResult.Error)
 				fmt.Printf("   Message would be REJECTED\n")
 			}
 		}
@@ -217,7 +217,7 @@ func main() {
 	
 	fakeVerifyResult, err := verifier.VerifyMessage(ctx, fakeMessage)
 	if err != nil {
-		fmt.Printf("✅ Fake message correctly rejected: %v\n", err)
+		fmt.Printf(" Fake message correctly rejected: %v\n", err)
 		
 		// Create error response
 		sageError := types.NewSAGEVerificationError(
@@ -235,7 +235,7 @@ func main() {
 		fmt.Printf("     Error Code: %s\n", errorResponse.Error.Code)
 		fmt.Printf("     Error Message: %s\n", errorResponse.Error.Message)
 	} else if !fakeVerifyResult.Verified {
-		fmt.Printf("✅ Fake message verification failed as expected\n")
+		fmt.Printf(" Fake message verification failed as expected\n")
 	}
 	
 	fmt.Println("\n==============================================")
@@ -245,7 +245,7 @@ func main() {
 	// Final summary
 	fmt.Println("\nSummary:")
 	fmt.Println("---------")
-	fmt.Printf("• Blockchain connected: ✅\n")
+	fmt.Printf("• Blockchain connected: \n")
 	fmt.Printf("• Agents registered: Check above results\n")
 	fmt.Printf("• SAGE verification mode: STRICT (reject on failure)\n")
 	fmt.Printf("• Failed verifications will be REJECTED\n")

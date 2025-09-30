@@ -74,7 +74,7 @@ echo ""
 
 # Check if keys directory exists
 if [ ! -d "$KEYS_DIR" ]; then
-    echo -e "${RED}❌ Keys directory not found: $KEYS_DIR${NC}"
+    echo -e "${RED} Keys directory not found: $KEYS_DIR${NC}"
     echo "Please generate agent keys first by running the agents"
     exit 1
 fi
@@ -103,4 +103,4 @@ fi
 rm -f scripts/fund_agents
 
 echo ""
-echo -e "${GREEN}✅ Done!${NC}"
+echo -e "${GREEN} Done!${NC}"

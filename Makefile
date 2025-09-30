@@ -19,9 +19,11 @@ BINARY_CLI=cli
 BINARY_ROOT=root
 BINARY_ORDERING=ordering
 BINARY_PLANNING=planning
+BINARY_PAYMENT=payment
 BINARY_REGISTER=register
 BINARY_CLIENT=client
 BINARY_ENHANCED_CLIENT=enhanced_client
+BINARY_LAUNCHER=launcher
 
 # Directories
 BIN_DIR=bin
@@ -78,13 +80,19 @@ build: deps build-dir
 	@$(MAKE) build-cli
 	@$(MAKE) build-register
 	@$(MAKE) build-client
-	@echo "$(GREEN)✅ All components built successfully!$(NC)"
+	@echo "$(GREEN)All components built successfully!$(NC)"
 	@echo "Binaries are available in $(BIN_DIR)/"
 	@ls -la $(BIN_DIR)/
 
 # Build only agent binaries
-build-agents: build-root build-ordering build-planning
-	@echo "$(GREEN)✅ All agents built$(NC)"
+build-agents: build-root build-ordering build-planning build-payment
+	@echo "$(GREEN)All agents built$(NC)"
+
+# Build launcher
+build-launcher: build-dir
+	@echo "$(YELLOW)Building multi-agent launcher...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_LAUNCHER) ./cmd/launcher
+	@echo "$(GREEN)Launcher built$(NC)"
 
 # Create bin directory
 build-dir:
@@ -94,33 +102,38 @@ build-dir:
 build-cli: build-dir
 	@echo "$(YELLOW)Building CLI client...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLI) ./$(CLI_DIR)
-	@echo "$(GREEN)✅ CLI client built$(NC)"
+	@echo "$(GREEN)CLI client built$(NC)"
 
 build-root: build-dir
 	@echo "$(YELLOW)Building root agent...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ROOT) ./$(CLI_DIR)/root
-	@echo "$(GREEN)✅ Root agent built$(NC)"
+	@echo "$(GREEN)Root agent built$(NC)"
 
 build-ordering: build-dir
 	@echo "$(YELLOW)Building ordering agent...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ORDERING) ./$(CLI_DIR)/ordering
-	@echo "$(GREEN)✅ Ordering agent built$(NC)"
+	@echo "$(GREEN)Ordering agent built$(NC)"
 
 build-planning: build-dir
 	@echo "$(YELLOW)Building planning agent...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_PLANNING) ./$(CLI_DIR)/planning
-	@echo "$(GREEN)✅ Planning agent built$(NC)"
+	@echo "$(GREEN)Planning agent built$(NC)"
+
+build-payment: build-dir
+	@echo "$(YELLOW)Building payment agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_PAYMENT) ./$(CLI_DIR)/payment
+	@echo "$(GREEN)Payment agent built$(NC)"
 
 build-register: build-dir
 	@echo "$(YELLOW)Building registration tool...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_REGISTER) ./$(CLI_DIR)/register
-	@echo "$(GREEN)✅ Registration tool built$(NC)"
+	@echo "$(GREEN)Registration tool built$(NC)"
 
 build-client: build-dir
 	@echo "$(YELLOW)Building client servers...$(NC)"
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLIENT) ./$(CLIENT_DIR)/main.go
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ENHANCED_CLIENT) ./$(CLIENT_DIR)/enhanced_main.go
-	@echo "$(GREEN)✅ Client servers built$(NC)"
+	@echo "$(GREEN)Client servers built$(NC)"
 
 # Clean build artifacts
 clean:
@@ -129,7 +142,7 @@ clean:
 	@rm -rf $(BIN_DIR)
 	@rm -f coverage.out coverage.html
 	@find . -maxdepth 1 -type f -perm +111 -name "*" ! -name "*.sh" -delete 2>/dev/null || true
-	@echo "$(GREEN)✅ Clean complete$(NC)"
+	@echo "$(GREEN)Clean complete$(NC)"
 
 # Run tests
 test:
@@ -140,7 +153,7 @@ test:
 		./gateway/... \
 		./types/... \
 		./websocket/... 2>/dev/null || true
-	@echo "$(GREEN)✅ Tests complete$(NC)"
+	@echo "$(GREEN)Tests complete$(NC)"
 
 # Run tests with verbose output
 test-verbose:
@@ -170,18 +183,18 @@ test-coverage:
 		./types/... \
 		./websocket/...
 	@$(GOCMD) tool cover -html=coverage.out -o coverage.html 2>/dev/null || true
-	@echo "$(GREEN)✅ Coverage report generated: coverage.html$(NC)"
+	@echo "$(GREEN)Coverage report generated: coverage.html$(NC)"
 
 # Dependency management
 deps:
 	@echo "$(YELLOW)Downloading dependencies...$(NC)"
 	@$(GOGET) -v ./...
-	@echo "$(GREEN)✅ Dependencies downloaded$(NC)"
+	@echo "$(GREEN)Dependencies downloaded$(NC)"
 
 tidy:
 	@echo "$(YELLOW)Tidying go.mod...$(NC)"
 	@$(GOMOD) tidy
-	@echo "$(GREEN)✅ go.mod tidied$(NC)"
+	@echo "$(GREEN)go.mod tidied$(NC)"
 
 # Run targets (for development)
 run-root:
@@ -200,6 +213,23 @@ run-cli:
 	@echo "$(YELLOW)Starting CLI client...$(NC)"
 	@$(GOCMD) run ./$(CLI_DIR)
 
+run-payment:
+	@echo "$(YELLOW)Starting payment agent...$(NC)"
+	@$(GOCMD) run ./$(CLI_DIR)/payment -port 8085
+
+# Run multi-agent system launcher
+run: build-launcher
+	@echo "$(YELLOW)Starting SAGE Multi-Agent System...$(NC)"
+	@./$(BIN_DIR)/$(BINARY_LAUNCHER)
+
+run-sage-on: build-launcher
+	@echo "$(YELLOW)Starting Multi-Agent System with SAGE ENABLED...$(NC)"
+	@./$(BIN_DIR)/$(BINARY_LAUNCHER) -sage=true
+
+run-sage-off: build-launcher
+	@echo "$(YELLOW)Starting Multi-Agent System with SAGE DISABLED...$(NC)"
+	@./$(BIN_DIR)/$(BINARY_LAUNCHER) -sage=false
+
 # Install binaries to GOPATH/bin
 install: build
 	@echo "$(YELLOW)Installing binaries to GOPATH/bin...$(NC)"
@@ -208,7 +238,7 @@ install: build
 	@cp $(BIN_DIR)/$(BINARY_ORDERING) $(GOPATH)/bin/sage-ordering
 	@cp $(BIN_DIR)/$(BINARY_PLANNING) $(GOPATH)/bin/sage-planning
 	@cp $(BIN_DIR)/$(BINARY_REGISTER) $(GOPATH)/bin/sage-register
-	@echo "$(GREEN)✅ Installation complete$(NC)"
+	@echo "$(GREEN)Installation complete$(NC)"
 	@echo ""
 	@echo "Installed binaries:"
 	@echo "  sage-cli       - CLI client"
@@ -223,18 +253,18 @@ install: build
 fmt:
 	@echo "$(YELLOW)Formatting code...$(NC)"
 	@$(GOCMD) fmt ./...
-	@echo "$(GREEN)✅ Code formatted$(NC)"
+	@echo "$(GREEN)Code formatted$(NC)"
 
 lint:
 	@echo "$(YELLOW)Running linter...$(NC)"
 	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)golangci-lint not installed$(NC)"; exit 1; }
 	@golangci-lint run
-	@echo "$(GREEN)✅ Lint complete$(NC)"
+	@echo "$(GREEN)Lint complete$(NC)"
 
 vet:
 	@echo "$(YELLOW)Running go vet...$(NC)"
 	@$(GOCMD) vet ./...
-	@echo "$(GREEN)✅ Vet complete$(NC)"
+	@echo "$(GREEN)Vet complete$(NC)"
 
 # Quick start targets
 .PHONY: quick-start stop-all

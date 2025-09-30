@@ -120,7 +120,7 @@ Set the private key for agent registration (without 0x prefix):
 REGISTRATION_PRIVATE_KEY=your_private_key_here
 ```
 
-⚠️ **Security Warning**: Never commit private keys to version control!
+ **Security Warning**: Never commit private keys to version control!
 
 ### 5. Set API Keys
 

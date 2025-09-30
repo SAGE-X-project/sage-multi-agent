@@ -6,7 +6,7 @@
 set -e
 
 echo "======================================"
-echo "🚀 Self-Signed Agent Registration"
+echo " Self-Signed Agent Registration"
 echo "======================================"
 echo ""
 
@@ -33,21 +33,21 @@ cd "$PROJECT_ROOT"
 
 # Check if keys exist, if not generate them
 if [ ! -f "$KEYS_DIR/all_keys.json" ]; then
-    echo "🔑 Generating secp256k1 keys..."
+    echo " Generating secp256k1 keys..."
     go run tools/keygen/generate_secp256k1_keys.go \
         -output="$KEYS_DIR" \
         -demo="$DEMO_FILE"
     
     if [ ! -f "$KEYS_DIR/all_keys.json" ]; then
-        echo -e "${RED}❌ Error: Key generation failed${NC}"
+        echo -e "${RED} Error: Key generation failed${NC}"
         exit 1
     fi
-    echo -e "${GREEN}✅ Keys generated${NC}"
+    echo -e "${GREEN} Keys generated${NC}"
     echo ""
 fi
 
 # Run self-signed registration
-echo "📝 Starting self-signed registration..."
+echo " Starting self-signed registration..."
 echo ""
 
 go run tools/registration/register_self_signed.go \
@@ -60,5 +60,5 @@ go run tools/registration/register_self_signed.go \
 
 echo ""
 echo "======================================"
-echo -e "${GREEN}✅ Registration complete!${NC}"
+echo -e "${GREEN} Registration complete!${NC}"
 echo "======================================"

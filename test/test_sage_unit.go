@@ -6,8 +6,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/config"
 )
 
 func main() {
@@ -32,10 +32,10 @@ func main() {
 	for _, agent := range agents {
 		_, err := sageManager.GetOrCreateSigner(agent, verifierHelper)
 		if err != nil {
-			log.Printf("   ❌ Failed to create signer for %s: %v", agent, err)
+			log.Printf("    Failed to create signer for %s: %v", agent, err)
 			continue
 		}
-		fmt.Printf("   ✅ Created signer for %s agent\n", agent)
+		fmt.Printf("    Created signer for %s agent\n", agent)
 		
 		// Get agent DID info
 		if agentConfig, _ := config.LoadAgentConfig(""); agentConfig != nil {
@@ -67,7 +67,7 @@ func main() {
 	}
 
 	if signedMessage != nil {
-		fmt.Printf("   ✅ Message signed successfully\n")
+		fmt.Printf("    Message signed successfully\n")
 		fmt.Printf("      Message ID: %s\n", signedMessage.MessageID)
 		fmt.Printf("      Agent DID: %s\n", signedMessage.AgentDID)
 		fmt.Printf("      Algorithm: %s\n", signedMessage.Algorithm)
@@ -80,7 +80,7 @@ func main() {
 	
 	verifyResult, err := verifier.VerifyMessage(ctx, signedMessage)
 	if err != nil {
-		log.Printf("   ❌ Verification error: %v", err)
+		log.Printf("    Verification error: %v", err)
 	} else {
 		fmt.Printf("   Verification result:\n")
 		fmt.Printf("      Verified: %v\n", verifyResult.Verified)
@@ -89,9 +89,9 @@ func main() {
 			fmt.Printf("      Error: %s\n", verifyResult.Error)
 		}
 		if verifyResult.Verified {
-			fmt.Println("   ✅ Message verification successful!")
+			fmt.Println("    Message verification successful!")
 		} else {
-			fmt.Println("   ❌ Message verification failed!")
+			fmt.Println("    Message verification failed!")
 		}
 	}
 
@@ -107,7 +107,7 @@ func main() {
 	if err != nil {
 		log.Printf("   Error signing with SAGE disabled: %v", err)
 	} else if disabledSignedMsg == nil {
-		fmt.Println("   ✅ Signing skipped when SAGE disabled (as expected)")
+		fmt.Println("    Signing skipped when SAGE disabled (as expected)")
 	}
 
 	// Re-enable SAGE
@@ -129,16 +129,16 @@ func main() {
 		if err != nil {
 			log.Printf("   Failed to sign ordering message: %v", err)
 		} else if orderingMessage != nil {
-			fmt.Printf("   ✅ Ordering agent signed message\n")
+			fmt.Printf("    Ordering agent signed message\n")
 			
 			// Verify ordering agent's message
 			orderingVerifyResult, err := verifier.VerifyMessage(ctx, orderingMessage)
 			if err != nil {
-				log.Printf("   ❌ Failed to verify ordering message: %v", err)
+				log.Printf("    Failed to verify ordering message: %v", err)
 			} else {
 				fmt.Printf("   Ordering message verification: %v\n", orderingVerifyResult.Verified)
 				if orderingVerifyResult.Verified {
-					fmt.Println("   ✅ Cross-agent verification successful!")
+					fmt.Println("    Cross-agent verification successful!")
 				}
 			}
 		}
@@ -149,9 +149,9 @@ func main() {
 	
 	headers, err := rootSigner.SignRequest(ctx, "POST", "/api/test", []byte("test body"))
 	if err != nil {
-		log.Printf("   ❌ Failed to sign request: %v", err)
+		log.Printf("    Failed to sign request: %v", err)
 	} else if headers != nil {
-		fmt.Println("   ✅ Request headers signed:")
+		fmt.Println("    Request headers signed:")
 		for key, value := range headers {
 			if key == "X-Signature" {
 				fmt.Printf("      %s: [%d bytes]\n", key, len(value)/2) // hex string

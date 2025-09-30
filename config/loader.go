@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -167,7 +168,7 @@ func LoadEnv() (*EnvConfig, error) {
 // LoadAgentConfig loads the agent configuration from YAML
 func LoadAgentConfig(configPath string) (*Config, error) {
 	if configPath == "" {
-		configPath = "configs/agent_config.yaml"
+		configPath = resolveConfigPath("configs/agent_config.yaml")
 	}
 
 	data, err := ioutil.ReadFile(configPath)
@@ -189,7 +190,7 @@ func LoadAgentConfig(configPath string) (*Config, error) {
 // LoadRegistrationConfig loads the registration configuration
 func LoadRegistrationConfig(configPath string) (*RegistrationConfig, error) {
 	if configPath == "" {
-		configPath = "configs/agent_registration.yaml"
+		configPath = resolveRegistrationConfigPath("configs/agent_registration.yaml")
 	}
 
 	data, err := ioutil.ReadFile(configPath)
@@ -239,6 +240,78 @@ func (c *AgentCapabilities) ToJSON() (string, error) {
 }
 
 // Helper functions
+
+// resolveConfigPath resolves the configuration file path using environment variables or executable location
+func resolveConfigPath(defaultPath string) string {
+	// First, check for specific config file path environment variable
+	if configPath := os.Getenv("AGENT_CONFIG_PATH"); configPath != "" {
+		return configPath
+	}
+
+	// Second, check for config directory environment variable
+	if configDir := os.Getenv("SAGE_CONFIG_DIR"); configDir != "" {
+		// Use custom config directory
+		return filepath.Join(configDir, filepath.Base(defaultPath))
+	}
+
+	// Check if the default path exists relative to current working directory
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath
+	}
+
+	// Try to find config relative to executable location
+	if execPath, err := os.Executable(); err == nil {
+		// Get the directory containing the executable
+		execDir := filepath.Dir(execPath)
+
+		// Look for sage-multi-agent directory structure
+		for i := 0; i < 3; i++ {
+			potentialPath := filepath.Join(execDir, defaultPath)
+			if _, err := os.Stat(potentialPath); err == nil {
+				return potentialPath
+			}
+
+			// Try looking in parent directories
+			execDir = filepath.Dir(execDir)
+		}
+	}
+
+	// As a fallback, try looking for sage-multi-agent directory in current or parent directories
+	currentDir, _ := os.Getwd()
+	for i := 0; i < 3; i++ {
+		potentialPath := filepath.Join(currentDir, defaultPath)
+		if _, err := os.Stat(potentialPath); err == nil {
+			return potentialPath
+		}
+
+		// Check if we're inside sage-multi-agent directory
+		sageMultiAgentPath := filepath.Join(currentDir, "sage-multi-agent", defaultPath)
+		if _, err := os.Stat(sageMultiAgentPath); err == nil {
+			return sageMultiAgentPath
+		}
+
+		// Move to parent directory
+		parentDir := filepath.Dir(currentDir)
+		if parentDir == currentDir {
+			break // Reached root directory
+		}
+		currentDir = parentDir
+	}
+
+	// Return original path as last resort
+	return defaultPath
+}
+
+// resolveRegistrationConfigPath resolves the registration configuration file path
+func resolveRegistrationConfigPath(defaultPath string) string {
+	// First, check for specific registration config file path environment variable
+	if configPath := os.Getenv("REGISTRATION_CONFIG_PATH"); configPath != "" {
+		return configPath
+	}
+
+	// Fall back to the general config path resolution
+	return resolveConfigPath(defaultPath)
+}
 
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {

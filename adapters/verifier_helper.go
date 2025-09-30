@@ -6,7 +6,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/config"
 	"github.com/sage-x-project/sage/crypto"
 	"github.com/sage-x-project/sage/crypto/storage"
 	"github.com/sage-x-project/sage/did"
@@ -234,7 +234,7 @@ func (vh *VerifierHelper) VerifyOrRegisterAgent(agentType string) error {
 		return fmt.Errorf("agent %s is registered but inactive", agentCfg.Name)
 	}
 
-	log.Printf("[SUCCESS] ✓ Agent %s is registered and active", agentCfg.Name)
+	log.Printf("[SUCCESS]  Agent %s is registered and active", agentCfg.Name)
 	log.Printf("  - Owner: %s", metadata.Owner)
 	log.Printf("  - Endpoint: %s", metadata.Endpoint)
 	log.Printf("  - Created: %s", metadata.CreatedAt.Format(time.RFC3339))

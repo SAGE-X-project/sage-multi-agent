@@ -22,9 +22,9 @@ func main() {
 	// Test Ed25519
 	ed25519KeyPair, err := keys.GenerateEd25519KeyPair()
 	if err != nil {
-		log.Printf("❌ Ed25519 generation failed: %v", err)
+		log.Printf(" Ed25519 generation failed: %v", err)
 	} else {
-		fmt.Printf("✅ Ed25519 key generated\n")
+		fmt.Printf(" Ed25519 key generated\n")
 		fmt.Printf("   Type: %s\n", ed25519KeyPair.Type())
 		fmt.Printf("   ID: %s\n", ed25519KeyPair.ID())
 	}
@@ -32,9 +32,9 @@ func main() {
 	// Test Secp256k1
 	secp256k1KeyPair, err := keys.GenerateSecp256k1KeyPair()
 	if err != nil {
-		log.Printf("❌ Secp256k1 generation failed: %v", err)
+		log.Printf(" Secp256k1 generation failed: %v", err)
 	} else {
-		fmt.Printf("✅ Secp256k1 key generated\n")
+		fmt.Printf(" Secp256k1 key generated\n")
 		fmt.Printf("   Type: %s\n", secp256k1KeyPair.Type())
 		fmt.Printf("   ID: %s\n", secp256k1KeyPair.ID())
 	}
@@ -50,17 +50,17 @@ func main() {
 	// Create storage
 	fileStorage, err := storage.NewFileKeyStorage(testDir)
 	if err != nil {
-		log.Fatalf("❌ Failed to create storage: %v", err)
+		log.Fatalf(" Failed to create storage: %v", err)
 	}
-	fmt.Printf("✅ File storage created at: %s\n", testDir)
+	fmt.Printf(" File storage created at: %s\n", testDir)
 
 	// Store key
 	testKeyID := "test-agent-key"
 	err = fileStorage.Store(testKeyID, secp256k1KeyPair)
 	if err != nil {
-		log.Printf("❌ Failed to store key: %v", err)
+		log.Printf(" Failed to store key: %v", err)
 	} else {
-		fmt.Printf("✅ Key stored with ID: %s\n", testKeyID)
+		fmt.Printf(" Key stored with ID: %s\n", testKeyID)
 	}
 
 	// Check if key exists
@@ -70,9 +70,9 @@ func main() {
 	// Load key back
 	loadedKey, err := fileStorage.Load(testKeyID)
 	if err != nil {
-		log.Printf("❌ Failed to load key: %v", err)
+		log.Printf(" Failed to load key: %v", err)
 	} else {
-		fmt.Printf("✅ Key loaded successfully\n")
+		fmt.Printf(" Key loaded successfully\n")
 		fmt.Printf("   Loaded Type: %s\n", loadedKey.Type())
 		fmt.Printf("   Loaded ID: %s\n", loadedKey.ID())
 	}
@@ -80,9 +80,9 @@ func main() {
 	// List keys
 	keyList, err := fileStorage.List()
 	if err != nil {
-		log.Printf("❌ Failed to list keys: %v", err)
+		log.Printf(" Failed to list keys: %v", err)
 	} else {
-		fmt.Printf("✅ Keys in storage: %v\n", keyList)
+		fmt.Printf(" Keys in storage: %v\n", keyList)
 	}
 	fmt.Println()
 
@@ -110,26 +110,26 @@ func main() {
 	// Generate through manager
 	managerKey, err := manager.GenerateKeyPair(sagecrypto.KeyTypeSecp256k1)
 	if err != nil {
-		log.Printf("❌ Manager generation failed: %v", err)
+		log.Printf(" Manager generation failed: %v", err)
 	} else {
-		fmt.Printf("✅ Key generated via manager\n")
+		fmt.Printf(" Key generated via manager\n")
 		fmt.Printf("   Type: %s\n", managerKey.Type())
 	}
 
 	// Store through manager
 	err = manager.StoreKeyPair(managerKey)
 	if err != nil {
-		log.Printf("❌ Manager store failed: %v", err)
+		log.Printf(" Manager store failed: %v", err)
 	} else {
-		fmt.Printf("✅ Key stored via manager\n")
+		fmt.Printf(" Key stored via manager\n")
 	}
 
 	// List through manager
 	managerList, err := manager.ListKeyPairs()
 	if err != nil {
-		log.Printf("❌ Manager list failed: %v", err)
+		log.Printf(" Manager list failed: %v", err)
 	} else {
-		fmt.Printf("✅ Keys via manager: %v\n", managerList)
+		fmt.Printf(" Keys via manager: %v\n", managerList)
 	}
 
 	// Clean up

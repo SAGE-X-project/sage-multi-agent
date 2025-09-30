@@ -6,7 +6,7 @@
 set -e  # Exit on error
 
 echo "======================================"
-echo "🚀 SAGE Agent Registration (secp256k1)"
+echo " SAGE Agent Registration (secp256k1)"
 echo "======================================"
 echo ""
 
@@ -67,51 +67,51 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Check if local blockchain is running
-echo "🔍 Checking blockchain connection..."
+echo " Checking blockchain connection..."
 if ! curl -s -X POST --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' $RPC_URL > /dev/null; then
-    echo -e "${RED}❌ Error: Cannot connect to blockchain at $RPC_URL${NC}"
+    echo -e "${RED} Error: Cannot connect to blockchain at $RPC_URL${NC}"
     echo ""
     echo "Please make sure the local blockchain is running:"
     echo "  cd sage/contracts/ethereum"
     echo "  npx hardhat node"
     exit 1
 fi
-echo -e "${GREEN}✅ Blockchain connected${NC}"
+echo -e "${GREEN} Blockchain connected${NC}"
 
 # Check if contract is deployed
-echo "🔍 Checking contract deployment..."
+echo " Checking contract deployment..."
 CODE=$(curl -s -X POST --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getCode\",\"params\":[\"$CONTRACT_ADDRESS\", \"latest\"],\"id\":1}" $RPC_URL | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
 if [ "$CODE" == "0x" ] || [ -z "$CODE" ]; then
-    echo -e "${RED}❌ Error: No contract found at $CONTRACT_ADDRESS${NC}"
+    echo -e "${RED} Error: No contract found at $CONTRACT_ADDRESS${NC}"
     echo ""
     echo "Please deploy the SageRegistryV2 contract first:"
     echo "  cd sage/contracts/ethereum"
     echo "  npx hardhat run scripts/deploy-v2.js --network localhost"
     exit 1
 fi
-echo -e "${GREEN}✅ Contract found at $CONTRACT_ADDRESS${NC}"
+echo -e "${GREEN} Contract found at $CONTRACT_ADDRESS${NC}"
 
 # Check if demo file exists
 if [ ! -f "$DEMO_FILE" ]; then
-    echo -e "${RED}❌ Error: Demo file not found at $DEMO_FILE${NC}"
+    echo -e "${RED} Error: Demo file not found at $DEMO_FILE${NC}"
     exit 1
 fi
-echo -e "${GREEN}✅ Demo file found${NC}"
+echo -e "${GREEN} Demo file found${NC}"
 
 # Check if ABI file exists
 if [ ! -f "$ABI_FILE" ]; then
-    echo -e "${RED}❌ Error: ABI file not found at $ABI_FILE${NC}"
+    echo -e "${RED} Error: ABI file not found at $ABI_FILE${NC}"
     echo ""
     echo "Please compile the contracts first:"
     echo "  cd sage/contracts/ethereum"
     echo "  npx hardhat compile"
     exit 1
 fi
-echo -e "${GREEN}✅ ABI file found${NC}"
+echo -e "${GREEN} ABI file found${NC}"
 
 echo ""
 echo "======================================"
-echo "📋 Registration Configuration"
+echo " Registration Configuration"
 echo "======================================"
 echo "Contract: $CONTRACT_ADDRESS"
 echo "RPC URL: $RPC_URL"
@@ -124,7 +124,7 @@ echo ""
 cd "$PROJECT_ROOT"
 
 # Step 1: Generate secp256k1 keys
-echo "🔑 Step 1: Generating secp256k1 keys for agents..."
+echo " Step 1: Generating secp256k1 keys for agents..."
 echo ""
 
 go run tools/keygen/generate_secp256k1_keys.go \
@@ -132,16 +132,16 @@ go run tools/keygen/generate_secp256k1_keys.go \
     -demo="$DEMO_FILE"
 
 if [ ! -f "$KEYS_DIR/all_keys.json" ]; then
-    echo -e "${RED}❌ Error: Key generation failed${NC}"
+    echo -e "${RED} Error: Key generation failed${NC}"
     exit 1
 fi
 
 echo ""
-echo -e "${GREEN}✅ Keys generated successfully${NC}"
+echo -e "${GREEN} Keys generated successfully${NC}"
 echo ""
 
 # Step 2: Register agents with secp256k1 keys
-echo "📝 Step 2: Registering agents on blockchain..."
+echo " Step 2: Registering agents on blockchain..."
 echo ""
 
 go run tools/registration/register_with_secp256k1.go \
@@ -154,7 +154,7 @@ go run tools/registration/register_with_secp256k1.go \
 
 echo ""
 echo "======================================"
-echo -e "${GREEN}✅ Registration process complete!${NC}"
+echo -e "${GREEN} Registration process complete!${NC}"
 echo "======================================"
 echo ""
 echo "Next steps:"

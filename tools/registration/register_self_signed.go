@@ -100,30 +100,30 @@ func main() {
 	fundingPubKey := fundingKey.Public().(*ecdsa.PublicKey)
 	fundingAddress := crypto.PubkeyToAddress(*fundingPubKey)
 
-	fmt.Println("🚀 Starting Self-Signed Agent Registration")
+	fmt.Println(" Starting Self-Signed Agent Registration")
 	fmt.Println("================================================")
-	fmt.Printf("📍 Contract: %s\n", *contractAddr)
-	fmt.Printf("🔗 RPC: %s\n", *rpcURL)
-	fmt.Printf("💰 Funding from: %s\n", fundingAddress.Hex())
+	fmt.Printf(" Contract: %s\n", *contractAddr)
+	fmt.Printf(" RPC: %s\n", *rpcURL)
+	fmt.Printf(" Funding from: %s\n", fundingAddress.Hex())
 	fmt.Println("================================================\n")
 
 	// Step 1: Fund agents with ETH for gas
-	fmt.Println("💰 Step 1: Funding agents with ETH...")
+	fmt.Println(" Step 1: Funding agents with ETH...")
 	for _, agent := range demoData.Agents {
 		agentKey, found := agentKeys[agent.Name]
 		if !found {
-			log.Printf("❌ No key found for %s, skipping", agent.Name)
+			log.Printf(" No key found for %s, skipping", agent.Name)
 			continue
 		}
 
 		if err := fundAgent(client, fundingKey, chainID, agentKey.Address); err != nil {
-			log.Printf("❌ Failed to fund %s: %v", agent.Name, err)
+			log.Printf(" Failed to fund %s: %v", agent.Name, err)
 			continue
 		}
-		fmt.Printf("✅ Funded %s (%s)\n", agent.Name, agentKey.Address)
+		fmt.Printf(" Funded %s (%s)\n", agent.Name, agentKey.Address)
 	}
 
-	fmt.Println("\n📝 Step 2: Agents self-registering...")
+	fmt.Println("\n Step 2: Agents self-registering...")
 	contractAddress := common.HexToAddress(*contractAddr)
 
 	// Step 2: Each agent registers itself
@@ -137,26 +137,26 @@ func main() {
 		agent.Metadata.PublicKey = agentKey.PublicKey
 
 		if err := selfRegisterAgent(client, contractABI, contractAddress, chainID, agent, agentKey); err != nil {
-			log.Printf("❌ Failed to register %s: %v", agent.Name, err)
+			log.Printf(" Failed to register %s: %v", agent.Name, err)
 			continue
 		}
-		fmt.Printf("✅ Successfully registered %s\n", agent.Name)
+		fmt.Printf(" Successfully registered %s\n", agent.Name)
 		time.Sleep(2 * time.Second)
 	}
 
 	fmt.Println("\n================================================")
-	fmt.Println("🎉 Agent Registration Complete!")
+	fmt.Println(" Agent Registration Complete!")
 	fmt.Println("================================================")
 
 	// Verify registrations
-	fmt.Println("\n📋 Verifying Registrations:")
+	fmt.Println("\n Verifying Registrations:")
 	for _, agent := range demoData.Agents {
 		if registered, err := verifyRegistration(client, contractABI, contractAddress, agent.DID); err != nil {
-			fmt.Printf("  ❌ %s: Error checking - %v\n", agent.Name, err)
+			fmt.Printf("   %s: Error checking - %v\n", agent.Name, err)
 		} else if registered {
-			fmt.Printf("  ✅ %s: Registered\n", agent.Name)
+			fmt.Printf("   %s: Registered\n", agent.Name)
 		} else {
-			fmt.Printf("  ❌ %s: Not found\n", agent.Name)
+			fmt.Printf("   %s: Not found\n", agent.Name)
 		}
 	}
 }
@@ -214,7 +214,7 @@ func selfRegisterAgent(
 	agent DemoAgent,
 	agentKey AgentKey,
 ) error {
-	fmt.Printf("\n📝 Registering %s (self-signed)...\n", agent.Name)
+	fmt.Printf("\n Registering %s (self-signed)...\n", agent.Name)
 	fmt.Printf("   DID: %s\n", agent.DID)
 	fmt.Printf("   Address: %s\n", agentKey.Address)
 

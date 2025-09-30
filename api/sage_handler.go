@@ -5,8 +5,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/types"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
 // SAGEHandler handles SAGE-related API endpoints

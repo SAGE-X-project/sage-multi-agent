@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/sage-multi-agent/adapters"
-	"github.com/sage-multi-agent/config"
+	"github.com/sage-x-project/sage-multi-agent/adapters"
+	"github.com/sage-x-project/sage-multi-agent/config"
 	"github.com/sage-x-project/sage/core/rfc9421"
 )
 
@@ -64,7 +64,7 @@ func main() {
 		log.Fatalf("Failed to sign message: %v", err)
 	}
 	
-	fmt.Printf("✅ Message signed\n")
+	fmt.Printf(" Message signed\n")
 	fmt.Printf("   Message ID: %s\n", signedMessage.MessageID)
 	fmt.Printf("   Algorithm: %s\n", signedMessage.Algorithm)
 	fmt.Printf("   Signature: %x\n", signedMessage.Signature[:16])
@@ -109,18 +109,18 @@ func main() {
 	)
 	
 	if sigValid {
-		fmt.Printf("\n✅ Manual signature verification successful!\n")
+		fmt.Printf("\n Manual signature verification successful!\n")
 	} else {
-		fmt.Printf("\n❌ Manual signature verification failed\n")
+		fmt.Printf("\n Manual signature verification failed\n")
 		
 		// Try alternative verification
 		r, s, err := decodeSignature(signedMessage.Signature)
 		if err == nil {
 			valid := ecdsa.Verify(pubKey, hash.Bytes(), r, s)
 			if valid {
-				fmt.Printf("✅ Alternative ECDSA verification successful!\n")
+				fmt.Printf(" Alternative ECDSA verification successful!\n")
 			} else {
-				fmt.Printf("❌ Alternative ECDSA verification also failed\n")
+				fmt.Printf(" Alternative ECDSA verification also failed\n")
 			}
 		}
 	}
@@ -143,7 +143,7 @@ func main() {
 		log.Fatalf("Failed to sign ordering message: %v", err)
 	}
 	
-	fmt.Printf("✅ Ordering agent signed message\n")
+	fmt.Printf(" Ordering agent signed message\n")
 	fmt.Printf("   Message: %s\n", orderingMessage)
 	fmt.Printf("   Message ID: %s\n", orderingSignedMsg.MessageID[:16])
 	
@@ -179,9 +179,9 @@ func main() {
 	)
 	
 	if orderingSigValid {
-		fmt.Printf("✅ Cross-agent signature verification successful!\n")
+		fmt.Printf(" Cross-agent signature verification successful!\n")
 	} else {
-		fmt.Printf("❌ Cross-agent signature verification failed\n")
+		fmt.Printf(" Cross-agent signature verification failed\n")
 	}
 	
 	// Test 3: Test all agents can sign
@@ -192,19 +192,19 @@ func main() {
 	for _, agentType := range agents {
 		signer, err := sageManager.GetOrCreateSigner(agentType, verifierHelper)
 		if err != nil {
-			fmt.Printf("❌ %s: Failed to create signer: %v\n", agentType, err)
+			fmt.Printf(" %s: Failed to create signer: %v\n", agentType, err)
 			continue
 		}
 		
 		msg := fmt.Sprintf("Test message from %s agent", agentType)
 		signed, err := signer.SignMessage(ctx, msg, nil)
 		if err != nil {
-			fmt.Printf("❌ %s: Failed to sign: %v\n", agentType, err)
+			fmt.Printf(" %s: Failed to sign: %v\n", agentType, err)
 			continue
 		}
 		
 		if signed != nil {
-			fmt.Printf("✅ %s: Successfully signed (ID: %s)\n", agentType, signed.MessageID[:16])
+			fmt.Printf(" %s: Successfully signed (ID: %s)\n", agentType, signed.MessageID[:16])
 			
 			// Get agent DID
 			if cfg, exists := agentConfig.Agents[agentType]; exists {
@@ -223,7 +223,7 @@ func main() {
 		log.Fatalf("Failed to sign request: %v", err)
 	}
 	
-	fmt.Printf("✅ HTTP Request signed\n")
+	fmt.Printf(" HTTP Request signed\n")
 	for key, value := range headers {
 		if key == "X-Signature" {
 			fmt.Printf("   %s: %s...%s\n", key, value[:16], value[len(value)-16:])
@@ -262,9 +262,9 @@ func main() {
 		)
 		
 		if httpSigValid {
-			fmt.Printf("\n✅ HTTP request signature verification successful!\n")
+			fmt.Printf("\n HTTP request signature verification successful!\n")
 		} else {
-			fmt.Printf("\n❌ HTTP request signature verification failed\n")
+			fmt.Printf("\n HTTP request signature verification failed\n")
 		}
 	}
 	

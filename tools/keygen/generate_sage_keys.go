@@ -39,7 +39,7 @@ type UpdatedMetadata struct {
 }
 
 func main() {
-	fmt.Println("🔑 Generating secp256k1 keys using SAGE library...")
+	fmt.Println(" Generating secp256k1 keys using SAGE library...")
 	fmt.Println("================================================")
 
 	// Agent names
@@ -83,7 +83,7 @@ func main() {
 
 		generatedKeys = append(generatedKeys, keyData)
 
-		fmt.Printf("  ✅ Generated for %s:\n", name)
+		fmt.Printf("   Generated for %s:\n", name)
 		fmt.Printf("     Address: %s\n", address.Hex())
 		fmt.Printf("     DID: %s\n", did)
 		fmt.Printf("     Public Key Length: %d bytes\n", len(publicKeyBytes))
@@ -112,9 +112,9 @@ func main() {
 	}
 
 	fmt.Println("\n================================================")
-	fmt.Println("✅ Keys generated successfully!")
-	fmt.Println("📁 Keys saved to: generated_agent_keys.json")
-	fmt.Println("\n📋 Next Steps:")
+	fmt.Println(" Keys generated successfully!")
+	fmt.Println(" Keys saved to: generated_agent_keys.json")
+	fmt.Println("\n Next Steps:")
 	fmt.Println("1. Copy the generated DIDs and public keys")
 	fmt.Println("2. Update sage-fe/demo-agents-metadata.json with the new values")
 	fmt.Println("3. Re-run the agent registration script")
@@ -127,6 +127,6 @@ func main() {
 		fmt.Printf("  \"publicKey\": \"%s\",\n", key.PublicKey)
 	}
 	
-	fmt.Println("\n⚠️  IMPORTANT: These keys are for demo purposes only!")
+	fmt.Println("\n  IMPORTANT: These keys are for demo purposes only!")
 	fmt.Println("Never use them in production!")
 }
