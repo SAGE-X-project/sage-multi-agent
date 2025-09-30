@@ -24,11 +24,6 @@ func NewFlexibleSAGEManager(sm *SAGEManager) *FlexibleSAGEManager {
 
 // VerifyMessage verifies a message with flexible DID handling
 func (fsm *FlexibleSAGEManager) VerifyMessage(msg *types.AgentMessage) (bool, error) {
-	// If SAGE is disabled, allow all messages
-	if !fsm.enabled {
-		return true, nil
-	}
-
 	// Check if sender has DID
 	hasDID := fsm.hasRegisteredDID(msg.From)
 
@@ -41,6 +36,11 @@ func (fsm *FlexibleSAGEManager) VerifyMessage(msg *types.AgentMessage) (bool, er
 			// Strict mode - reject non-DID messages
 			return false, fmt.Errorf("DID not found for entity: %s", msg.From)
 		}
+	}
+
+	// If SAGEManager is nil or SAGE is disabled, allow messages with DID
+	if fsm.SAGEManager == nil || !fsm.enabled {
+		return true, nil
 	}
 
 	// If DID exists, perform full SAGE verification
@@ -59,7 +59,7 @@ func (fsm *FlexibleSAGEManager) hasRegisteredDID(entityID string) bool {
 
 	// Check if DID exists in blockchain (simplified check)
 	// In real implementation, this would query the blockchain
-	if fsm.verifier != nil && fsm.verifier.didManager != nil {
+	if fsm.SAGEManager != nil && fsm.verifier != nil && fsm.verifier.didManager != nil {
 		// Try to resolve DID - check if entity has a registered DID
 		// For now, we'll assume entities with "did:" prefix have DIDs
 		if strings.HasPrefix(entityID, "did:") {

@@ -76,8 +76,10 @@ func (sm *SAGEManager) SetEnabled(enabled bool) {
 			map[bool]string{true: "Enabled", false: "Disabled"}[enabled], agentType)
 	}
 	
-	// Update verifier
-	sm.verifier.SetEnabled(enabled)
+	// Update verifier if it exists
+	if sm.verifier != nil {
+		sm.verifier.SetEnabled(enabled)
+	}
 	
 	log.Printf("[SAGE] System-wide SAGE %s", 
 		map[bool]string{true: "enabled", false: "disabled"}[enabled])
