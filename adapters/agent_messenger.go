@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sage-x-project/sage-multi-agent/config"
 	"github.com/sage-x-project/sage-multi-agent/types"
-	"github.com/sage-x-project/sage/core/rfc9421"
+	"github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
 )
 
 // AgentMessenger handles agent-to-agent messaging with SAGE
@@ -48,22 +48,22 @@ func (am *AgentMessenger) SendMessage(
 	message string,
 	expectResponse bool,
 ) (*types.AgentConversation, error) {
-	
+
 	// Get agent configurations
 	fromAgent, exists := am.config.Agents[fromAgentType]
 	if !exists {
 		return nil, fmt.Errorf("sender agent %s not found", fromAgentType)
 	}
-	
+
 	toAgent, exists := am.config.Agents[toAgentType]
 	if !exists {
 		return nil, fmt.Errorf("receiver agent %s not found", toAgentType)
 	}
-	
+
 	// Create message request
 	messageID := fmt.Sprintf("%s-%d-%s", fromAgentType, time.Now().UnixNano(), uuid.New().String()[:8])
 	nonce := uuid.New().String()
-	
+
 	request := &types.AgentMessageRequest{
 		Body:         message,
 		FromAgentDID: fromAgent.DID,
@@ -76,7 +76,7 @@ func (am *AgentMessenger) SendMessage(
 			"agent_name": fromAgent.Name,
 		},
 	}
-	
+
 	// Add request context if expecting response
 	if expectResponse {
 		request.RequestContext = &types.RequestContext{
@@ -90,7 +90,7 @@ func (am *AgentMessenger) SendMessage(
 			},
 		}
 	}
-	
+
 	// Create conversation tracking
 	conversation := &types.AgentConversation{
 		ConversationID: messageID,
@@ -98,18 +98,18 @@ func (am *AgentMessenger) SendMessage(
 		StartTime:      time.Now(),
 		Status:         "pending",
 	}
-	
+
 	// Store conversation
 	am.conversationsMu.Lock()
 	am.conversations[messageID] = conversation
 	am.conversationsMu.Unlock()
-	
+
 	// Sign the message with SAGE
 	signer, err := am.sageManager.GetOrCreateSigner(fromAgentType, am.verifierHelper)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get signer for %s: %w", fromAgentType, err)
 	}
-	
+
 	// Create metadata for signing
 	signingMetadata := map[string]interface{}{
 		"to_agent_did":   toAgent.DID,
@@ -118,37 +118,37 @@ func (am *AgentMessenger) SendMessage(
 		"timestamp":      request.Timestamp.Unix(),
 		"algorithm":      request.Algorithm,
 	}
-	
+
 	if request.RequestContext != nil {
 		signingMetadata["request_context"] = map[string]interface{}{
 			"request_id": request.RequestContext.RequestID,
 			"nonce":      request.RequestContext.Nonce,
 		}
 	}
-	
+
 	// Sign the message
 	signedMessage, err := signer.SignMessage(ctx, message, signingMetadata)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign message: %w", err)
 	}
-	
+
 	// Send the signed message to the receiver
 	err = am.sendSignedMessage(ctx, toAgent.Endpoint, signedMessage, request)
 	if err != nil {
 		conversation.Status = "error"
 		return conversation, fmt.Errorf("failed to send message: %w", err)
 	}
-	
-	log.Printf("[MESSENGER] Sent message from %s to %s (ID: %s)", 
+
+	log.Printf("[MESSENGER] Sent message from %s to %s (ID: %s)",
 		fromAgentType, toAgentType, messageID)
-	
+
 	// If not expecting response, mark as completed
 	if !expectResponse {
 		conversation.Status = "completed"
 		endTime := time.Now()
 		conversation.EndTime = &endTime
 	}
-	
+
 	return conversation, nil
 }
 
@@ -161,7 +161,7 @@ func (am *AgentMessenger) sendSignedMessage(
 ) error {
 	// Prepare the HTTP request
 	url := fmt.Sprintf("%s/api/agent/message", endpoint)
-	
+
 	// Create request body
 	requestBody := map[string]interface{}{
 		"from":            request.FromAgentDID,
@@ -172,18 +172,18 @@ func (am *AgentMessenger) sendSignedMessage(
 		"request_context": request.RequestContext,
 		"metadata":        request.Metadata,
 	}
-	
+
 	bodyBytes, err := json.Marshal(requestBody)
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
-	
+
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
-	
+
 	// Add SAGE headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("X-Agent-DID", signedMessage.AgentDID)
@@ -192,26 +192,26 @@ func (am *AgentMessenger) sendSignedMessage(
 	httpReq.Header.Set("X-Nonce", signedMessage.Nonce)
 	httpReq.Header.Set("X-Algorithm", signedMessage.Algorithm)
 	httpReq.Header.Set("X-Signature", hex.EncodeToString(signedMessage.Signature))
-	
+
 	// Add metadata headers
 	if signedMessage.Metadata != nil {
 		metadataBytes, _ := json.Marshal(signedMessage.Metadata)
 		httpReq.Header.Set("X-Metadata", string(metadataBytes))
 	}
-	
+
 	// Send the request
 	resp, err := am.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	// Check response status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
 	}
-	
+
 	return nil
 }
 
@@ -224,7 +224,7 @@ func (am *AgentMessenger) HandleResponse(
 	if response.InResponseTo == nil {
 		return fmt.Errorf("response missing original request context")
 	}
-	
+
 	// Find the original conversation
 	am.conversationsMu.Lock()
 	conversation, exists := am.conversations[response.InResponseTo.OriginalRequestID]
@@ -235,27 +235,27 @@ func (am *AgentMessenger) HandleResponse(
 		conversation.EndTime = &endTime
 	}
 	am.conversationsMu.Unlock()
-	
+
 	if !exists {
-		log.Printf("[MESSENGER] Received response for unknown request: %s", 
+		log.Printf("[MESSENGER] Received response for unknown request: %s",
 			response.InResponseTo.OriginalRequestID)
 		return nil
 	}
-	
+
 	// Verify the response is from the expected agent
 	if conversation.Request.ToAgentDID != response.FromAgentDID {
 		return fmt.Errorf("response from unexpected agent: expected %s, got %s",
 			conversation.Request.ToAgentDID, response.FromAgentDID)
 	}
-	
+
 	// Verify the response is for the correct sender
 	if conversation.Request.FromAgentDID != response.InResponseTo.OriginalSenderDID {
 		return fmt.Errorf("response context mismatch: original sender DID doesn't match")
 	}
-	
-	log.Printf("[MESSENGER] Received valid response for conversation %s", 
+
+	log.Printf("[MESSENGER] Received valid response for conversation %s",
 		conversation.ConversationID)
-	
+
 	return nil
 }
 
@@ -266,18 +266,18 @@ func (am *AgentMessenger) CreateResponse(
 	responderAgentType string,
 	responseBody string,
 ) (*types.AgentMessageResponse, *rfc9421.Message, error) {
-	
+
 	// Get responder agent configuration
 	responderAgent, exists := am.config.Agents[responderAgentType]
 	if !exists {
 		return nil, nil, fmt.Errorf("responder agent %s not found", responderAgentType)
 	}
-	
+
 	// Calculate message digest of original request
-	digestData := fmt.Sprintf("%s:%s:%s:%d", 
+	digestData := fmt.Sprintf("%s:%s:%s:%d",
 		request.MessageID, request.FromAgentDID, request.Body, request.Timestamp.Unix())
 	digest := sha256.Sum256([]byte(digestData))
-	
+
 	// Create response
 	response := &types.AgentMessageResponse{
 		Body:         responseBody,
@@ -290,7 +290,7 @@ func (am *AgentMessenger) CreateResponse(
 		InResponseTo: &types.ResponseContext{
 			OriginalRequestID:     request.MessageID,
 			OriginalSenderDID:     request.FromAgentDID,
-			OriginalNonce:        request.RequestContext.Nonce,
+			OriginalNonce:         request.RequestContext.Nonce,
 			OriginalMessageDigest: hex.EncodeToString(digest[:]),
 		},
 		Metadata: map[string]interface{}{
@@ -298,13 +298,13 @@ func (am *AgentMessenger) CreateResponse(
 			"agent_name": responderAgent.Name,
 		},
 	}
-	
+
 	// Sign the response with SAGE
 	signer, err := am.sageManager.GetOrCreateSigner(responderAgentType, am.verifierHelper)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get signer for %s: %w", responderAgentType, err)
 	}
-	
+
 	// Create metadata for signing (include original request context)
 	signingMetadata := map[string]interface{}{
 		"response_id":    response.ResponseID,
@@ -319,13 +319,13 @@ func (am *AgentMessenger) CreateResponse(
 			"original_message_digest": response.InResponseTo.OriginalMessageDigest,
 		},
 	}
-	
+
 	// Sign the response
 	signedMessage, err := signer.SignMessage(ctx, responseBody, signingMetadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to sign response: %w", err)
 	}
-	
+
 	return response, signedMessage, nil
 }
 
@@ -333,7 +333,7 @@ func (am *AgentMessenger) CreateResponse(
 func (am *AgentMessenger) GetConversation(conversationID string) (*types.AgentConversation, bool) {
 	am.conversationsMu.RLock()
 	defer am.conversationsMu.RUnlock()
-	
+
 	conversation, exists := am.conversations[conversationID]
 	return conversation, exists
 }
@@ -342,7 +342,7 @@ func (am *AgentMessenger) GetConversation(conversationID string) (*types.AgentCo
 func (am *AgentMessenger) GetAllConversations() []*types.AgentConversation {
 	am.conversationsMu.RLock()
 	defer am.conversationsMu.RUnlock()
-	
+
 	conversations := make([]*types.AgentConversation, 0, len(am.conversations))
 	for _, conv := range am.conversations {
 		conversations = append(conversations, conv)

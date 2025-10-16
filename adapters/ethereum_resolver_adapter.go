@@ -2,10 +2,10 @@ package adapters
 
 import (
 	"context"
-	
-	"github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/did"
-	"github.com/sage-x-project/sage/did/ethereum"
+
+	"github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/did"
+	"github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
 
 // EthereumResolverAdapter adapts EthereumClient to match the Resolver interface

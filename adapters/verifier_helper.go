@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/config"
-	"github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/crypto/storage"
-	"github.com/sage-x-project/sage/did"
-	"github.com/sage-x-project/sage/did/ethereum"
+	"github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/storage"
+	"github.com/sage-x-project/sage/pkg/agent/did"
+	"github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
 
 // VerifierHelper provides agent verification with SAGE integration
@@ -28,10 +28,10 @@ type VerifierHelper struct {
 func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, error) {
 	if skipVerification {
 		log.Printf("[INFO] Agent verification skipped (--skip-verification flag)")
-		
+
 		// Create crypto manager even in skip mode for key generation
 		cryptoManager := crypto.NewManager()
-		
+
 		// Set up file storage for keys
 		fileStorage, err := storage.NewFileKeyStorage(keyDir)
 		if err != nil {
@@ -39,12 +39,12 @@ func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, e
 			fileStorage = storage.NewMemoryKeyStorage()
 		}
 		cryptoManager.SetStorage(fileStorage)
-		
+
 		return &VerifierHelper{
 			skipVerification: true,
 			cryptoManager:    cryptoManager,
 			keyStorage:       fileStorage,
-			keyDir:          keyDir,
+			keyDir:           keyDir,
 		}, nil
 	}
 
@@ -62,7 +62,7 @@ func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, e
 	// Initialize SAGE managers
 	didManager := did.NewManager()
 	cryptoManager := crypto.NewManager()
-	
+
 	// Set up file storage for keys
 	fileStorage, err := storage.NewFileKeyStorage(keyDir)
 	if err != nil {
@@ -93,17 +93,17 @@ func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, e
 	if err := didManager.Configure(chain, registryConfig); err != nil {
 		return nil, fmt.Errorf("failed to configure DID manager: %w", err)
 	}
-	
+
 	// Create and set Ethereum client for the DID manager
 	if chain == did.ChainEthereum {
 		ethClient, err := ethereum.NewEthereumClient(registryConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Ethereum client: %w", err)
 		}
-		
+
 		// Use adapter to match interface requirements
 		adapter := NewEthereumResolverAdapter(ethClient)
-		
+
 		// Set both as Registry and Resolver
 		// The adapter implements Resolver, and ethClient implements Registry
 		if err := didManager.SetClient(chain, adapter); err != nil {
@@ -114,7 +114,7 @@ func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, e
 				// Continue anyway, some operations might still work
 			}
 		}
-		
+
 		log.Printf("[INFO] Ethereum client initialized for chain: %s", chain)
 	}
 
@@ -130,7 +130,7 @@ func NewVerifierHelper(keyDir string, skipVerification bool) (*VerifierHelper, e
 		agentConfig:      agentConfig,
 		envConfig:        envConfig,
 		skipVerification: false,
-		keyDir:          keyDir,
+		keyDir:           keyDir,
 	}, nil
 }
 
@@ -213,14 +213,14 @@ func (vh *VerifierHelper) VerifyOrRegisterAgent(agentType string) error {
 			log.Printf("  1. Fund the agent address with ETH for gas\n")
 			log.Printf("  2. Run: go run cli/register/main.go --agent %s\n", agentType)
 			log.Println("========================================")
-			
+
 			return fmt.Errorf("agent %s registration failed: %w", agentCfg.Name, err)
 		}
 
 		log.Printf("[SUCCESS] Agent %s registered successfully!", agentCfg.Name)
 		log.Printf("  Transaction: %s", result.TransactionHash)
 		log.Printf("  Block: %d", result.BlockNumber)
-		
+
 		// Verify registration was successful
 		metadata, err = vh.didManager.ResolveAgent(ctx, did.AgentDID(agentCfg.DID))
 		if err != nil {
@@ -238,33 +238,33 @@ func (vh *VerifierHelper) VerifyOrRegisterAgent(agentType string) error {
 	log.Printf("  - Owner: %s", metadata.Owner)
 	log.Printf("  - Endpoint: %s", metadata.Endpoint)
 	log.Printf("  - Created: %s", metadata.CreatedAt.Format(time.RFC3339))
-	
+
 	return nil
 }
 
 // LoadOrGenerateKey loads or generates a key for an agent
 func (vh *VerifierHelper) LoadOrGenerateKey(agentType, agentDID string) (crypto.KeyPair, error) {
 	keyID := fmt.Sprintf("%s-key", agentType)
-	
+
 	// Try to load existing key
 	keyPair, err := vh.cryptoManager.LoadKeyPair(keyID)
 	if err == nil {
 		log.Printf("[INFO] Loaded existing key for agent %s (ID: %s)", agentType, keyID)
 		return keyPair, nil
 	}
-	
+
 	// Generate new key (use secp256k1 for Ethereum compatibility)
 	keyPair, err = vh.cryptoManager.GenerateKeyPair(crypto.KeyTypeSecp256k1)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key: %w", err)
 	}
-	
+
 	// Store the key with agent-specific ID instead of random ID
 	// We need to use the storage directly to control the ID
 	if err := vh.keyStorage.Store(keyID, keyPair); err != nil {
 		return nil, fmt.Errorf("failed to store key: %w", err)
 	}
-	
+
 	log.Printf("[INFO] Generated new secp256k1 key for agent %s and stored with ID: %s", agentType, keyID)
 	return keyPair, nil
 }
@@ -304,9 +304,9 @@ func (vh *VerifierHelper) GetAgentMetadata(agentType string) (*did.AgentMetadata
 				CreatedAt:    time.Now(),
 			}, nil
 		}
-		
+
 		agentCfg := vh.agentConfig.Agents[agentType]
-		
+
 		// Convert capabilities
 		capabilities := make(map[string]interface{})
 		if agentCfg.Capabilities.Type != "" {
@@ -315,7 +315,7 @@ func (vh *VerifierHelper) GetAgentMetadata(agentType string) (*did.AgentMetadata
 		if agentCfg.Capabilities.Version != "" {
 			capabilities["version"] = agentCfg.Capabilities.Version
 		}
-		
+
 		return &did.AgentMetadata{
 			DID:          did.AgentDID(agentCfg.DID),
 			Name:         agentCfg.Name,

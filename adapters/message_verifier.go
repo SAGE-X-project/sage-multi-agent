@@ -9,9 +9,9 @@ import (
 
 	"github.com/sage-x-project/sage-multi-agent/config"
 	"github.com/sage-x-project/sage-multi-agent/types"
-	"github.com/sage-x-project/sage/core"
-	"github.com/sage-x-project/sage/core/rfc9421"
-	"github.com/sage-x-project/sage/did"
+	"github.com/sage-x-project/sage/pkg/agent/core"
+	"github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 // MessageVerifier provides message verification capabilities for agents
@@ -38,8 +38,8 @@ func NewMessageVerifier(verifierHelper *VerifierHelper) (*MessageVerifier, error
 		verificationService: verificationService,
 		didManager:          verifierHelper.GetDIDManager(),
 		agentConfig:         agentConfig,
-		enabled:             true,   // Default to enabled
-		skipOnError:         false,  // Default to reject on error for security
+		enabled:             true,  // Default to enabled
+		skipOnError:         false, // Default to reject on error for security
 	}, nil
 }
 
@@ -82,17 +82,17 @@ func (mv *MessageVerifier) VerifyMessage(ctx context.Context, message *rfc9421.M
 	// Verify the message with custom options
 	opts := rfc9421.DefaultVerificationOptions()
 	opts.VerifyMetadata = false // Don't verify metadata fields as they're agent properties, not message properties
-	
+
 	verifyResult, err := mv.verificationService.VerifyAgentMessage(
 		ctx,
 		message,
 		opts,
 	)
-	
+
 	if err != nil {
 		result.Error = fmt.Sprintf("Verification failed: %v", err)
 		result.Details["error"] = err.Error()
-		
+
 		if mv.skipOnError {
 			log.Printf("[SAGE] Verification error (continuing): %v", err)
 			return result, nil
@@ -104,20 +104,20 @@ func (mv *MessageVerifier) VerifyMessage(ctx context.Context, message *rfc9421.M
 	// Update result based on verification
 	result.Verified = verifyResult.Valid
 	result.SignatureValid = verifyResult.Valid
-	
+
 	if verifyResult.Valid {
 		result.Details["agent_name"] = verifyResult.AgentName
 		result.Details["agent_owner"] = verifyResult.AgentOwner
 		result.Details["verified_at"] = verifyResult.VerifiedAt.Format(time.RFC3339)
-		
+
 		// Add capabilities if present
 		if verifyResult.Capabilities != nil {
 			for k, v := range verifyResult.Capabilities {
 				result.Details[fmt.Sprintf("capability_%s", k)] = fmt.Sprintf("%v", v)
 			}
 		}
-		
-		log.Printf("[SAGE] Message verified successfully from agent: %s (%s)", 
+
+		log.Printf("[SAGE] Message verified successfully from agent: %s (%s)",
 			verifyResult.AgentName, message.AgentDID)
 	} else {
 		result.Error = verifyResult.Error

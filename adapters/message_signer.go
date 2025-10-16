@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/config"
-	"github.com/sage-x-project/sage/core/rfc9421"
-	"github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/did"
+	"github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
+	"github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 // MessageSigner provides message signing capabilities for agents
@@ -72,7 +72,7 @@ func (ms *MessageSigner) SignMessage(ctx context.Context, content string, metada
 	// Generate message ID and nonce
 	messageID := ms.generateMessageID()
 	nonce := ms.generateNonce()
-	
+
 	// Create RFC-9421 message
 	message := &rfc9421.Message{
 		AgentDID:  ms.agentDID,
@@ -88,7 +88,7 @@ func (ms *MessageSigner) SignMessage(ctx context.Context, content string, metada
 		KeyID:     ms.keyPair.ID(),
 		SignedFields: []string{
 			"agent_did",
-			"message_id", 
+			"message_id",
 			"timestamp",
 			"nonce",
 			"body",
@@ -98,15 +98,15 @@ func (ms *MessageSigner) SignMessage(ctx context.Context, content string, metada
 
 	// Construct signature base
 	signatureBase := ms.constructSignatureBase(message)
-	
+
 	// Sign the message
 	signature, err := ms.keyPair.Sign([]byte(signatureBase))
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign message: %w", err)
 	}
-	
+
 	message.Signature = signature
-	
+
 	return message, nil
 }
 
@@ -122,7 +122,7 @@ func (ms *MessageSigner) SignRequest(ctx context.Context, method, path string, b
 		"X-Agent-Type":      ms.agentType,
 		"X-Message-ID":      ms.generateMessageID(),
 		"X-Timestamp":       time.Now().Format(time.RFC3339),
-		"X-Nonce":          ms.generateNonce(),
+		"X-Nonce":           ms.generateNonce(),
 		"X-Signature-Input": "agent_did,message_id,timestamp,nonce,body",
 	}
 

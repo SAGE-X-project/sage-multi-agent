@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sage-x-project/sage-multi-agent/types"
-	"github.com/sage-x-project/sage/core/rfc9421"
+	"github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
 )
 
 // VerifyMessage verifies an AgentMessage using SAGE
@@ -16,10 +16,10 @@ func (sm *SAGEManager) VerifyMessage(msg *types.AgentMessage) (bool, error) {
 
 	// Convert AgentMessage to RFC9421 Message for verification
 	rfcMsg := &rfc9421.Message{
-		MessageID:    msg.ID,
-		AgentDID:     msg.From,
-		Body:         []byte(msg.Content),
-		Algorithm:    string(rfc9421.AlgorithmECDSASecp256k1),
+		MessageID: msg.ID,
+		AgentDID:  msg.From,
+		Body:      []byte(msg.Content),
+		Algorithm: string(rfc9421.AlgorithmECDSASecp256k1),
 	}
 
 	result, err := sm.verifier.VerifyMessage(context.Background(), rfcMsg)

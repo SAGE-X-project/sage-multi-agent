@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sage-x-project/sage/core/rfc9421"
-	sagecrypto "github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/crypto/keys"
+	"github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
 )
 
 // A2ARequestHandler implements the trpc-a2a-go client.RequestHandler interface using SAGE
@@ -28,7 +28,7 @@ func NewA2ARequestHandler(agentDID string) (*A2ARequestHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key pair: %w", err)
 	}
-	
+
 	return &A2ARequestHandler{
 		httpVerifier: rfc9421.NewHTTPVerifier(),
 		agentDID:     agentDID,
@@ -55,13 +55,13 @@ func NewA2ARequestHandlerWithCryptoManager(agentDID string, cryptoManager *sagec
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate key: %w", err)
 		}
-		
+
 		// Store the key
 		if err := cryptoManager.StoreKeyPair(keyPair); err != nil {
 			return nil, fmt.Errorf("failed to store key: %w", err)
 		}
 	}
-	
+
 	return &A2ARequestHandler{
 		httpVerifier: rfc9421.NewHTTPVerifier(),
 		agentDID:     agentDID,
@@ -98,8 +98,8 @@ func (h *A2ARequestHandler) Handle(ctx context.Context, client *http.Client, req
 			`"date"`,
 			`"x-agent-did"`,
 		},
-		KeyID:     h.agentDID,
-		Created:   time.Now().Unix(),
+		KeyID:   h.agentDID,
+		Created: time.Now().Unix(),
 	}
 
 	// Determine algorithm based on key type
@@ -137,13 +137,13 @@ func (h *A2ARequestHandler) Handle(ctx context.Context, client *http.Client, req
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign request: %w", err)
 	}
-	
+
 	// Send the request
 	resp, err = client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("a2aRequestHandler: http request failed: %w", err)
 	}
-	
+
 	return resp, nil
 }
 
