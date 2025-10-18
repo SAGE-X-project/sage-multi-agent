@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
-	sagecrypto "github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/crypto/keys"
-	"github.com/sage-x-project/sage/crypto/storage"
-	"github.com/sage-x-project/sage/did"
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/storage"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 func main() {
@@ -19,7 +18,7 @@ func main() {
 	// Test 1: Key generation
 	fmt.Println("Test 1: Key Generation")
 	fmt.Println("----------------------")
-	
+
 	// Test Ed25519
 	ed25519KeyPair, err := keys.GenerateEd25519KeyPair()
 	if err != nil {
@@ -44,10 +43,10 @@ func main() {
 	// Test 2: Storage
 	fmt.Println("Test 2: Key Storage")
 	fmt.Println("-------------------")
-	
+
 	testDir := "/tmp/sage_test_keys"
 	os.RemoveAll(testDir) // Clean up any previous test
-	
+
 	// Create storage
 	fileStorage, err := storage.NewFileKeyStorage(testDir)
 	if err != nil {
@@ -90,7 +89,7 @@ func main() {
 	// Test 3: DID types
 	fmt.Println("Test 3: DID Types")
 	fmt.Println("-----------------")
-	
+
 	// Check AgentMetadata structure
 	metadata := &did.AgentMetadata{}
 	fmt.Printf("AgentMetadata fields:\n")
@@ -104,10 +103,10 @@ func main() {
 	// Test 4: Crypto Manager
 	fmt.Println("Test 4: Crypto Manager")
 	fmt.Println("----------------------")
-	
+
 	manager := sagecrypto.NewManager()
 	manager.SetStorage(fileStorage)
-	
+
 	// Generate through manager
 	managerKey, err := manager.GenerateKeyPair(sagecrypto.KeyTypeSecp256k1)
 	if err != nil {

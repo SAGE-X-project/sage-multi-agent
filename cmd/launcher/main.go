@@ -23,7 +23,10 @@ func main() {
 	orderingPort := flag.Int("ordering-port", 8082, "Port for Ordering Agent")
 	paymentPort := flag.Int("payment-port", 8083, "Port for Payment Agent")
 	sageEnabled := flag.Bool("sage", true, "Enable SAGE protocol")
-	flag.Parse()
+    noPlanning := flag.Bool("no-planning", false, "Do not start Planning agent (only register endpoint)")
+    noOrdering := flag.Bool("no-ordering", false, "Do not start Ordering agent (only register endpoint)")
+    noPayment  := flag.Bool("no-payment",  false, "Do not start Payment agent (only register endpoint)")
+    flag.Parse()
 
 	fmt.Println("Starting SAGE Multi-Agent System")
 	fmt.Println("================================")
@@ -39,6 +42,11 @@ func main() {
 	// Start Root Agent
 	rootAgent := root.NewRootAgent("RootAgent", *rootPort)
 	rootAgent.SAGEEnabled = *sageEnabled
+
+	// Register sub-agent endpoints on the root for routing
+	rootAgent.RegisterAgent("planning", "PlanningAgent", fmt.Sprintf("http://localhost:%d", *planningPort))
+	rootAgent.RegisterAgent("ordering", "OrderingAgent", fmt.Sprintf("http://localhost:%d", *orderingPort))
+	rootAgent.RegisterAgent("payment", "PaymentAgent", fmt.Sprintf("http://localhost:%d", *paymentPort))
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -54,38 +62,44 @@ func main() {
 	// Start Planning Agent
 	planningAgent := planning.NewPlanningAgent("PlanningAgent", *planningPort)
 	planningAgent.SAGEEnabled = *sageEnabled
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Printf("Starting Planning Agent on port %d...\n", *planningPort)
-		if err := planningAgent.Start(); err != nil {
-			errChan <- fmt.Errorf("Planning Agent failed: %v", err)
-		}
-	}()
+    if !*noPlanning {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            fmt.Printf("Starting Planning Agent on port %d...\n", *planningPort)
+            if err := planningAgent.Start(); err != nil {
+                errChan <- fmt.Errorf("Planning Agent failed: %v", err)
+            }
+        }()
+    }
 
 	// Start Ordering Agent
 	orderingAgent := ordering.NewOrderingAgent("OrderingAgent", *orderingPort)
 	orderingAgent.SAGEEnabled = *sageEnabled
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Printf("Starting Ordering Agent on port %d...\n", *orderingPort)
-		if err := orderingAgent.Start(); err != nil {
-			errChan <- fmt.Errorf("Ordering Agent failed: %v", err)
-		}
-	}()
+    if !*noOrdering {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            fmt.Printf("Starting Ordering Agent on port %d...\n", *orderingPort)
+            if err := orderingAgent.Start(); err != nil {
+                errChan <- fmt.Errorf("Ordering Agent failed: %v", err)
+            }
+        }()
+    }
 
 	// Start Payment Agent
 	paymentAgent := payment.NewPaymentAgent("PaymentAgent", *paymentPort)
 	paymentAgent.SAGEEnabled = *sageEnabled
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		fmt.Printf("Starting Payment Agent on port %d...\n", *paymentPort)
-		if err := paymentAgent.Start(); err != nil {
-			errChan <- fmt.Errorf("Payment Agent failed: %v", err)
-		}
-	}()
+    if !*noPayment {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            fmt.Printf("Starting Payment Agent on port %d...\n", *paymentPort)
+            if err := paymentAgent.Start(); err != nil {
+                errChan <- fmt.Errorf("Payment Agent failed: %v", err)
+            }
+        }()
+    }
 
 	// Wait for startup
 	time.Sleep(2 * time.Second)

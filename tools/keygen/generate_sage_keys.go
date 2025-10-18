@@ -1,3 +1,6 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -10,7 +13,7 @@ import (
 	"os"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	"github.com/sage-x-project/sage/crypto/keys"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
 )
 
 type AgentKeyData struct {
@@ -58,7 +61,7 @@ func main() {
 
 		// Get the private key as ECDSA
 		privateKey := keyPair.PrivateKey().(*ecdsa.PrivateKey)
-		
+
 		// Get public key bytes (uncompressed format with 0x04 prefix)
 		publicKeyBytes := ethcrypto.FromECDSAPub(&privateKey.PublicKey)
 		publicKeyHex := "0x" + hex.EncodeToString(publicKeyBytes)
@@ -120,13 +123,13 @@ func main() {
 	fmt.Println("3. Re-run the agent registration script")
 	fmt.Println("\nExample update for demo-agents-metadata.json:")
 	fmt.Println("------------------------------------------------")
-	
+
 	for _, key := range generatedKeys {
 		fmt.Printf("\n%s agent:\n", key.Name)
 		fmt.Printf("  \"did\": \"%s\",\n", key.DID)
 		fmt.Printf("  \"publicKey\": \"%s\",\n", key.PublicKey)
 	}
-	
+
 	fmt.Println("\n  IMPORTANT: These keys are for demo purposes only!")
 	fmt.Println("Never use them in production!")
 }

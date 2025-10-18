@@ -201,14 +201,14 @@ func (mr *MessageRouter) sendToAgent(ctx context.Context, route *Route, msg *typ
 // mockSendToAgent simulates sending message to agent
 func (mr *MessageRouter) mockSendToAgent(route *Route, msg *types.AgentMessage) (*types.AgentMessage, error) {
 	// This would be replaced with actual HTTP/gRPC call
-	response := &types.AgentMessage{
-		ID:        fmt.Sprintf("resp_%s", msg.ID),
-		From:      route.AgentID,
-		To:        msg.From,
-		Content:   fmt.Sprintf("Response to: %s", msg.Content),
-		Type:      "response",
-		Timestamp: time.Now().Unix(),
-	}
+    response := &types.AgentMessage{
+        ID:        fmt.Sprintf("resp_%s", msg.ID),
+        From:      route.AgentID,
+        To:        msg.From,
+        Content:   fmt.Sprintf("Response to: %s", msg.Content),
+        Type:      "response",
+        Timestamp: time.Now(),
+    }
 
 	// Simulate network delay
 	time.Sleep(50 * time.Millisecond)

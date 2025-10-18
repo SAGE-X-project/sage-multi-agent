@@ -35,6 +35,18 @@ func (a *EthereumResolverAdapter) ResolvePublicKey(ctx context.Context, agentDID
 	return pubKey, nil // crypto.PublicKey can be returned as interface{}
 }
 
+// ResolveKEMKey retrieves the KEM key (for RFC 9180) for an agent
+func (a *EthereumResolverAdapter) ResolveKEMKey(ctx context.Context, agentDID did.AgentDID) (interface{}, error) {
+    md, err := a.client.Resolve(ctx, agentDID)
+    if err != nil {
+        return nil, err
+    }
+    if !md.IsActive {
+        return nil, did.ErrInactiveAgent
+    }
+    return md.PublicKEMKey, nil
+}
+
 // VerifyMetadata checks if the provided metadata matches the on-chain data
 func (a *EthereumResolverAdapter) VerifyMetadata(ctx context.Context, agentDID did.AgentDID, metadata *did.AgentMetadata) (*did.VerificationResult, error) {
 	return a.client.VerifyMetadata(ctx, agentDID, metadata)

@@ -1,3 +1,6 @@
+//go:build demo
+// +build demo
+
 package main
 
 import (
@@ -171,4 +174,3 @@ func main() {
 	fmt.Printf("  Verifier Enabled: %v\n", status.VerifierEnabled)
 	fmt.Printf("  Active Signers: %d\n", len(status.AgentSigners))
 }
-

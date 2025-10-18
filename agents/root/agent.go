@@ -1,17 +1,19 @@
 package root
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"strings"
-	"sync"
+    "context"
+    "encoding/json"
+    "fmt"
+    "log"
+    "net/http"
+    "net"
+    "strings"
+    "sync"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
-	"github.com/sage-x-project/sage-multi-agent/types"
-	"github.com/sage-x-project/sage-multi-agent/websocket"
+    "github.com/sage-x-project/sage-multi-agent/adapters"
+    "github.com/sage-x-project/sage-multi-agent/types"
+    "github.com/sage-x-project/sage-multi-agent/websocket"
+    "google.golang.org/grpc"
 )
 
 // RootAgent is the main routing agent that directs requests to appropriate specialized agents
@@ -207,6 +209,26 @@ func (ra *RootAgent) Start() error {
 		}
 	}
 
+    // Start gRPC server (agent owns lifecycle) and register A2A handler via adapter
+    go func() {
+        addr := ":8084"
+        lis, err := net.Listen("tcp", addr)
+        if err != nil {
+            log.Printf("failed to listen %s: %v", addr, err)
+            return
+        }
+        s := grpc.NewServer()
+        grpcHandler := adapters.NewA2AGRPCHandler(ra, nil)
+        grpcHandler.RegisterWith(s)
+        log.Printf("[root] A2A gRPC listening on %s", addr)
+        if err := s.Serve(lis); err != nil && err != grpc.ErrServerStopped {
+            log.Printf("gRPC server error: %v", err)
+        }
+    }()
+
+    // Note: Sub-agents (planning/ordering/payment) are started by the launcher.
+    // Root only owns its own HTTP routes and the A2A gRPC server.
+
 	// Start WebSocket hub
 	go ra.hub.Run()
 
@@ -217,10 +239,7 @@ func (ra *RootAgent) Start() error {
 	mux.HandleFunc("/toggle-sage", ra.handleToggleSAGE)
 	mux.HandleFunc("/ws", ra.handleWebSocket)
 
-	// Register default agents
-	ra.RegisterAgent("planning", "PlanningAgent", "http://localhost:8081")
-	ra.RegisterAgent("ordering", "OrderingAgent", "http://localhost:8082")
-	ra.RegisterAgent("payment", "PaymentAgent", "http://localhost:8083")
+    // Note: Sub-agent endpoints are registered by the launcher or external config.
 
 	log.Printf("Root Agent starting on port %d", ra.Port)
 	return http.ListenAndServe(fmt.Sprintf(":%d", ra.Port), mux)

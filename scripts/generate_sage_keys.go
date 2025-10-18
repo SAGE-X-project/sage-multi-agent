@@ -1,8 +1,10 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
 	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -11,17 +13,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // AgentKey represents an agent's cryptographic key information
 type AgentKey struct {
-	AgentName   string `json:"agent_name"`
-	DID         string `json:"did"`
-	Address     string `json:"address"`
-	PublicKey   string `json:"public_key"`
-	PrivateKey  string `json:"private_key"`
+	AgentName  string `json:"agent_name"`
+	DID        string `json:"did"`
+	Address    string `json:"address"`
+	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key"`
 }
 
 func generateSecp256k1Keys() (*ecdsa.PrivateKey, error) {
@@ -110,8 +111,8 @@ func main() {
 	fmt.Printf("Generated keys for %s agent:\n", *agentName)
 	fmt.Printf("  DID:        %s\n", did)
 	fmt.Printf("  Address:    %s\n", address.Hex())
-	fmt.Printf("  Public Key: %s...%s (65 bytes)\n", 
-		keyInfo.PublicKey[:10], 
+	fmt.Printf("  Public Key: %s...%s (65 bytes)\n",
+		keyInfo.PublicKey[:10],
 		keyInfo.PublicKey[len(keyInfo.PublicKey)-8:])
 	fmt.Printf("  Saved to:   %s\n", outputFile)
 

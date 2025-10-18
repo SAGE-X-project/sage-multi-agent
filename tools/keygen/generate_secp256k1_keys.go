@@ -1,18 +1,21 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
-	"flag"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"os"
-	"path/filepath"
-	"strings"
+    "encoding/hex"
+    "encoding/json"
+    "flag"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "os"
+    "path/filepath"
+    "strings"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/ethereum/go-ethereum/crypto"
+    secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+    "github.com/ethereum/go-ethereum/crypto"
 )
 
 // AgentKey holds the key information for an agent
@@ -64,46 +67,55 @@ func main() {
 	fmt.Println(" Generating secp256k1 keys for agents...")
 	fmt.Println(strings.Repeat("=", 51))
 
-	for _, agent := range demo.Agents {
-		// Generate secp256k1 key pair
-		privateKey, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			log.Printf("Failed to generate key for %s: %v", agent.Name, err)
-			continue
-		}
+    for _, agent := range demo.Agents {
+        // Generate secp256k1 key pair
+        privateKey, err := secp.GeneratePrivateKey()
+        if err != nil {
+            log.Printf("Failed to generate key for %s: %v", agent.Name, err)
+            continue
+        }
 
-		// Get public key
-		publicKey := privateKey.PubKey()
+        // Get public key
+        publicKey := privateKey.PubKey()
 
-		// Convert to Ethereum format
-		ecdsaPubKey := publicKey.ToECDSA()
+        // Convert to Ethereum format (derive address from ECDSA public key)
+        // Use ECDSA private → public to ensure compatibility with go-ethereum
+        ecdsaPrivKey, err := crypto.ToECDSA(privateKey.Serialize())
+        if err != nil {
+            log.Printf("Failed to convert private key for %s: %v", agent.Name, err)
+            continue
+        }
+        ecdsaPubKey := &ecdsaPrivKey.PublicKey
 
-		// Get Ethereum address
-		address := crypto.PubkeyToAddress(*ecdsaPubKey)
+        // Get Ethereum address
+        address := crypto.PubkeyToAddress(*ecdsaPubKey)
 
-		// Serialize keys
-		privateKeyHex := hex.EncodeToString(privateKey.Serialize())
-		publicKeyHex := hex.EncodeToString(publicKey.SerializeCompressed())
+        // Serialize keys
+        privateKeyHex := hex.EncodeToString(privateKey.Serialize())
+        // Use uncompressed public key by default to match most registry expectations
+        publicKeyUncompressedHex := hex.EncodeToString(publicKey.SerializeUncompressed())
+        publicKeyCompressedHex := hex.EncodeToString(publicKey.SerializeCompressed())
 
-		agentKey := AgentKey{
-			DID:        agent.DID,
-			Name:       agent.Name,
-			PrivateKey: privateKeyHex,
-			PublicKey:  publicKeyHex,
-			Address:    address.Hex(),
-		}
+        agentKey := AgentKey{
+            DID:        agent.DID,
+            Name:       agent.Name,
+            PrivateKey: privateKeyHex,
+            PublicKey:  publicKeyUncompressedHex,
+            Address:    address.Hex(),
+        }
 
 		keyStore.Agents = append(keyStore.Agents, agentKey)
 
 		// Save individual key file
 		keyFile := filepath.Join(*outputDir, fmt.Sprintf("%s.key", agent.Name))
-		keyData := map[string]string{
-			"did":        agent.DID,
-			"privateKey": privateKeyHex,
-			"publicKey":  publicKeyHex,
-			"address":    address.Hex(),
-			"type":       "secp256k1",
-		}
+        keyData := map[string]string{
+            "did":        agent.DID,
+            "privateKey": privateKeyHex,
+            "publicKey":  publicKeyUncompressedHex,
+            "publicKeyCompressed": publicKeyCompressedHex,
+            "address":    address.Hex(),
+            "type":       "secp256k1",
+        }
 
 		keyJSON, err := json.MarshalIndent(keyData, "", "  ")
 		if err != nil {
@@ -118,10 +130,10 @@ func main() {
 
 		fmt.Printf(" Generated key for %s\n", agent.Name)
 		fmt.Printf("   Address: %s\n", address.Hex())
-		fmt.Printf("   Public Key: %s\n", publicKeyHex)
-		fmt.Printf("   Saved to: %s\n", keyFile)
-		fmt.Println()
-	}
+        fmt.Printf("   Public Key (uncompressed): %s\n", publicKeyUncompressedHex)
+        fmt.Printf("   Saved to: %s\n", keyFile)
+        fmt.Println()
+    }
 
 	// Save all keys to a single file
 	allKeysFile := filepath.Join(*outputDir, "all_keys.json")
