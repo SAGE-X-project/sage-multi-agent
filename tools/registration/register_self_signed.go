@@ -1,3 +1,6 @@
+//go:build tools && registration_self_signed
+// +build tools,registration_self_signed
+
 package main
 
 import (

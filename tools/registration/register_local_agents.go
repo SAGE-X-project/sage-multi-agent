@@ -1,3 +1,6 @@
+//go:build tools && registration_local
+// +build tools,registration_local
+
 package main
 
 import (

@@ -1,3 +1,6 @@
+//go:build tools && registration_secp256k1
+// +build tools,registration_secp256k1
+
 package main
 
 import (
