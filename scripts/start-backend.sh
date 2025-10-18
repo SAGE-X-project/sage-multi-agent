@@ -30,8 +30,9 @@ else
 fi
 
 # Export configuration paths for local blockchain
-export AGENT_CONFIG_PATH="configs/agent_config_local.yaml"
-export REGISTRATION_CONFIG_PATH="configs/agent_registration_local.yaml"
+# Use existing config files in configs/
+export AGENT_CONFIG_PATH="configs/agent_config.yaml"
+export REGISTRATION_CONFIG_PATH="configs/agent_registration.yaml"
 
 # Function to start a service
 start_service() {
@@ -48,21 +49,25 @@ start_service() {
 # Clean up old PIDs file
 rm -f .pids
 
-# Start Enhanced Client Server with WebSocket
-start_service "Enhanced Client Server" \
-    "go run client/enhanced_main.go --port 8086 --root-url http://localhost:8080 --ws-port 8085"
+# Start Client Server (HTTP gateway to gRPC A2A)
+start_service "Client Server" \
+    "go run client/main.go --port 8086 --grpc localhost:8084"
 
-# Start Root Agent (skip verification for local testing)
+# Start Root Agent
 start_service "Root Agent" \
-    "go run cli/root/main.go --port 8080 --ordering-url http://localhost:8083 --planning-url http://localhost:8084 --skip-verification"
+    "go run ./cmd/root --port 8080 --ordering-url http://localhost:8082 --planning-url http://localhost:8081 --payment-url http://localhost:8083 --sage true"
 
 # Start Ordering Agent
 start_service "Ordering Agent" \
-    "go run cli/ordering/main.go --port 8083"
+    "go run ./cmd/ordering --port 8082 --sage true"
 
 # Start Planning Agent
 start_service "Planning Agent" \
-    "go run cli/planning/main.go --port 8084"
+    "go run ./cmd/planning --port 8081 --sage true"
+
+# Start Payment Agent
+start_service "Payment Agent" \
+    "go run ./cmd/payment --port 8083 --sage true"
 
 echo ""
 echo "======================================"
@@ -70,14 +75,14 @@ echo -e "${GREEN} All backend services started!${NC}"
 echo "======================================"
 echo ""
 echo "Services running:"
-echo "  • Enhanced Client Server: http://localhost:8086"
-echo "  • WebSocket Server: ws://localhost:8085"
-echo "  • Root Agent: http://localhost:8080"
-echo "  • Ordering Agent: http://localhost:8083"
-echo "  • Planning Agent: http://localhost:8084"
+echo "  • Client Server:  http://localhost:8086"
+echo "  • Root Agent:     http://localhost:8080 (A2A gRPC :8084)"
+echo "  • Planning Agent: http://localhost:8081"
+echo "  • Ordering Agent: http://localhost:8082"
+echo "  • Payment Agent:  http://localhost:8083"
 echo ""
-echo "Check health: curl http://localhost:8086/health"
-echo "Check stats: curl http://localhost:8086/metrics"
+echo "Send a test prompt:"
+echo "  curl -X POST http://localhost:8086/send/prompt -H 'Content-Type: application/json' -d '{"prompt":"hello"}'"
 echo ""
 echo "To stop all services: ./scripts/stop-backend.sh"
 echo ""
