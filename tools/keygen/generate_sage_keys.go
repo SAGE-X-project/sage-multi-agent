@@ -46,7 +46,7 @@ func main() {
 	fmt.Println("================================================")
 
 	// Agent names
-	agents := []string{"root", "ordering", "planning"}
+	agents := []string{"root", "ordering", "planning", "payment"}
 
 	var generatedKeys []AgentKeyData
 

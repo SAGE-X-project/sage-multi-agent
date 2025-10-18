@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Agent Registration Script using secp256k1 keys for Ethereum compatibility
-# This script generates secp256k1 keys and registers agents on the local blockchain
+# Agent Registration Script for Local Blockchain
+# This script registers all demo agents on the local Hardhat blockchain
 
 set -e  # Exit on error
 
 echo "======================================"
-echo " SAGE Agent Registration (secp256k1)"
+echo " SAGE Agent Registration Tool"
 echo "======================================"
 echo ""
 
@@ -26,7 +26,6 @@ RPC_URL="http://localhost:8545"
 PRIVATE_KEY="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 DEMO_FILE="$PROJECT_ROOT/../sage-fe/demo-agents-metadata.json"
 ABI_FILE="$PROJECT_ROOT/../sage/contracts/ethereum/artifacts/contracts/SageRegistryV2.sol/SageRegistryV2.json"
-KEYS_DIR="$PROJECT_ROOT/keys"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -116,41 +115,22 @@ echo "======================================"
 echo "Contract: $CONTRACT_ADDRESS"
 echo "RPC URL: $RPC_URL"
 echo "Demo File: $DEMO_FILE"
-echo "Keys Directory: $KEYS_DIR"
 echo "======================================"
 echo ""
 
 # Change to project root
 cd "$PROJECT_ROOT"
 
-# Step 1: Generate secp256k1 keys
-echo " Step 1: Generating secp256k1 keys for agents..."
+# Run the Go registration script
+echo " Starting agent registration..."
 echo ""
 
-go run -tags tools tools/keygen/generate_secp256k1_keys.go \
-    -output="$KEYS_DIR" \
-    -demo="$DEMO_FILE"
-
-if [ ! -f "$KEYS_DIR/all_keys.json" ]; then
-    echo -e "${RED} Error: Key generation failed${NC}"
-    exit 1
-fi
-
-echo ""
-echo -e "${GREEN} Keys generated successfully${NC}"
-echo ""
-
-# Step 2: Register agents with secp256k1 keys
-echo " Step 2: Registering agents on blockchain..."
-echo ""
-
-go run tools/registration/register_with_secp256k1.go \
+go run tools/registration/register_local_agents.go \
     -contract="$CONTRACT_ADDRESS" \
     -rpc="$RPC_URL" \
     -key="$PRIVATE_KEY" \
     -demo="$DEMO_FILE" \
-    -abi="$ABI_FILE" \
-    -keys="$KEYS_DIR"
+    -abi="$ABI_FILE"
 
 echo ""
 echo "======================================"

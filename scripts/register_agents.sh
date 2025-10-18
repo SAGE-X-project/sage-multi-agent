@@ -27,6 +27,23 @@ PRIVATE_KEY="ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 DEMO_FILE="$PROJECT_ROOT/../sage-fe/demo-agents-metadata.json"
 ABI_FILE="$PROJECT_ROOT/../sage/contracts/ethereum/artifacts/contracts/SageRegistryV2.sol/SageRegistryV2.json"
 
+# Added: default flags mapped to register_agents.go (safe for SageRegistryV2)
+MODE="local"                         # 'local' (default) or 'self-signed'
+SIGMODE="bytes32"                    # 'bytes', 'bytes32', or 'raw'
+SENDER_IN_DIGEST="auto"              # 'auto', 'registrar', 'agent'
+DID_IN_DIGEST="none"                 # 'none', 'string', 'hash'
+KEYHASH_MODE="raw"                   # 'raw', 'xy', 'compressed'
+
+# Added: make cooldown disabled by default for speed (0 wait, 0 retries)
+COOLDOWN_WAIT_SEC="0"               # was 65 → 0 to disable waiting by default
+COOLDOWN_RETRIES="0"                # was 5  → 0 to disable retries by default
+
+DISABLE_HOOKS="false"                # best-effort owner-only
+
+# Added: funding passthrough to Go tool (optional)
+FUNDING_KEY=""                       # Added: if set, pre-fund agents (private key without 0x)
+FUNDING_AMOUNT_WEI="10000000000000000"  # Added: default 0.01 ETH in wei
+
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -46,15 +63,75 @@ while [[ $# -gt 0 ]]; do
             DEMO_FILE="$2"
             shift 2
             ;;
+        # Added: new options passthrough for the unified tool
+        --mode)
+            MODE="$2"
+            shift 2
+            ;;
+        --sigmode)
+            SIGMODE="$2"
+            shift 2
+            ;;
+        --sender-in-digest)
+            SENDER_IN_DIGEST="$2"
+            shift 2
+            ;;
+        --did-in-digest)
+            DID_IN_DIGEST="$2"
+            shift 2
+            ;;
+        --keyhash-mode)
+            KEYHASH_MODE="$2"
+            shift 2
+            ;;
+        --cooldown-wait-sec)
+            COOLDOWN_WAIT_SEC="$2"
+            shift 2
+            ;;
+        --cooldown-retries)
+            COOLDOWN_RETRIES="$2"
+            shift 2
+            ;;
+        --disable-hooks)
+            # Added: boolean flag with no value (set to true when present)
+            DISABLE_HOOKS="true"
+            shift 1
+            ;;
+        # Added: funding flags passthrough (NEW)
+        --funding-key)
+            # Added: private key (without 0x) that will fund agent accounts for gas
+            FUNDING_KEY="$2"
+            shift 2
+            ;;
+        --funding-amount-wei)
+            # Added: amount in wei to fund per agent (default 0.01 ETH)
+            FUNDING_AMOUNT_WEI="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [options]"
             echo ""
             echo "Options:"
-            echo "  --contract ADDRESS  Contract address (default: $CONTRACT_ADDRESS)"
-            echo "  --rpc URL          RPC endpoint (default: $RPC_URL)"
-            echo "  --key KEY          Private key without 0x (default: Hardhat account #0)"
-            echo "  --demo FILE        Demo metadata file (default: ../sage-fe/demo-agents-metadata.json)"
-            echo "  --help             Show this help message"
+            echo "  --contract ADDRESS          Contract address (default: $CONTRACT_ADDRESS)"
+            echo "  --rpc URL                   RPC endpoint (default: $RPC_URL)"
+            echo "  --key KEY                   Private key without 0x (default: Hardhat account #0)"
+            echo "  --demo FILE                 Demo metadata file (default: ../sage-fe/demo-agents-metadata.json)"
+            echo ""
+            echo "  --mode MODE                 'local' (default) or 'self-signed'"
+            echo "  --sigmode MODE              'bytes', 'bytes32'(default), or 'raw'"
+            echo "  --sender-in-digest VAL      'auto'(default), 'registrar', or 'agent'"
+            echo "  --did-in-digest VAL         'none'(default), 'string', or 'hash'"
+            echo "  --keyhash-mode MODE         'raw'(default), 'xy', or 'compressed'"
+            echo "  --cooldown-wait-sec N       Wait seconds when cooldown (default: $COOLDOWN_WAIT_SEC)"
+            echo "  --cooldown-retries N        Retries for cooldown (default: $COOLDOWN_RETRIES)"
+            echo "  --disable-hooks             Try disabling before/after hooks (owner only)"
+            echo ""
+            # Added: help lines for funding
+            echo "  --funding-key KEY           (Optional) Funder private key without 0x to pre-fund agents"
+            echo "  --funding-amount-wei AMT    (Optional) Amount in wei per agent (default: $FUNDING_AMOUNT_WEI)"
+            echo ""
+            echo "Note: In 'self-signed' mode, fund agents with your separate funding script beforehand."
+            echo "      Or pass --funding-key here to pre-fund automatically."
             exit 0
             ;;
         *)
@@ -115,8 +192,25 @@ echo "======================================"
 echo "Contract: $CONTRACT_ADDRESS"
 echo "RPC URL: $RPC_URL"
 echo "Demo File: $DEMO_FILE"
+# Added: show effective execution mode/options
+echo "Mode: $MODE"
+echo "sigmode: $SIGMODE | sender-in-digest: $SENDER_IN_DIGEST | did-in-digest: $DID_IN_DIGEST | keyhash-mode: $KEYHASH_MODE"
+echo "cooldown: ${COOLDOWN_WAIT_SEC}s x ${COOLDOWN_RETRIES} retries | disable-hooks: $DISABLE_HOOKS"
+# Added: show funding summary when provided
+if [[ -n "$FUNDING_KEY" ]]; then
+  echo "funding: enabled | amount-per-agent-wei: $FUNDING_AMOUNT_WEI"
+else
+  echo "funding: disabled"
+fi
 echo "======================================"
 echo ""
+
+# Added: remind funding if self-signed mode and not handled here
+if [[ "$MODE" == "self-signed" && -z "$FUNDING_KEY" ]]; then
+    echo -e "${YELLOW}Note:${NC} self-signed mode requires each agent account to have gas."
+    echo -e "${YELLOW}      Run your separate funding script BEFORE this if needed, or pass --funding-key here.${NC}"
+    echo ""
+fi
 
 # Change to project root
 cd "$PROJECT_ROOT"
@@ -125,12 +219,34 @@ cd "$PROJECT_ROOT"
 echo " Starting agent registration..."
 echo ""
 
-go run tools/registration/register_local_agents.go \
-    -contract="$CONTRACT_ADDRESS" \
-    -rpc="$RPC_URL" \
-    -key="$PRIVATE_KEY" \
-    -demo="$DEMO_FILE" \
+# Added: build command with optional flags
+CMD=( go run tools/registration/register_agents.go
+    -contract="$CONTRACT_ADDRESS"
+    -rpc="$RPC_URL"
+    -key="$PRIVATE_KEY"
+    -demo="$DEMO_FILE"
     -abi="$ABI_FILE"
+    -mode="$MODE"
+    -sigmode="$SIGMODE"
+    -sender-in-digest="$SENDER_IN_DIGEST"
+    -did-in-digest="$DID_IN_DIGEST"
+    -keyhash-mode="$KEYHASH_MODE"
+    -cooldown-wait-sec="$COOLDOWN_WAIT_SEC"
+    -cooldown-retries="$COOLDOWN_RETRIES"
+)
+
+# Added: append boolean only when true to avoid surprising behavior
+if [[ "$DISABLE_HOOKS" == "true" ]]; then
+    CMD+=( -disable-hooks=true )
+fi
+
+# Added: pass funding flags only when provided
+if [[ -n "$FUNDING_KEY" ]]; then
+    CMD+=( -funding-key="$FUNDING_KEY" -funding-amount-wei="$FUNDING_AMOUNT_WEI" )
+fi
+
+# Execute
+"${CMD[@]}"
 
 echo ""
 echo "======================================"
