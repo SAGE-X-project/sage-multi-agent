@@ -3,20 +3,36 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
+	"strconv"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/planning"
 )
 
+func envPort(names []string, def int) int {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			if p, err := strconv.Atoi(v); err == nil && p > 0 {
+				return p
+			}
+		}
+	}
+	return def
+}
+
 func main() {
-	port := flag.Int("port", 18081, "HTTP port for Planning Agent")
+	// Default port resolves from PLANNING_PORT or PLANNING_AGENT_PORT, else 18081
+	defPort := envPort([]string{"PLANNING_PORT", "PLANNING_AGENT_PORT"}, 18081)
+
+	port := flag.Int("port", defPort, "HTTP port for Planning Agent")
 	sage := flag.Bool("sage", true, "enable SAGE verification (inbound)")
 	flag.Parse()
 
-	pa := planning.NewPlanningAgent("PlanningAgent", *port)
-	pa.SAGEEnabled = *sage
+	agent := planning.NewPlanningAgent("planning", *port)
+	agent.SAGEEnabled = *sage
 
-	log.Printf("Planning Agent starting on port %d (SAGE=%v)", *port, *sage)
-	if err := pa.Start(); err != nil {
-		log.Fatalf("planning agent error: %v", err)
+	log.Printf("[planning] starting on :%d (SAGE=%v)", *port, *sage)
+	if err := agent.Start(); err != nil {
+		log.Fatal(err)
 	}
 }
