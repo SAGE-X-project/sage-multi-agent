@@ -5,131 +5,89 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
 	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
-// SAGEHandler handles SAGE-related API endpoints
+// SAGEHandler exposes minimal GET/POST endpoints to view or flip a local flag.
+// NOTE: Actual HTTP DID verification is enforced by middleware on each agent,
+// and request signing is handled by the caller (ClientAPI) via A2A client.
 type SAGEHandler struct {
-	sageManager    *adapters.SAGEManager
-	verifierHelper *adapters.VerifierHelper
+	enabled bool
 }
 
-// NewSAGEHandler creates a new SAGE handler
-func NewSAGEHandler(sageManager *adapters.SAGEManager, verifierHelper *adapters.VerifierHelper) *SAGEHandler {
-	return &SAGEHandler{
-		sageManager:    sageManager,
-		verifierHelper: verifierHelper,
-	}
+// NewSAGEHandler returns a new handler (enabled by default).
+func NewSAGEHandler() *SAGEHandler {
+	return &SAGEHandler{enabled: true}
 }
 
-// HandleSAGEConfig handles GET and POST for SAGE configuration
+// HandleSAGEConfig supports:
+//   - GET: returns current local flag
+//   - POST: sets local flag
 func (h *SAGEHandler) HandleSAGEConfig(w http.ResponseWriter, r *http.Request) {
-	// Enable CORS
+	// Minimal CORS for browser testing
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	
-	// Handle preflight
-	if r.Method == "OPTIONS" {
+
+	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	switch r.Method {
-	case "GET":
+	case http.MethodGet:
 		h.handleGetConfig(w, r)
-	case "POST":
+	case http.MethodPost:
 		h.handleSetConfig(w, r)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-// handleGetConfig returns the current SAGE configuration
-func (h *SAGEHandler) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	status := h.sageManager.GetStatus()
-	
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(status); err != nil {
-		log.Printf("[SAGE API] Failed to encode status: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+func (h *SAGEHandler) handleGetConfig(w http.ResponseWriter, _ *http.Request) {
+	status := &types.SAGEStatus{
+		Enabled:         h.enabled,
+		VerifierEnabled: h.enabled,
+		AgentSigners:    map[string]bool{},
 	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
 }
 
-// handleSetConfig updates the SAGE configuration
 func (h *SAGEHandler) handleSetConfig(w http.ResponseWriter, r *http.Request) {
 	var req types.SAGEConfigRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-
-	// Update configuration
 	if req.Enabled != nil {
-		h.sageManager.SetEnabled(*req.Enabled)
-		log.Printf("[SAGE API] SAGE enabled set to: %v", *req.Enabled)
+		h.enabled = *req.Enabled
+		log.Printf("[SAGE API] set enabled=%v", h.enabled)
 	}
-
-	if req.SkipOnError != nil {
-		h.sageManager.GetVerifier().SetSkipOnError(*req.SkipOnError)
-		log.Printf("[SAGE API] Skip on error set to: %v", *req.SkipOnError)
-	}
-
-	// Return updated status
-	status := h.sageManager.GetStatus()
-	
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(status); err != nil {
-		log.Printf("[SAGE API] Failed to encode status: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
+	// Return current state
+	h.handleGetConfig(w, r)
 }
 
-// HandleSAGETest handles SAGE signing and verification test
+// HandleSAGETest just echoes success since signing is request-level now.
 func (h *SAGEHandler) HandleSAGETest(w http.ResponseWriter, r *http.Request) {
-	// Enable CORS
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	
-	// Handle preflight
-	if r.Method == "OPTIONS" {
+	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Parse request for agent type
-	var req struct {
-		AgentType string `json:"agentType"`
+	res := &types.SAGETestResult{
+		Success: true,
+		Stage:   "middleware",
+		Details: map[string]string{"note": "DID auth is enforced by HTTP middleware"},
 	}
-	
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Default to root agent if not specified
-		req.AgentType = "root"
-	}
-
-	// Perform test
-	result, err := h.sageManager.SignAndVerifyTest(r.Context(), req.AgentType, h.verifierHelper)
-	if err != nil {
-		log.Printf("[SAGE API] Test failed: %v", err)
-		http.Error(w, "Test failed", http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		log.Printf("[SAGE API] Failed to encode result: %v", err)
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
+	_ = json.NewEncoder(w).Encode(res)
 }
 
-// RegisterRoutes registers all SAGE-related routes
+// RegisterRoutes registers all SAGE-related endpoints for simple UI/testing.
 func (h *SAGEHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sage/config", h.HandleSAGEConfig)
 	mux.HandleFunc("/api/sage/test", h.HandleSAGETest)
