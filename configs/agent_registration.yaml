@@ -4,28 +4,28 @@
 registration:
   # Network to use for registration (local, ethereum, sepolia, kaia, kairos)
   network: "local"
-  
+
   # Contract configuration
   contract:
-    address: "${LOCAL_CONTRACT_ADDRESS}"  # Will be replaced from .env
-    abi_path: "../sage/contracts/ethereum/artifacts/contracts/SageRegistryV2.sol/SageRegistryV2.json"
-    
+    address: "${LOCAL_CONTRACT_ADDRESS}" # Will be replaced from .env
+    abi_path: "../sage/contracts/ethereum/artifacts/contracts/SageRegistryV4.sol/SageRegistryV4.json"
+
   # Account configuration for registration transaction
   account:
     # Private key for the account that will pay for registration
     # NEVER commit actual private keys to version control
-    private_key: "${REGISTRATION_PRIVATE_KEY}"  # Set via environment variable
-    
+    private_key: "${REGISTRATION_PRIVATE_KEY}" # Set via environment variable
+
   # Gas configuration
   gas:
-    limit: 3000000  # Increased for complex signature verification
-    price: "auto"  # or specify in gwei
-    
+    limit: 3000000 # Increased for complex signature verification
+    price: "auto" # or specify in gwei
+
   # Transaction options
   transaction:
     wait_confirmations: 3
     timeout_seconds: 60
-    
+
 # Registration defaults
 defaults:
   # Default values for agent registration if not specified
