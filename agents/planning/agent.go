@@ -2,14 +2,21 @@ package planning
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
+	servermw "github.com/sage-x-project/sage-a2a-go/pkg/server"
+	verifier "github.com/sage-x-project/sage-a2a-go/pkg/verifier"
 	"github.com/sage-x-project/sage-multi-agent/types"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 // PlanningAgent handles travel and accommodation planning requests
@@ -17,8 +24,11 @@ type PlanningAgent struct {
 	Name        string
 	Port        int
 	SAGEEnabled bool
-	sageManager *adapters.FlexibleSAGEManager // Changed to FlexibleSAGEManager
 	hotels      []Hotel
+
+	// Inbound DID verification
+	didVerifier verifier.DIDVerifier
+	didMW       *servermw.DIDAuthMiddleware
 }
 
 // Hotel represents hotel information
@@ -55,28 +65,16 @@ func initializeHotels() []Hotel {
 func (pa *PlanningAgent) ProcessRequest(ctx context.Context, request *types.AgentMessage) (*types.AgentMessage, error) {
 	log.Printf("Planning Agent processing request: %s", request.Content)
 
-	// Verify message if SAGE is enabled (flexible mode allows non-DID messages)
-	if pa.SAGEEnabled && pa.sageManager != nil {
-		valid, err := pa.sageManager.VerifyMessage(request)
-		if err != nil {
-			log.Printf("Request verification warning: %v", err)
-			// Continue if it's a non-DID entity
-		} else if !valid {
-			log.Printf("Request verification failed - invalid signature")
-			return nil, fmt.Errorf("request verification failed")
-		}
-	}
-
-	// Process the planning request
+	// Business logic: routing within planning
 	var responseContent string
 	if strings.Contains(strings.ToLower(request.Content), "hotel") ||
-	   strings.Contains(strings.ToLower(request.Content), "accommodation") {
+		strings.Contains(strings.ToLower(request.Content), "accommodation") {
 		responseContent = pa.handleHotelRequest(request.Content)
 	} else {
 		responseContent = pa.handleGeneralPlanningRequest(request.Content)
 	}
 
-	// Create response
+	// Build response
 	response := &types.AgentMessage{
 		ID:        fmt.Sprintf("resp-%s", request.ID),
 		From:      pa.Name,
@@ -87,23 +85,11 @@ func (pa *PlanningAgent) ProcessRequest(ctx context.Context, request *types.Agen
 		Metadata:  map[string]interface{}{"agent_type": "planning"},
 	}
 
-	// Process response with SAGE if enabled
-	if pa.SAGEEnabled && pa.sageManager != nil {
-		processedResponse, err := pa.sageManager.ProcessMessageWithSAGE(response)
-		if err != nil {
-			log.Printf("Failed to process response with SAGE: %v", err)
-			// Continue without SAGE features for non-DID entities
-			return response, nil
-		}
-		return processedResponse, nil
-	}
-
 	return response, nil
 }
 
 // handleHotelRequest handles hotel booking requests
 func (pa *PlanningAgent) handleHotelRequest(content string) string {
-	// Find hotels based on location
 	location := pa.extractLocation(content)
 	relevantHotels := pa.findHotelsByLocation(location)
 
@@ -111,7 +97,6 @@ func (pa *PlanningAgent) handleHotelRequest(content string) string {
 		return fmt.Sprintf("No hotels found in %s. Please try another location.", location)
 	}
 
-	// Format response with hotel recommendations
 	var recommendations []string
 	recommendations = append(recommendations, fmt.Sprintf("Hotel recommendations for %s:", location))
 
@@ -135,7 +120,6 @@ func (pa *PlanningAgent) handleGeneralPlanningRequest(content string) string {
 
 // extractLocation extracts location from request content
 func (pa *PlanningAgent) extractLocation(content string) string {
-	// Common locations
 	locations := []string{"myeongdong", "gangnam", "jongno", "hongdae", "itaewon"}
 
 	contentLower := strings.ToLower(content)
@@ -145,25 +129,21 @@ func (pa *PlanningAgent) extractLocation(content string) string {
 		}
 	}
 
-	// Default to Myeongdong if no specific location found
 	if strings.Contains(contentLower, "seoul") || strings.Contains(contentLower, "hotel") {
 		return "Myeongdong"
 	}
-
 	return "Seoul"
 }
 
-// findHotelsByLocation finds hotels in a specific location
+// findHotelsByLocation finds hotels in a specific location (sorted by rating)
 func (pa *PlanningAgent) findHotelsByLocation(location string) []Hotel {
 	var results []Hotel
-
 	for _, hotel := range pa.hotels {
 		if strings.EqualFold(hotel.Location, location) || location == "Seoul" {
 			results = append(results, hotel)
 		}
 	}
-
-	// Sort by rating (simple bubble sort for small dataset)
+	// naive sort by rating desc
 	for i := 0; i < len(results)-1; i++ {
 		for j := 0; j < len(results)-i-1; j++ {
 			if results[j].Rating < results[j+1].Rating {
@@ -171,33 +151,33 @@ func (pa *PlanningAgent) findHotelsByLocation(location string) []Hotel {
 			}
 		}
 	}
-
 	return results
 }
 
-// Start starts the planning agent server
+// Start starts the planning agent server, with DID middleware whose "optional" toggles via /toggle-sage.
 func (pa *PlanningAgent) Start() error {
-	// Initialize SAGE manager if enabled
-	if pa.SAGEEnabled {
-		sageManager, err := adapters.NewSAGEManagerWithKeyType(pa.Name, "secp256k1")
-		if err != nil {
-			log.Printf("Failed to initialize SAGE manager: %v", err)
-			// Continue without SAGE
-		} else {
-			// Wrap with FlexibleSAGEManager to allow non-DID entities
-			pa.sageManager = adapters.NewFlexibleSAGEManager(sageManager)
-			pa.sageManager.SetAllowNonDID(true) // Allow non-DID messages by default
-			log.Printf("Flexible SAGE manager initialized for %s (non-DID messages allowed)", pa.Name)
-		}
+	// Initialize DID verifier (file-backed resolver)
+	if v, err := newLocalDIDVerifier(); err != nil {
+		log.Printf("[planning] DID verifier init failed: %v", err)
+	} else {
+		pa.didVerifier = v
 	}
 
-	// Create a new ServeMux for this agent
 	mux := http.NewServeMux()
 	mux.HandleFunc("/process", pa.handleProcessRequest)
 	mux.HandleFunc("/status", pa.handleStatus)
+	mux.HandleFunc("/toggle-sage", pa.handleToggleSAGE)
+
+	var handler http.Handler = mux
+	if pa.didVerifier != nil {
+		mw := servermw.NewDIDAuthMiddlewareWithVerifier(pa.didVerifier)
+		mw.SetOptional(!pa.SAGEEnabled) // require signature only when SAGE is ON
+		pa.didMW = mw
+		handler = mw.Wrap(handler)
+	}
 
 	log.Printf("Planning Agent starting on port %d", pa.Port)
-	return http.ListenAndServe(fmt.Sprintf(":%d", pa.Port), mux)
+	return http.ListenAndServe(fmt.Sprintf(":%d", pa.Port), handler)
 }
 
 // handleProcessRequest handles incoming process requests
@@ -220,7 +200,7 @@ func (pa *PlanningAgent) handleProcessRequest(w http.ResponseWriter, r *http.Req
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // handleStatus returns the agent status
@@ -230,8 +210,124 @@ func (pa *PlanningAgent) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"sage_enabled": pa.SAGEEnabled,
 		"type":         "planning",
 		"hotels_count": len(pa.hotels),
+		"time":         time.Now().Format(time.RFC3339),
 	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+// handleToggleSAGE toggles SAGE mode and updates DID middleware "optional"
+func (pa *PlanningAgent) handleToggleSAGE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+	pa.SAGEEnabled = req.Enabled
+	if pa.didMW != nil {
+		pa.didMW.SetOptional(!pa.SAGEEnabled)
+	}
+	log.Printf("[planning] SAGE %v (verify optional=%v)", pa.SAGEEnabled, !pa.SAGEEnabled)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"enabled": req.Enabled})
+}
+
+// ---------- Local DID verification helpers (file-based) ----------
+
+type localKeys struct {
+	pub  map[did.AgentDID]map[did.KeyType]interface{}
+	keys map[did.AgentDID][]did.AgentKey
+}
+
+type fileEthereumClient struct{ db *localKeys }
+
+func (c *fileEthereumClient) ResolveAllPublicKeys(ctx context.Context, agentDID did.AgentDID) ([]did.AgentKey, error) {
+	if keys, ok := c.db.keys[agentDID]; ok {
+		return keys, nil
+	}
+	return nil, fmt.Errorf("no keys for DID: %s", agentDID)
+}
+func (c *fileEthereumClient) ResolvePublicKeyByType(ctx context.Context, agentDID did.AgentDID, keyType did.KeyType) (interface{}, error) {
+	if m, ok := c.db.pub[agentDID]; ok {
+		if pk, ok2 := m[keyType]; ok2 {
+			return pk, nil
+		}
+	}
+	return nil, fmt.Errorf("key type %v not found for %s", keyType, agentDID)
+}
+
+func newLocalDIDVerifier() (verifier.DIDVerifier, error) {
+	db, err := loadLocalKeys()
+	if err != nil {
+		return nil, err
+	}
+	client := &fileEthereumClient{db: db}
+	selector := verifier.NewDefaultKeySelector(client)
+	sigVerifier := verifier.NewRFC9421Verifier()
+	return verifier.NewDefaultDIDVerifier(client, selector, sigVerifier), nil
+}
+
+func loadLocalKeys() (*localKeys, error) {
+	path := filepath.Join("keys", "all_keys.json")
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	var data struct {
+		Agents []struct{ DID, PublicKey, Type string } `json:"agents"`
+	}
+	if err := json.NewDecoder(f).Decode(&data); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	db := &localKeys{pub: make(map[did.AgentDID]map[did.KeyType]interface{}), keys: make(map[did.AgentDID][]did.AgentKey)}
+	for _, a := range data.Agents {
+		d := did.AgentDID(a.DID)
+		if _, ok := db.pub[d]; !ok {
+			db.pub[d] = make(map[did.KeyType]interface{})
+		}
+		pk, err := parseSecp256k1ECDSAPublicKey(a.PublicKey)
+		if err != nil {
+			log.Printf("[planning] skip DID %s: %v", a.DID, err)
+			continue
+		}
+		db.pub[d][did.KeyTypeECDSA] = pk
+		db.keys[d] = []did.AgentKey{{
+			Type:      did.KeyTypeECDSA,
+			KeyData:   mustUncompressedECDSA(pk),
+			Verified:  true,
+			CreatedAt: time.Now(),
+		}}
+	}
+	return db, nil
+}
+
+func parseSecp256k1ECDSAPublicKey(hexStr string) (*ecdsa.PublicKey, error) {
+	b, err := hex.DecodeString(strings.TrimPrefix(hexStr, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid hex pubkey: %w", err)
+	}
+	pub, err := did.UnmarshalPublicKey(b, "secp256k1")
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal pubkey: %w", err)
+	}
+	if ecdsaPK, ok := pub.(*ecdsa.PublicKey); ok {
+		return ecdsaPK, nil
+	}
+	return nil, fmt.Errorf("unexpected key type %T", pub)
+}
+
+func mustUncompressedECDSA(pk *ecdsa.PublicKey) []byte {
+	byteLen := (pk.Curve.Params().BitSize + 7) / 8
+	out := make([]byte, 1+2*byteLen)
+	out[0] = 0x04
+	pk.X.FillBytes(out[1 : 1+byteLen])
+	pk.Y.FillBytes(out[1+byteLen:])
+	return out
 }
