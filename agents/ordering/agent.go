@@ -189,26 +189,38 @@ func (oa *OrderingAgent) findProductByContent(content string) *Product {
 	return nil
 }
 
-// Start starts the ordering agent server, with DID middleware whose "optional" toggles via /toggle-sage.
+// Start starts the ordering agent server, with DID middleware only on protected routes.
 func (oa *OrderingAgent) Start() error {
-	// Initialize DID verifier (file-backed resolver)
 	if v, err := newLocalDIDVerifier(); err != nil {
 		log.Printf("[ordering] DID verifier init failed: %v", err)
 	} else {
 		oa.didVerifier = v
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/process", oa.handleProcessRequest)
-	mux.HandleFunc("/status", oa.handleStatus)
-	mux.HandleFunc("/toggle-sage", oa.handleToggleSAGE)
+	// open (no auth)
+	open := http.NewServeMux()
+	open.HandleFunc("/status", oa.handleStatus)
+	open.HandleFunc("/toggle-sage", oa.handleToggleSAGE)
 
-	var handler http.Handler = mux
+	// protected (auth)
+	protected := http.NewServeMux()
+	protected.HandleFunc("/process", oa.handleProcessRequest)
+
+	var handler http.Handler = open
 	if oa.didVerifier != nil {
 		mw := servermw.NewDIDAuthMiddlewareWithVerifier(oa.didVerifier)
-		mw.SetOptional(!oa.SAGEEnabled) // require signature only when SAGE is ON
+		mw.SetOptional(!oa.SAGEEnabled)
+		wrapped := mw.Wrap(protected)
+
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/status", "/toggle-sage":
+				open.ServeHTTP(w, r)
+			default:
+				wrapped.ServeHTTP(w, r)
+			}
+		})
 		oa.didMW = mw
-		handler = mw.Wrap(handler)
 	}
 
 	log.Printf("Ordering Agent starting on port %d", oa.Port)

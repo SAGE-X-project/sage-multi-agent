@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,9 +21,11 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
 	servermw "github.com/sage-x-project/sage-a2a-go/pkg/server"
 	verifier "github.com/sage-x-project/sage-a2a-go/pkg/verifier"
+	rfc9421 "github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	keys "github.com/sage-x-project/sage/pkg/agent/crypto/keys"
 	"github.com/sage-x-project/sage/pkg/agent/did"
@@ -47,6 +51,7 @@ type RootAgent struct {
 
 	myDID     did.AgentDID
 	myKeyPair sagecrypto.KeyPair
+	myECDSA   *ecdsa.PrivateKey
 }
 
 // AgentInfo holds registered agent metadata
@@ -73,6 +78,11 @@ func NewRootAgent(name string, port int) *RootAgent {
 		ra.myDID = did.AgentDID(didStr)
 		ra.myKeyPair = kp
 		ra.a2aClient = a2aclient.NewA2AClient(ra.myDID, ra.myKeyPair, nil)
+		if ecdsaPriv, err := loadAgentECDSA("root"); err == nil {
+			ra.myECDSA = ecdsaPriv
+		} else {
+			log.Printf("[root] ECDSA load failed: %v (fallback to a2a signer)", err)
+		}
 	}
 	// File-backed DID verifier
 	if v, err := newLocalDIDVerifier(); err != nil {
@@ -143,10 +153,48 @@ func (ra *RootAgent) forwardToAgent(ctx context.Context, agent *AgentInfo, reque
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if req.Host == "" { // ensure authority matches during signing
+		req.Host = req.URL.Host
+	}
+	// Ensure Content-Digest is present for RFC9421 verification downstream
+	{
+		sum := sha256.Sum256(body)
+		req.Header.Set("Content-Digest", fmt.Sprintf("sha-256=:%s:", base64.StdEncoding.EncodeToString(sum[:])))
+	}
+	// Optional packet trace
+	tracePackets := strings.EqualFold(os.Getenv("SAGE_PACKET_TRACE"), "true") || os.Getenv("SAGE_PACKET_TRACE") == "1"
+	traceBody := strings.EqualFold(os.Getenv("SAGE_TRACE_INCLUDE_BODY"), "true") || os.Getenv("SAGE_TRACE_INCLUDE_BODY") == "1"
+	if tracePackets {
+		if traceBody {
+			b := string(body)
+			if len(b) > 512 {
+				b = b[:512] + "..."
+			}
+			log.Printf("[packet-trace][root→%s] POST %s len=%d Digest=%q Sig=%t SigInput=%t Body=%s",
+				agent.Type, req.URL.Path, len(body), req.Header.Get("Content-Digest"), req.Header.Get("Signature") != "", req.Header.Get("Signature-Input") != "", b)
+		} else {
+			log.Printf("[packet-trace][root→%s] POST %s len=%d Digest=%q Sig=%t SigInput=%t",
+				agent.Type, req.URL.Path, len(body), req.Header.Get("Content-Digest"), req.Header.Get("Signature") != "", req.Header.Get("Signature-Input") != "")
+		}
+	}
 
 	var resp *http.Response
-	if ra.SAGEEnabled && ra.a2aClient != nil {
-		// A2A-sign to downstream (e.g., Payment) when SAGE is ON
+	if ra.SAGEEnabled && ra.myECDSA != nil {
+		// Explicit RFC9421 es256k signing for compatibility with verifier
+		params := &rfc9421.SignatureInputParams{
+			// Drop @authority to avoid Host variations causing false negatives
+			CoveredComponents: []string{"\"@method\"", "\"@target-uri\"", "\"content-type\"", "\"content-digest\""},
+			KeyID:             string(ra.myDID),
+			Algorithm:         "es256k",
+			Created:           time.Now().Unix(),
+		}
+		signer := rfc9421.NewHTTPVerifier()
+		if err = signer.SignRequest(req, "sig1", params, ra.myECDSA); err != nil {
+			return nil, fmt.Errorf("sign request: %w", err)
+		}
+		resp, err = http.DefaultClient.Do(req)
+	} else if ra.SAGEEnabled && ra.a2aClient != nil {
+		// Fallback to A2A signer
 		resp, err = ra.a2aClient.Do(ctx, req)
 	} else {
 		// Plain HTTP when SAGE is OFF
@@ -176,12 +224,9 @@ func (ra *RootAgent) forwardToAgent(ctx context.Context, agent *AgentInfo, reque
 func (ra *RootAgent) ToggleSAGE(enabled bool) {
 	ra.mu.Lock()
 	defer ra.mu.Unlock()
+	// Root uses SAGEEnabled only for OUTBOUND signing; inbound verification remains optional.
 	ra.SAGEEnabled = enabled
-	// Inbound verification policy: optional=false when SAGE is ON; optional=true when OFF
-	if ra.didMW != nil {
-		ra.didMW.SetOptional(!enabled)
-	}
-	log.Printf("[root] SAGE %v (verify optional=%v)", enabled, !enabled)
+	log.Printf("[root] SAGE %v (inbound verify optional=true)", enabled)
 
 	// Notify WS clients
 	if ra.hub != nil {
@@ -192,27 +237,39 @@ func (ra *RootAgent) ToggleSAGE(enabled bool) {
 	}
 }
 
-// Start HTTP server with DIDAuth middleware whose optional flag is updated by ToggleSAGE
+// Start HTTP server: wrap only sensitive paths with DIDAuth; keep /status open
 func (ra *RootAgent) Start() error {
 	go ra.hub.Run()
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/process", ra.handleProcessRequest)
-	mux.HandleFunc("/status", ra.handleStatus)
-	mux.HandleFunc("/toggle-sage", ra.handleToggleSAGE)
-	mux.HandleFunc("/ws", ra.handleWebSocket)
+	// Public mux (no signature required)
+	public := http.NewServeMux()
+	public.HandleFunc("/status", ra.handleStatus)
+	public.HandleFunc("/ws", ra.handleWebSocket)
+	public.HandleFunc("/toggle-sage", ra.handleToggleSAGE)
 
-	var handler http.Handler = mux
+	// Secured mux (Root does not require inbound signatures; verification optional)
+	secured := http.NewServeMux()
+	secured.HandleFunc("/process", ra.handleProcessRequest)
+	secured.HandleFunc("/toggle-sage", ra.handleToggleSAGE)
+
+	var securedHandler http.Handler = secured
+
+	// Attach DID middleware (optional mode) only to secured endpoints
 	if ra.didV != nil {
 		mw := servermw.NewDIDAuthMiddlewareWithVerifier(ra.didV)
-		// Initial policy from current SAGEEnabled
-		mw.SetOptional(!ra.SAGEEnabled)
+		// Always optional at Root (never block inbound when signatures missing)
+		mw.SetOptional(true)
 		ra.didMW = mw
-		handler = mw.Wrap(handler)
+		securedHandler = mw.Wrap(securedHandler)
 	}
 
+	// Root mux mounts public routes and secured routes
+	rootMux := http.NewServeMux()
+	rootMux.Handle("/", public) // /status, /ws
+	rootMux.Handle("/process", securedHandler)
+
 	log.Printf("Root Agent starting on port %d", ra.Port)
-	return http.ListenAndServe(fmt.Sprintf(":%d", ra.Port), handler)
+	return http.ListenAndServe(fmt.Sprintf(":%d", ra.Port), rootMux)
 }
 
 // Handlers
@@ -228,11 +285,35 @@ func (ra *RootAgent) handleProcessRequest(w http.ResponseWriter, r *http.Request
 	}
 	resp, err := ra.RouteRequest(r.Context(), &req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// Propagate downstream status code when possible instead of always 500
+		if code := parseDownstreamStatus(err.Error()); code != 0 {
+			http.Error(w, err.Error(), code)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// parseDownstreamStatus extracts an HTTP status code from an error message of the form
+// "downstream <url> returned <code>: <body>". Returns 0 if not found.
+func parseDownstreamStatus(msg string) int {
+	const marker = " returned "
+	i := strings.Index(msg, marker)
+	if i < 0 {
+		return 0
+	}
+	rest := msg[i+len(marker):]
+	// rest should begin with code, e.g., "401: ..."
+	var code int
+	if n, _ := fmt.Sscanf(rest, "%d", &code); n == 1 {
+		if code >= 100 && code <= 599 {
+			return code
+		}
+	}
+	return 0
 }
 
 func (ra *RootAgent) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -384,4 +465,31 @@ func loadAgentIdentity(name string) (string, sagecrypto.KeyPair, error) {
 		return "", nil, err
 	}
 	return rec.DID, kp, nil
+}
+
+// loadAgentECDSA loads the agent ECDSA private key from keys/<name>.key (hex), returning *ecdsa.PrivateKey
+func loadAgentECDSA(name string) (*ecdsa.PrivateKey, error) {
+	path := filepath.Join("keys", fmt.Sprintf("%s.key", name))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var rec struct {
+		DID        string `json:"did"`
+		PrivateKey string `json:"privateKey"`
+	}
+	if err := json.NewDecoder(f).Decode(&rec); err != nil {
+		return nil, err
+	}
+	b, err := hex.DecodeString(strings.TrimPrefix(rec.PrivateKey, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key hex: %w", err)
+	}
+	// Convert using go-ethereum to ensure canonical ECDSA format
+	k, err := ethcrypto.ToECDSA(b)
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
 }

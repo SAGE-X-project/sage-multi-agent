@@ -154,26 +154,36 @@ func (pa *PlanningAgent) findHotelsByLocation(location string) []Hotel {
 	return results
 }
 
-// Start starts the planning agent server, with DID middleware whose "optional" toggles via /toggle-sage.
+// Start starts the planning agent server, with DID middleware only on protected routes.
 func (pa *PlanningAgent) Start() error {
-	// Initialize DID verifier (file-backed resolver)
 	if v, err := newLocalDIDVerifier(); err != nil {
 		log.Printf("[planning] DID verifier init failed: %v", err)
 	} else {
 		pa.didVerifier = v
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/process", pa.handleProcessRequest)
-	mux.HandleFunc("/status", pa.handleStatus)
-	mux.HandleFunc("/toggle-sage", pa.handleToggleSAGE)
+	open := http.NewServeMux()
+	open.HandleFunc("/status", pa.handleStatus)
+	open.HandleFunc("/toggle-sage", pa.handleToggleSAGE)
 
-	var handler http.Handler = mux
+	protected := http.NewServeMux()
+	protected.HandleFunc("/process", pa.handleProcessRequest)
+
+	var handler http.Handler = open
 	if pa.didVerifier != nil {
 		mw := servermw.NewDIDAuthMiddlewareWithVerifier(pa.didVerifier)
-		mw.SetOptional(!pa.SAGEEnabled) // require signature only when SAGE is ON
+		mw.SetOptional(!pa.SAGEEnabled)
+		wrapped := mw.Wrap(protected)
+
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/status", "/toggle-sage":
+				open.ServeHTTP(w, r)
+			default:
+				wrapped.ServeHTTP(w, r)
+			}
+		})
 		pa.didMW = mw
-		handler = mw.Wrap(handler)
 	}
 
 	log.Printf("Planning Agent starting on port %d", pa.Port)

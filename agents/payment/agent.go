@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/sage-x-project/sage-multi-agent/types"
+	rfc9421 "github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
 )
 
 // Wallet represents a cryptocurrency wallet
@@ -46,6 +49,17 @@ type Transaction struct {
 	TxHash   string  `json:"tx_hash"`
 }
 
+// statusWriter captures HTTP status for logging
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
 // PaymentAgent handles cryptocurrency payments.
 // In this version, the agent forwards /process to an external payment agent.
 // Set PAYMENT_EXTERNAL_URL (or PAYMENT_UPSTREAM) to http://host:port of that external agent.
@@ -64,6 +78,7 @@ type PaymentAgent struct {
 	myDID     did.AgentDID
 	myKeyPair sagecrypto.KeyPair
 	a2a       *a2aclient.A2AClient
+	myECDSA   *ecdsa.PrivateKey
 
 	// upstream external payment endpoint base (e.g., http://localhost:28083)
 	upstreamBase string
@@ -86,6 +101,11 @@ func NewPaymentAgent(name string, port int) *PaymentAgent {
 		pa.myDID = did.AgentDID(didStr)
 		pa.myKeyPair = kp
 		pa.a2a = a2aclient.NewA2AClient(pa.myDID, pa.myKeyPair, nil)
+		if ecdsaPriv, err := loadAgentECDSA("payment"); err == nil {
+			pa.myECDSA = ecdsaPriv
+		} else {
+			log.Printf("[payment] ECDSA load failed: %v (fallback to A2A signer)", err)
+		}
 	}
 	// Upstream base from environment
 	if v := strings.TrimSpace(os.Getenv("PAYMENT_EXTERNAL_URL")); v != "" {
@@ -97,6 +117,7 @@ func NewPaymentAgent(name string, port int) *PaymentAgent {
 }
 
 // Start HTTP server with DID auth middleware; optional flag tracks SAGEEnabled dynamically
+// Start HTTP server: wrap ONLY /process with DIDAuth; keep /status, /toggle-sage open
 func (pa *PaymentAgent) Start() error {
 	db, err := loadLocalKeys()
 	if err != nil {
@@ -105,22 +126,68 @@ func (pa *PaymentAgent) Start() error {
 
 	if db != nil {
 		pa.didMW = server.NewDIDAuthMiddleware(&fileEthereumClient{db: db})
-		pa.didMW.SetOptional(!pa.SAGEEnabled) // require signature only when SAGE is ON
+		pa.didMW.SetOptional(false)
 	}
+
+	public := http.NewServeMux()
+	public.HandleFunc("/status", pa.handleStatus)
+	public.HandleFunc("/toggle-sage", pa.handleToggleSAGE)
+
+	unsecured := http.HandlerFunc(pa.handleProcessRequest)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/process", pa.handleProcessRequest)
-	mux.HandleFunc("/status", pa.handleStatus)
-	mux.HandleFunc("/toggle-sage", pa.handleToggleSAGE)
+	mux.Handle("/", public)
+	mux.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+		// Optional verbose signature logging for troubleshooting (external agent)
+		// Enable by setting PAYMENT_DEBUG_SIG=true
+		debugSig := strings.EqualFold(os.Getenv("PAYMENT_DEBUG_SIG"), "true") || os.Getenv("PAYMENT_DEBUG_SIG") == "1"
 
-	var handler http.Handler = mux
-	if pa.didMW != nil {
-		// Always wrap once; optional flag toggles verification requirement at runtime
-		handler = pa.didMW.Wrap(handler)
-	}
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		if debugSig {
+			// Read and restore body to compute digest safely
+			raw, _ := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			sum := sha256.Sum256(raw)
+			sumB64 := base64.StdEncoding.EncodeToString(sum[:])
+			sig := r.Header.Get("Signature")
+			sigIn := r.Header.Get("Signature-Input")
+			cd := r.Header.Get("Content-Digest")
+			// Quick match check: RFC9421 digest header looks like sha-256=:<b64>:
+			digestMatches := cd != "" && strings.Contains(cd, sumB64)
+			missingSig := sig == "" || sigIn == ""
+			log.Printf("[payment][sig-debug] IN %s %s len=%d Sig=%t SigInput=%t Content-Digest=%q body-sha256=:%s:",
+				r.Method, r.URL.Path, len(raw), sig != "", sigIn != "", cd, sumB64)
+			// Emit MITM warning always; emit signature-missing warning only when SAGE is ON
+			if !digestMatches {
+				log.Printf("[payment][mitm-warning] digest mismatch or missing; possible tampering (Content-Digest vs body sha256 differ)")
+			}
+			if pa.SAGEEnabled && missingSig {
+				log.Printf("[payment][sig-warning] missing signature headers; request may be unsigned")
+			}
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		if pa.SAGEEnabled && pa.didMW != nil {
+			// Secured path (DID verification). Use status-capturing writer
+			pa.didMW.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				unsecured.ServeHTTP(w, r)
+			})).ServeHTTP(sw, r)
+			if debugSig {
+				if sw.status >= 400 {
+					log.Printf("[payment][sig-debug] OUT %s %s status=%d (verification failed)", r.Method, r.URL.Path, sw.status)
+				} else {
+					log.Printf("[payment][sig-debug] OUT %s %s status=%d", r.Method, r.URL.Path, sw.status)
+				}
+			}
+			return
+		}
+		// Open path when SAGE is OFF
+		unsecured.ServeHTTP(w, r)
+	})
 
-	log.Printf("Payment Agent starting on port %d (upstream=%s)", pa.Port, pa.upstreamBase)
-	return http.ListenAndServe(fmt.Sprintf(":%d", pa.Port), handler)
+	log.Printf("Payment Agent starting on port %d (SAGE=%v, upstream=%s)",
+		pa.Port, pa.SAGEEnabled, pa.upstreamBase)
+
+	return http.ListenAndServe(fmt.Sprintf(":%d", pa.Port), mux)
 }
 
 // handleProcessRequest receives an AgentMessage and forwards it to the external payment agent.
@@ -158,11 +225,51 @@ func (pa *PaymentAgent) handleProcessRequest(w http.ResponseWriter, r *http.Requ
 
 	reqOut, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, url, bytes.NewReader(body))
 	reqOut.Header.Set("Content-Type", "application/json")
+	if reqOut.Host == "" { // ensure authority set before signing
+		reqOut.Host = reqOut.URL.Host
+	}
+	// Ensure Content-Digest present for downstream verifier
+	{
+		sum := sha256.Sum256(body)
+		reqOut.Header.Set("Content-Digest", fmt.Sprintf("sha-256=:%s:", base64.StdEncoding.EncodeToString(sum[:])))
+	}
+
+	// Optional packet trace
+	tracePackets := strings.EqualFold(os.Getenv("SAGE_PACKET_TRACE"), "true") || os.Getenv("SAGE_PACKET_TRACE") == "1"
+	traceBody := strings.EqualFold(os.Getenv("SAGE_TRACE_INCLUDE_BODY"), "true") || os.Getenv("SAGE_TRACE_INCLUDE_BODY") == "1"
+	if tracePackets {
+		if traceBody {
+			b := string(body)
+			if len(b) > 512 {
+				b = b[:512] + "..."
+			}
+			log.Printf("[packet-trace][payment→external] POST %s len=%d Digest=%q Sig=%t SigInput=%t Body=%s",
+				url, len(body), reqOut.Header.Get("Content-Digest"), reqOut.Header.Get("Signature") != "", reqOut.Header.Get("Signature-Input") != "", b)
+		} else {
+			log.Printf("[packet-trace][payment→external] POST %s len=%d Digest=%q Sig=%t SigInput=%t",
+				url, len(body), reqOut.Header.Get("Content-Digest"), reqOut.Header.Get("Signature") != "", reqOut.Header.Get("Signature-Input") != "")
+		}
+	}
 
 	var resp *http.Response
 	var err error
-	if pa.SAGEEnabled && pa.a2a != nil {
-		// Sign outbound request to upstream when SAGE is ON
+	if pa.SAGEEnabled && pa.myECDSA != nil {
+		// Sign outbound request explicitly with RFC9421 es256k
+		rparams := &rfc9421.SignatureInputParams{
+			// Drop @authority to avoid proxy Host variations
+			CoveredComponents: []string{"\"@method\"", "\"@target-uri\"", "\"content-type\"", "\"content-digest\""},
+			KeyID:             string(pa.myDID),
+			Algorithm:         "es256k",
+			Created:           time.Now().Unix(),
+		}
+		signer := rfc9421.NewHTTPVerifier()
+		if err = signer.SignRequest(reqOut, "sig1", rparams, pa.myECDSA); err != nil {
+			http.Error(w, "sign error: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		resp, err = http.DefaultClient.Do(reqOut)
+	} else if pa.SAGEEnabled && pa.a2a != nil {
+		// Fallback: A2A signer
 		resp, err = pa.a2a.Do(r.Context(), reqOut)
 	} else {
 		// Plain HTTP when SAGE is OFF
@@ -321,4 +428,24 @@ func loadAgentIdentity(name string) (string, sagecrypto.KeyPair, error) {
 		return "", nil, err
 	}
 	return rec.DID, kp, nil
+}
+
+// loadAgentECDSA reads keys/<name>.key and returns *ecdsa.PrivateKey
+func loadAgentECDSA(name string) (*ecdsa.PrivateKey, error) {
+	path := filepath.Join("keys", fmt.Sprintf("%s.key", name))
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var rec struct{ DID, PrivateKey string }
+	if err := json.NewDecoder(f).Decode(&rec); err != nil {
+		return nil, err
+	}
+	b, err := hex.DecodeString(strings.TrimPrefix(rec.PrivateKey, "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid private key hex: %w", err)
+	}
+	sk := secp256k1.PrivKeyFromBytes(b)
+	return sk.ToECDSA(), nil
 }
