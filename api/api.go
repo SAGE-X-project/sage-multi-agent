@@ -104,12 +104,23 @@ func (g *ClientAPI) handleDomain(w http.ResponseWriter, r *http.Request, domain 
 	}
 	defer resp.Body.Close()
 
-	// 4) Decode Root's response (which may include downstream work to Payment)
-	var agentResp types.AgentMessage
-	if err := json.NewDecoder(resp.Body).Decode(&agentResp); err != nil {
-		http.Error(w, "decode error: "+err.Error(), http.StatusBadGateway)
-		return
-	}
+    // 4) Decode Root's response (best-effort). If not JSON, fall back to raw text.
+    var agentResp types.AgentMessage
+    rawBody, _ := io.ReadAll(resp.Body)
+    _ = resp.Body.Close()
+    if len(rawBody) > 0 {
+        if err := json.Unmarshal(rawBody, &agentResp); err != nil {
+            // Fallback: capture raw text as content so the client still gets structured JSON
+            agentResp = types.AgentMessage{
+                ID:        "",
+                From:      "root",
+                To:        "client-api",
+                Content:   strings.TrimSpace(string(rawBody)),
+                Timestamp: time.Now(),
+                Type:      "response",
+            }
+        }
+    }
 
 	// 5) Build UX-friendly response with logs and (best-effort) signature status
 	now := time.Now().Format(time.RFC3339)
@@ -138,8 +149,10 @@ func (g *ClientAPI) handleDomain(w http.ResponseWriter, r *http.Request, domain 
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+    w.Header().Set("Content-Type", "application/json")
+    // Propagate upstream HTTP status (200 for success, 4xx/5xx for errors)
+    w.WriteHeader(resp.StatusCode)
+    _ = json.NewEncoder(w).Encode(out)
 }
 
 // toggleSAGE posts {"enabled": <bool>} to /toggle-sage on a target agent.

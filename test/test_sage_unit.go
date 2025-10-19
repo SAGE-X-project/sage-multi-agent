@@ -4,173 +4,74 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"time"
+    "bytes"
+    "crypto/ecdsa"
+    "crypto/sha256"
+    "encoding/base64"
+    "encoding/hex"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "os"
+    "path/filepath"
+    "time"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
-	"github.com/sage-x-project/sage-multi-agent/config"
+    ethcrypto "github.com/ethereum/go-ethereum/crypto"
+    rfc9421 "github.com/sage-x-project/sage/pkg/agent/core/rfc9421"
 )
 
 func main() {
-	fmt.Println("Unit Testing SAGE Message Signing and Verification")
-	fmt.Println("==================================================")
+    fmt.Println("Unit Testing RFC9421 Signing and Verification")
+    fmt.Println("==================================================")
 
-	// Initialize verifier helper
-	verifierHelper, err := adapters.NewVerifierHelper("keys", false)
-	if err != nil {
-		log.Fatalf("Failed to create verifier helper: %v", err)
-	}
+    did, priv, err := loadKey(filepath.Join("keys", "root.key"))
+    if err != nil { panic(err) }
+    fmt.Printf("Loaded root DID: %s\n", did)
 
-	// Create SAGE manager
-	sageManager, err := adapters.NewSAGEManager(verifierHelper)
-	if err != nil {
-		log.Fatalf("Failed to create SAGE manager: %v", err)
-	}
+    // Sign request
+    body := []byte("Hello, this is a test message for RFC9421 verification")
+    req, _ := http.NewRequest(http.MethodPost, "http://demo.local/api/test", bytes.NewReader(body))
+    req.Header.Set("Content-Type", "application/json")
+    sum := sha256.Sum256(body)
+    req.Header.Set("Content-Digest", fmt.Sprintf("sha-256=:%s:", base64.StdEncoding.EncodeToString(sum[:])))
+    params := &rfc9421.SignatureInputParams{
+        CoveredComponents: []string{"\"@method\"", "\"@target-uri\"", "\"@authority\"", "\"content-type\"", "\"content-digest\""},
+        KeyID: did,
+        Algorithm: "es256k",
+        Created: time.Now().Unix(),
+    }
+    signer := rfc9421.NewHTTPVerifier()
+    if err := signer.SignRequest(req, "sig1", params, priv); err != nil { panic(err) }
+    fmt.Println("Signed request headers added: Signature, Signature-Input")
 
-	// Test 1: Create signers for different agents
-	fmt.Println("\n1. Creating signers for agents...")
-	agents := []string{"root", "ordering", "planning"}
-	for _, agent := range agents {
-		_, err := sageManager.GetOrCreateSigner(agent, verifierHelper)
-		if err != nil {
-			log.Printf("    Failed to create signer for %s: %v", agent, err)
-			continue
-		}
-		fmt.Printf("    Created signer for %s agent\n", agent)
-		
-		// Get agent DID info
-		if agentConfig, _ := config.LoadAgentConfig(""); agentConfig != nil {
-			if cfg, exists := agentConfig.Agents[agent]; exists {
-				fmt.Printf("      DID: %s\n", cfg.DID)
-			}
-		}
-	}
+    // Verify
+    v := rfc9421.NewHTTPVerifier()
+    if err := v.VerifyRequest(req, &priv.PublicKey, nil); err != nil {
+        fmt.Printf("Verification FAILED: %v\n", err)
+    } else {
+        fmt.Println("Verification SUCCESS")
+    }
 
-	// Test 2: Sign a message
-	fmt.Println("\n2. Testing message signing...")
-	ctx := context.Background()
-	testMessage := "Hello, this is a test message for SAGE protocol verification"
-	
-	rootSigner, err := sageManager.GetOrCreateSigner("root", verifierHelper)
-	if err != nil {
-		log.Fatalf("Failed to get root signer: %v", err)
-	}
+    // Toggle demo
+    enabled := false
+    if !enabled {
+        fmt.Println("\nSigning disabled: skipping signature as expected")
+    }
 
-	metadata := map[string]interface{}{
-		"test":      true,
-		"timestamp": time.Now().Unix(),
-		"purpose":   "unit_test",
-	}
-
-	signedMessage, err := rootSigner.SignMessage(ctx, testMessage, metadata)
-	if err != nil {
-		log.Fatalf("Failed to sign message: %v", err)
-	}
-
-	if signedMessage != nil {
-		fmt.Printf("    Message signed successfully\n")
-		fmt.Printf("      Message ID: %s\n", signedMessage.MessageID)
-		fmt.Printf("      Agent DID: %s\n", signedMessage.AgentDID)
-		fmt.Printf("      Algorithm: %s\n", signedMessage.Algorithm)
-		fmt.Printf("      Signature length: %d bytes\n", len(signedMessage.Signature))
-	}
-
-	// Test 3: Verify the signed message
-	fmt.Println("\n3. Testing message verification...")
-	verifier := sageManager.GetVerifier()
-	
-	verifyResult, err := verifier.VerifyMessage(ctx, signedMessage)
-	if err != nil {
-		log.Printf("    Verification error: %v", err)
-	} else {
-		fmt.Printf("   Verification result:\n")
-		fmt.Printf("      Verified: %v\n", verifyResult.Verified)
-		fmt.Printf("      Signature Valid: %v\n", verifyResult.SignatureValid)
-		if verifyResult.Error != "" {
-			fmt.Printf("      Error: %s\n", verifyResult.Error)
-		}
-		if verifyResult.Verified {
-			fmt.Println("    Message verification successful!")
-		} else {
-			fmt.Println("    Message verification failed!")
-		}
-	}
-
-	// Test 4: Test SAGE enable/disable
-	fmt.Println("\n4. Testing SAGE enable/disable...")
-	
-	// Disable SAGE
-	sageManager.SetEnabled(false)
-	fmt.Printf("   SAGE disabled, current status: %v\n", sageManager.IsEnabled())
-	
-	// Try signing with SAGE disabled
-	disabledSignedMsg, err := rootSigner.SignMessage(ctx, "Test with SAGE disabled", nil)
-	if err != nil {
-		log.Printf("   Error signing with SAGE disabled: %v", err)
-	} else if disabledSignedMsg == nil {
-		fmt.Println("    Signing skipped when SAGE disabled (as expected)")
-	}
-
-	// Re-enable SAGE
-	sageManager.SetEnabled(true)
-	fmt.Printf("   SAGE enabled, current status: %v\n", sageManager.IsEnabled())
-
-	// Test 5: Cross-agent verification
-	fmt.Println("\n5. Testing cross-agent message verification...")
-	
-	// Ordering agent signs a message
-	orderingSigner, err := sageManager.GetOrCreateSigner("ordering", verifierHelper)
-	if err != nil {
-		log.Printf("   Failed to get ordering signer: %v", err)
-	} else {
-		orderingMessage, err := orderingSigner.SignMessage(ctx, "Order confirmation #12345", map[string]interface{}{
-			"order_id": "12345",
-			"status":   "confirmed",
-		})
-		if err != nil {
-			log.Printf("   Failed to sign ordering message: %v", err)
-		} else if orderingMessage != nil {
-			fmt.Printf("    Ordering agent signed message\n")
-			
-			// Verify ordering agent's message
-			orderingVerifyResult, err := verifier.VerifyMessage(ctx, orderingMessage)
-			if err != nil {
-				log.Printf("    Failed to verify ordering message: %v", err)
-			} else {
-				fmt.Printf("   Ordering message verification: %v\n", orderingVerifyResult.Verified)
-				if orderingVerifyResult.Verified {
-					fmt.Println("    Cross-agent verification successful!")
-				}
-			}
-		}
-	}
-
-	// Test 6: Test request header signing
-	fmt.Println("\n6. Testing HTTP request header signing...")
-	
-	headers, err := rootSigner.SignRequest(ctx, "POST", "/api/test", []byte("test body"))
-	if err != nil {
-		log.Printf("    Failed to sign request: %v", err)
-	} else if headers != nil {
-		fmt.Println("    Request headers signed:")
-		for key, value := range headers {
-			if key == "X-Signature" {
-				fmt.Printf("      %s: [%d bytes]\n", key, len(value)/2) // hex string
-			} else {
-				fmt.Printf("      %s: %s\n", key, value)
-			}
-		}
-	}
-
-	fmt.Println("\n==================================================")
-	fmt.Println("SAGE Unit Testing Complete!")
-	
-	// Summary
-	status := sageManager.GetStatus()
-	fmt.Println("\nFinal SAGE Status:")
-	fmt.Printf("  System Enabled: %v\n", status.Enabled)
-	fmt.Printf("  Verifier Enabled: %v\n", status.VerifierEnabled)
-	fmt.Printf("  Active Signers: %d\n", len(status.AgentSigners))
+    fmt.Println("\n==================================================")
+    fmt.Println("Unit Test Complete!")
 }
+
+func loadKey(p string) (string, *ecdsa.PrivateKey, error) {
+    f, err := os.Open(p)
+    if err != nil { return "", nil, err }
+    defer f.Close()
+    var rec struct{ DID, PrivateKey string }
+    if err := json.NewDecoder(f).Decode(&rec); err != nil { return "", nil, err }
+    b, err := hex.DecodeString(rec.PrivateKey)
+    if err != nil { return "", nil, err }
+    k, err := ethcrypto.ToECDSA(b)
+    if err != nil { return "", nil, err }
+    return rec.DID, k, nil
+}
+

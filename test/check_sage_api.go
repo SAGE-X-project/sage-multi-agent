@@ -1,24 +1,45 @@
+//go:build demo
+// +build demo
+
 package main
 
 import (
-	"fmt"
-	"log"
-	"os"
+    "fmt"
+    "log"
+    "os"
 
-	sagecrypto "github.com/sage-x-project/sage/crypto"
-	"github.com/sage-x-project/sage/crypto/keys"
-	"github.com/sage-x-project/sage/crypto/storage"
-	"github.com/sage-x-project/sage/did"
+    sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+    formats "github.com/sage-x-project/sage/pkg/agent/crypto/formats"
+    "github.com/sage-x-project/sage/pkg/agent/crypto/keys"
+    "github.com/sage-x-project/sage/pkg/agent/crypto/storage"
+    "github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 func main() {
-	fmt.Println("=== SAGE API Check ===")
-	fmt.Println()
+    fmt.Println("=== SAGE API Check ===")
+    fmt.Println()
+    // Initialize SAGE crypto wrappers before any Manager/Key invocation to avoid panics.
+    // - Key generators wire underlying implementations
+    // - Storage constructors wire in-memory storage for Manager default
+    // - Format constructors enable exporter/importer wrappers if used elsewhere
+    sagecrypto.SetKeyGenerators(
+        func() (sagecrypto.KeyPair, error) { return keys.GenerateEd25519KeyPair() },
+        func() (sagecrypto.KeyPair, error) { return keys.GenerateSecp256k1KeyPair() },
+    )
+    sagecrypto.SetStorageConstructors(
+        func() sagecrypto.KeyStorage { return storage.NewMemoryKeyStorage() },
+    )
+    sagecrypto.SetFormatConstructors(
+        formats.NewJWKExporter,
+        formats.NewPEMExporter,
+        formats.NewJWKImporter,
+        formats.NewPEMImporter,
+    )
 
 	// Test 1: Key generation
 	fmt.Println("Test 1: Key Generation")
 	fmt.Println("----------------------")
-	
+
 	// Test Ed25519
 	ed25519KeyPair, err := keys.GenerateEd25519KeyPair()
 	if err != nil {
@@ -43,10 +64,10 @@ func main() {
 	// Test 2: Storage
 	fmt.Println("Test 2: Key Storage")
 	fmt.Println("-------------------")
-	
+
 	testDir := "/tmp/sage_test_keys"
 	os.RemoveAll(testDir) // Clean up any previous test
-	
+
 	// Create storage
 	fileStorage, err := storage.NewFileKeyStorage(testDir)
 	if err != nil {
@@ -89,7 +110,7 @@ func main() {
 	// Test 3: DID types
 	fmt.Println("Test 3: DID Types")
 	fmt.Println("-----------------")
-	
+
 	// Check AgentMetadata structure
 	metadata := &did.AgentMetadata{}
 	fmt.Printf("AgentMetadata fields:\n")
@@ -103,10 +124,10 @@ func main() {
 	// Test 4: Crypto Manager
 	fmt.Println("Test 4: Crypto Manager")
 	fmt.Println("----------------------")
-	
-	manager := sagecrypto.NewManager()
-	manager.SetStorage(fileStorage)
-	
+
+    manager := sagecrypto.NewManager()
+    manager.SetStorage(fileStorage)
+
 	// Generate through manager
 	managerKey, err := manager.GenerateKeyPair(sagecrypto.KeyTypeSecp256k1)
 	if err != nil {

@@ -5,318 +5,91 @@ package main
 
 import (
 	"bytes"
-	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
-	"math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
-	"github.com/sage-x-project/sage-multi-agent/config"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/sage-x-project/sage-multi-agent/agents/payment"
+	"github.com/sage-x-project/sage-multi-agent/agents/root"
+	apihandlers "github.com/sage-x-project/sage-multi-agent/api"
+	"github.com/sage-x-project/sage-multi-agent/types"
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	keys "github.com/sage-x-project/sage/pkg/agent/crypto/keys"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
-
-// AgentServer simulates an agent server with SAGE capabilities
-type AgentServer struct {
-	agentType      string
-	port           int
-	sageManager    *adapters.SAGEManager
-	verifierHelper *adapters.VerifierHelper
-	messageSigner  *adapters.MessageSigner
-}
-
-// Message types for testing
-var testMessages = []string{
-	"Request for trip planning to Tokyo",
-	"Order confirmation for item #12345",
-	"Schedule optimization query",
-	"Product availability check",
-	"Route planning request from A to B",
-	"Purchase authorization request",
-	"Calendar sync request",
-	"Inventory status update",
-	"Weather information query",
-	"Transportation booking request",
-}
-
-// Agent communication paths
-var communicationPaths = []struct {
-	from string
-	to   string
-}{
-	{"root", "ordering"},
-	{"root", "planning"},
-	{"ordering", "root"},
-	{"planning", "root"},
-	{"ordering", "planning"},
-	{"planning", "ordering"},
-}
 
 func main() {
 	fmt.Println("==============================================")
-	fmt.Println("Agent-to-Agent SAGE Communication Test")
+	fmt.Println("HTTP → Client(A2A) → Root(sign) → Payment(verify)")
 	fmt.Println("==============================================")
 
-	// Initialize verifier helper
-	verifierHelper, err := adapters.NewVerifierHelper("keys", false)
+	// Start Payment agent
+	pay := payment.NewPaymentAgent("PaymentAgent", 18083)
+	pay.SAGEEnabled = true
+	go func() {
+		if err := pay.Start(); err != nil {
+			log.Fatalf("payment: %v", err)
+		}
+	}()
+
+	// Start Root agent with payment route
+	rt := root.NewRootAgent("RootAgent", 18080)
+	rt.SAGEEnabled = true
+	rt.RegisterAgent("payment", "PaymentAgent", "http://localhost:18083")
+	go func() {
+		if err := rt.Start(); err != nil {
+			log.Fatalf("root: %v", err)
+		}
+	}()
+
+	time.Sleep(800 * time.Millisecond)
+
+	// Client HTTP server: use api.Server to manage SAGE toggles and forwarding
+	mux := http.NewServeMux()
+	apiSrv := apihandlers.NewAgentGateway("http://localhost:18080", "http://localhost:18083", nil)
+	mux.HandleFunc("/send/prompt", apiSrv.HandlePrompt)
+	go func() { _ = http.ListenAndServe(":18085", mux) }()
+
+	time.Sleep(300 * time.Millisecond)
+
+	// Send prompt to client API which adapts to A2A
+	req := types.PromptRequest{Prompt: "please pay 100 USDC to merchant"}
+	b, _ := json.Marshal(req)
+	res, err := http.Post("http://localhost:18085/send/prompt", "application/json", bytes.NewReader(b))
 	if err != nil {
-		log.Fatalf("Failed to create verifier helper: %v", err)
+		log.Fatalf("send: %v", err)
 	}
-
-	// Create SAGE manager
-	sageManager, err := adapters.NewSAGEManager(verifierHelper)
-	if err != nil {
-		log.Fatalf("Failed to create SAGE manager: %v", err)
-	}
-
-	// Enable SAGE globally
-	sageManager.SetEnabled(true)
-	fmt.Println("\n SAGE Protocol Enabled")
-
-	// Load agent configuration
-	agentConfig, err := config.LoadAgentConfig("")
-	if err != nil {
-		log.Fatalf("Failed to load agent config: %v", err)
-	}
-
-	// Create agent simulators
-	agents := make(map[string]*AgentServer)
-
-	for agentType := range agentConfig.Agents {
-		if agentType == "client" {
-			continue // Skip client agent
-		}
-
-		signer, err := sageManager.GetOrCreateSigner(agentType, verifierHelper)
-		if err != nil {
-			log.Printf("Failed to create signer for %s: %v", agentType, err)
-			continue
-		}
-
-		agents[agentType] = &AgentServer{
-			agentType:      agentType,
-			sageManager:    sageManager,
-			verifierHelper: verifierHelper,
-			messageSigner:  signer,
-		}
-
-		fmt.Printf(" Initialized %s agent with SAGE\n", agentType)
-	}
-
-	fmt.Println("\n==============================================")
-	fmt.Println("Starting Agent Communication Tests")
-	fmt.Println("==============================================")
-
-	ctx := context.Background()
-	verifier := sageManager.GetVerifier()
-
-	// Statistics
-	totalMessages := 0
-	successfulSigns := 0
-	successfulVerifications := 0
-	failedVerifications := 0
-
-	// Run random message exchanges
-	rand.Seed(time.Now().UnixNano())
-	numTests := 10
-
-	for i := 0; i < numTests; i++ {
-		// Random communication path
-		path := communicationPaths[rand.Intn(len(communicationPaths))]
-		fromAgent := agents[path.from]
-
-		// Random message
-		message := testMessages[rand.Intn(len(testMessages))]
-
-		fmt.Printf("\n[Test %d/%d]\n", i+1, numTests)
-		fmt.Printf("📤 %s → %s\n", path.from, path.to)
-		fmt.Printf("   Message: %s\n", message)
-
-		totalMessages++
-
-		// Sign the message
-		metadata := map[string]interface{}{
-			"from":      path.from,
-			"to":        path.to,
-			"timestamp": time.Now().Unix(),
-			"test_id":   fmt.Sprintf("test_%d", i+1),
-		}
-
-		signedMessage, err := fromAgent.messageSigner.SignMessage(ctx, message, metadata)
-		if err != nil {
-			fmt.Printf("    Signing failed: %v\n", err)
-			continue
-		}
-
-		if signedMessage == nil {
-			fmt.Printf("    SAGE is disabled\n")
-			continue
-		}
-
-		successfulSigns++
-		fmt.Printf("    Message signed (ID: %s)\n", signedMessage.MessageID[:16])
-		fmt.Printf("      Algorithm: %s\n", signedMessage.Algorithm)
-		fmt.Printf("      Signature: %d bytes\n", len(signedMessage.Signature))
-
-		// Simulate network delay
-		time.Sleep(100 * time.Millisecond)
-
-		// Verify the message (simulating the receiving agent)
-		verifyResult, err := verifier.VerifyMessage(ctx, signedMessage)
-		if err != nil {
-			fmt.Printf("    Verification error: %v\n", err)
-			failedVerifications++
-			continue
-		}
-
-		if verifyResult.Verified {
-			successfulVerifications++
-			fmt.Printf("    Signature verified\n")
-			if details := verifyResult.Details; len(details) > 0 {
-				fmt.Printf("      Agent: %s\n", details["agent_name"])
-			}
-		} else {
-			failedVerifications++
-			fmt.Printf("    Verification failed: %s\n", verifyResult.Error)
-
-			// In skip-on-error mode, message would still be processed
-			if verifier.IsEnabled() {
-				fmt.Printf("    Message would be processed anyway (skip-on-error mode)\n")
-			}
-		}
-
-		// Add some delay between tests
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// Print statistics
-	fmt.Println("\n==============================================")
-	fmt.Println("Test Statistics")
-	fmt.Println("==============================================")
-	fmt.Printf("Total Messages: %d\n", totalMessages)
-	fmt.Printf("Successfully Signed: %d (%.1f%%)\n",
-		successfulSigns, float64(successfulSigns)*100/float64(totalMessages))
-	fmt.Printf("Successfully Verified: %d (%.1f%%)\n",
-		successfulVerifications, float64(successfulVerifications)*100/float64(successfulSigns))
-	fmt.Printf("Verification Failures: %d\n", failedVerifications)
-
-	// Test SAGE toggle
-	fmt.Println("\n==============================================")
-	fmt.Println("Testing SAGE Toggle")
-	fmt.Println("==============================================")
-
-	// Disable SAGE
-	fmt.Println("\n🔴 Disabling SAGE...")
-	sageManager.SetEnabled(false)
-
-	// Try to sign with SAGE disabled
-	testSigner, _ := sageManager.GetOrCreateSigner("root", verifierHelper)
-	disabledMsg, err := testSigner.SignMessage(ctx, "Test with SAGE disabled", nil)
-	if err != nil {
-		fmt.Printf("   Error: %v\n", err)
-	} else if disabledMsg == nil {
-		fmt.Println("    Signing skipped when SAGE disabled (expected behavior)")
-	} else {
-		fmt.Println("    Unexpected: message was signed with SAGE disabled")
-	}
-
-	// Re-enable SAGE
-	fmt.Println("\n Re-enabling SAGE...")
-	sageManager.SetEnabled(true)
-
-	enabledMsg, err := testSigner.SignMessage(ctx, "Test with SAGE enabled", nil)
-	if err != nil {
-		fmt.Printf("    Error: %v\n", err)
-	} else if enabledMsg != nil {
-		fmt.Println("    Signing works when SAGE enabled")
-		fmt.Printf("   Message ID: %s\n", enabledMsg.MessageID)
-	}
-
-	// Test HTTP header signing
-	fmt.Println("\n==============================================")
-	fmt.Println("Testing HTTP Request Signing")
-	fmt.Println("==============================================")
-
-	for agentType, agent := range agents {
-		headers, err := agent.messageSigner.SignRequest(ctx, "POST", "/api/message",
-			[]byte(`{"action": "test", "data": "sample"}`))
-		if err != nil {
-			fmt.Printf(" %s agent failed to sign request: %v\n", agentType, err)
-			continue
-		}
-
-		fmt.Printf(" %s agent signed HTTP request\n", agentType)
-		fmt.Printf("   Headers: %d\n", len(headers))
-		fmt.Printf("   X-Agent-DID: %s\n", headers["X-Agent-DID"])
-		fmt.Printf("   X-Signature-Algorithm: %s\n", headers["X-Signature-Algorithm"])
-
-		// Verify the request headers
-		body := []byte(`{"action": "test", "data": "sample"}`)
-		verifyResult, err := verifier.VerifyRequestHeaders(ctx, headers, body)
-		if err != nil {
-			fmt.Printf("    Header verification error: %v\n", err)
-		} else if verifyResult.Verified {
-			fmt.Printf("    Request signature verified\n")
-		} else {
-			fmt.Printf("    Request verification failed: %s\n", verifyResult.Error)
-		}
-	}
-
-	fmt.Println("\n==============================================")
-	fmt.Println("Agent Communication Test Complete!")
-	fmt.Println("==============================================")
-
-	// Final status
-	status := sageManager.GetStatus()
-	fmt.Println("\nFinal SAGE Status:")
-	fmt.Printf("  SAGE Enabled: %v\n", status.Enabled)
-	fmt.Printf("  Active Agents: %d\n", len(status.AgentSigners))
-	for agent, enabled := range status.AgentSigners {
-		fmt.Printf("    %s: %v\n", agent, enabled)
-	}
+	defer res.Body.Close()
+	out, _ := io.ReadAll(res.Body)
+	fmt.Printf("Response (%d): %s\n", res.StatusCode, string(out))
 }
 
-// Simulate sending a message via HTTP (for more realistic testing)
-func simulateHTTPMessage(from, to string, message string, signer *adapters.MessageSigner) error {
-	// This would be the actual HTTP call to another agent
-	// For now, we just simulate it
-
-	ctx := context.Background()
-
-	// Create request body
-	body := map[string]interface{}{
-		"from":      from,
-		"to":        to,
-		"message":   message,
-		"timestamp": time.Now().Unix(),
-	}
-
-	bodyBytes, err := json.Marshal(body)
+func mustLoadKeyPair(agent string) (did.AgentDID, sagecrypto.KeyPair) {
+	p := filepath.Join("keys", fmt.Sprintf("%s.key", agent))
+	f, err := os.Open(p)
 	if err != nil {
-		return err
+		log.Fatalf("open %s: %v", p, err)
 	}
-
-	// Sign the request
-	headers, err := signer.SignRequest(ctx, "POST", fmt.Sprintf("/agent/%s/message", to), bodyBytes)
+	defer f.Close()
+	var rec struct{ DID, PrivateKey string }
+	if err := json.NewDecoder(f).Decode(&rec); err != nil {
+		log.Fatalf("decode %s: %v", p, err)
+	}
+	sk, err := hex.DecodeString(rec.PrivateKey)
 	if err != nil {
-		return fmt.Errorf("failed to sign request: %w", err)
+		log.Fatalf("hex: %v", err)
 	}
-
-	// Create HTTP request (simulation)
-	req, err := http.NewRequest("POST", fmt.Sprintf("http://localhost:808X/message"), bytes.NewBuffer(bodyBytes))
+	priv := secp256k1.PrivKeyFromBytes(sk)
+	kp, err := keys.NewSecp256k1KeyPair(priv, "")
 	if err != nil {
-		return err
+		log.Fatalf("keypair: %v", err)
 	}
-
-	// Add signed headers
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	// In real scenario, this would send the request
-	// client := &http.Client{}
-	// resp, err := client.Do(req)
-
-	return nil
+	return did.AgentDID(rec.DID), kp
 }

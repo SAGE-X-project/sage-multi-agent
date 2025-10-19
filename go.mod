@@ -5,7 +5,6 @@ go 1.24.4
 toolchain go1.24.7
 
 require (
-	github.com/a2aproject/a2a-go v0.0.0-20251015143712-fea80a707227
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/ethereum/go-ethereum v1.16.1
 	github.com/gorilla/websocket v1.5.3
@@ -13,9 +12,7 @@ require (
 	github.com/sage-x-project/sage v1.1.0
 	github.com/sage-x-project/sage-a2a-go v0.0.0-20251018160016-70aba076445f
 	github.com/xeipuuv/gojsonschema v1.2.0
-	google.golang.org/grpc v1.73.0
 	gopkg.in/yaml.v3 v3.0.1
-	trpc.group/trpc-go/trpc-a2a-go v0.2.2
 )
 
 // Use local SAGE repository for development
@@ -51,8 +48,4 @@ require (
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	golang.org/x/text v0.28.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20250804133106-a7a43d27e69b // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250804133106-a7a43d27e69b // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 )
