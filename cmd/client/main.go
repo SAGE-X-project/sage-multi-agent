@@ -1,80 +1,80 @@
-// cmd/client-api/main.go
 package main
 
 import (
-	"encoding/hex"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
+	"time"
 
-	apihandlers "github.com/sage-x-project/sage-multi-agent/api"
+	"github.com/sage-x-project/sage-a2a-go/pkg/signer"
+	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
+	"github.com/sage-x-project/sage-multi-agent/types"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
-	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
 	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
-func loadClientIdentity(path string) (string, sagecrypto.KeyPair, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", nil, err
-	}
-	defer f.Close()
-	var rec struct {
-		DID        string `json:"did"`
-		PrivateKey string `json:"privateKey"`
-	}
-	if err := json.NewDecoder(f).Decode(&rec); err != nil {
-		return "", nil, err
-	}
-	privBytes, err := hex.DecodeString(strings.TrimPrefix(rec.PrivateKey, "0x"))
-	if err != nil {
-		return "", nil, fmt.Errorf("invalid private key hex: %w", err)
-	}
-	priv := secp256k1.PrivKeyFromBytes(privBytes)
-	kp, err := keys.NewSecp256k1KeyPair(priv, "")
-	if err != nil {
-		return "", nil, err
-	}
-	return rec.DID, kp, nil
-}
-
 func main() {
 	port := flag.Int("port", 8086, "client api port")
-	root := flag.String("root", "http://localhost:18080", "root agent base URL")
-	payment := flag.String("payment", "http://localhost:18083", "payment agent base URL")
-	clientKey := flag.String("client-key", filepath.Join("keys", "client.key"), "client key file")
+	rootBase := flag.String("root", "http://localhost:18080", "root base")
 	flag.Parse()
 
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// Demo: generate ephemeral key (replace with load-from-file in your tree).
+	kp, _ := keys.GenerateSecp256k1KeyPair()
+	clientDID := did.AgentDID("did:sage:ethereum:0xclient-demo")
 
-	var a2a *a2aclient.A2AClient
-	if didStr, kp, err := loadClientIdentity(*clientKey); err != nil {
-		log.Printf("[client-api] no client DID key (%v): running without A2A signing", err)
-	} else {
-		a2a = a2aclient.NewA2AClient(did.AgentDID(didStr), kp, nil)
-		log.Printf("[client-api] DID loaded: %s", didStr)
-	}
-
-	api := apihandlers.NewClientAPIWithA2A(*root, *payment, http.DefaultClient, a2a)
+	signer := signer.NewDefaultA2ASigner()
+	httpSigner := a2autil.NewSignedHTTPClient(clientDID, kp, signer, http.DefaultClient)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/send/prompt", api.HandlePrompt)
-	mux.HandleFunc("/api/payment", api.HandlePayment)
-	mux.HandleFunc("/api/ordering", api.HandleOrdering)
-	mux.HandleFunc("/api/planning", api.HandlePlanning)
 
-	sh := apihandlers.NewSAGEHandler()
-	sh.RegisterRoutes(mux)
+	// UX config
+	mux.HandleFunc("/api/sage/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"enabled":true}`))
+	})
+
+	// POST /api/payment {prompt:string}
+	mux.HandleFunc("/api/payment", func(w http.ResponseWriter, r *http.Request) {
+		var in types.PromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		defer r.Body.Close()
+
+		msg := types.AgentMessage{
+			ID:        fmt.Sprintf("api-%d", time.Now().UnixNano()),
+			From:      "client",
+			To:        "root",
+			Type:      "request",
+			Content:   in.Prompt,
+			Timestamp: time.Now(),
+			Metadata:  map[string]any{"domain": "payment"},
+		}
+		b, _ := json.Marshal(msg)
+
+		req, _ := http.NewRequest(http.MethodPost, *rootBase+"/process", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := httpSigner.Do(r.Context(), req)
+		if err != nil {
+			http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		data, _ := io.ReadAll(resp.Body)
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		w.Write(data)
+	})
 
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("[client-api] listening on %s (root=%s payment=%s)", addr, *root, *payment)
+	log.Printf("[client] on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

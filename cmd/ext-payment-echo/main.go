@@ -2,6 +2,7 @@
 package main
 
 import (
+  "encoding/json"
   "flag"
   "fmt"
   "log"
@@ -19,7 +20,11 @@ func main() {
   })
   mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
     w.Header().Set("Content-Type","application/json")
-    w.Write([]byte(`{"name":"external-echo","type":"payment","sage_enabled":false}`))
+    json.NewEncoder(w).Encode(map[string]any{
+      "name":"external-echo",
+      "type":"payment",
+      "sage_enabled": false,
+    })
   })
   addr := fmt.Sprintf(":%d", *port)
   log.Printf("external echo on %s\n", addr)
