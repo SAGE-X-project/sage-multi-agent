@@ -1,135 +1,117 @@
+// agents/payment/agent.go
 package payment
 
 import (
 	"bytes"
 	"context"
-	"crypto"
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
-	"io/ioutil" // 추가
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	"github.com/sage-x-project/sage-a2a-go/pkg/signer"
+
+	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
-	agentcrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
-// --- (추가) demo keys json 포맷 ---
-type demoKey struct {
-	Name       string `json:"name"`
-	DID        string `json:"did"`
-	PrivateKey string `json:"privateKey"` // hex (without 0x or with 0x 모두 허용)
-	Address    string `json:"address"`    // 0x....
-	PublicKey  string `json:"publicKey"`  // optional
-}
-
-func loadKeyFromFile(path, name string) (*ecdsa.PrivateKey, did.AgentDID, error) {
-	b, err := ioutil.ReadFile(path)
-	if err != nil {
-		return nil, "", fmt.Errorf("read keys: %w", err)
-	}
-	var all []demoKey
-	if err := json.Unmarshal(b, &all); err != nil {
-		return nil, "", fmt.Errorf("parse keys: %w", err)
-	}
-	for _, k := range all {
-		if k.Name == name {
-			priv, err := ethcrypto.HexToECDSA(trim0x(k.PrivateKey))
-			if err != nil {
-				return nil, "", fmt.Errorf("private key parse: %w", err)
-			}
-			// DID 우선순위: 파일의 DID 있으면 사용, 없으면 주소로 구성
-			didStr := k.DID
-			if didStr == "" {
-				addr := ethcrypto.PubkeyToAddress(priv.PublicKey).Hex()
-				didStr = fmt.Sprintf("did:sage:ethereum:%s", addr)
-			}
-			return priv, did.AgentDID(didStr), nil
-		}
-	}
-	return nil, "", fmt.Errorf("key '%s' not found in %s", name, path)
-}
-func trim0x(s string) string {
-	if len(s) >= 2 && (s[0:2] == "0x" || s[0:2] == "0X") {
-		return s[2:]
-	}
-	return s
-}
-
-// --- (추가) ecdsa -> agentcrypto.KeyPair 어댑터 ---
-type ecdsaKeyPair struct{ priv *ecdsa.PrivateKey }
-
-func (k *ecdsaKeyPair) Type() agentcrypto.KeyType     { return agentcrypto.KeyTypeSecp256k1 }
-func (k *ecdsaKeyPair) PublicKey() crypto.PublicKey   { return &k.priv.PublicKey }
-func (k *ecdsaKeyPair) PrivateKey() crypto.PrivateKey { return k.priv }
-func (k *ecdsaKeyPair) ID() string                    { return "" } // 데모에선 미사용
-func (k *ecdsaKeyPair) Sign(msg []byte) ([]byte, error) {
-	h := ethcrypto.Keccak256(msg)
-	return ethcrypto.Sign(h, k.priv) // 65바이트 (recovery 포함)
-}
-func (k *ecdsaKeyPair) Verify(message, signature []byte) error {
-	// 데모에선 검증 호출 안 쓰므로 no-op로 두거나 필요 시 구현
-	return nil
-}
-
-// --- 기존 PaymentAgent struct는 그대로 ---
+// PaymentAgent performs in-proc call from Root and signs outbound HTTP to external payment.
 type PaymentAgent struct {
 	Name        string
 	ExternalURL string
-	myDID       did.AgentDID
-	myKey       agentcrypto.KeyPair
-	httpSign    *a2autil.SignedHTTPClient
+
+	myDID did.AgentDID
+	myKey sagecrypto.KeyPair
+
+	a2a *a2aclient.A2AClient
 }
 
-// 🔧 여기만 최소 수정
+// NewPaymentAgent loads KeyPair from JWK and builds an A2A client.
+// Env:
+//
+//	PAYMENT_JWK_FILE  (e.g., keys/payment.jwk)  [required]
+//	PAYMENT_DID       (optional; if empty and key is secp256k1, DID is derived from 0xAddress)
+//	PAYMENT_EXTERNAL_URL  (default: http://localhost:5500)
 func NewPaymentAgent(name string) *PaymentAgent {
-	ext := os.Getenv("PAYMENT_EXTERNAL_URL")
-	if ext == "" {
-		ext = "http://localhost:5500"
+	ext := strings.TrimRight(envOr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "/")
+
+	jwkPath := envOr("PAYMENT_JWK_FILE", "")
+	if jwkPath == "" {
+		panic("PAYMENT_JWK_FILE is required (points to a private JWK file)")
 	}
-
-	// (중요) 등록된 키를 파일에서 로드
-	keyFile := envOr("PAYMENT_KEY_FILE", "generated_agent_keys.json")
-	keyName := envOr("PAYMENT_KEY_NAME", "payment")
-
-	priv, didVal, err := loadKeyFromFile(keyFile, keyName)
+	jwkBytes, err := os.ReadFile(jwkPath)
 	if err != nil {
-		// 안전망: 실패 시 종료보단 로그 + 에페메럴 경고(원하지 않으면 Fatal로 바꿔도 됨)
-		panic(fmt.Errorf("payment key load failed: %w", err))
+		panic(fmt.Errorf("read PAYMENT_JWK_FILE: %w", err))
 	}
-	kp := &ecdsaKeyPair{priv: priv}
 
-	s := signer.NewDefaultA2ASigner()
-	hc := a2autil.NewSignedHTTPClient(didVal, kp, s, http.DefaultClient)
+	// Import JWK → sagecrypto.KeyPair
+	jwkImp := formats.NewJWKImporter()
+	kp, err := jwkImp.Import(jwkBytes, sagecrypto.KeyFormatJWK)
+	if err != nil {
+		panic(fmt.Errorf("import JWK: %w", err))
+	}
+
+	// DID resolution: prefer env, else derive from secp256k1 address
+	didStr := strings.TrimSpace(os.Getenv("PAYMENT_DID"))
+	if didStr == "" {
+		// Best-effort DID from ethereum address if key is secp256k1
+		if ecdsaPriv, ok := kp.PrivateKey().(*ecdsa.PrivateKey); ok {
+			addr := ethcrypto.PubkeyToAddress(ecdsaPriv.PublicKey).Hex()
+			didStr = fmt.Sprintf("did:sage:ethereum:%s", addr)
+		} else {
+			// Fallback using key id if present
+			id := strings.TrimSpace(kp.ID())
+			if id == "" {
+				panic("PAYMENT_DID not set and cannot derive DID from key; set PAYMENT_DID")
+			}
+			didStr = "did:sage:generated:" + id
+		}
+	}
+	agentDID := did.AgentDID(didStr)
+
+	// Build A2A client (auto RFC9421 signing)
+	httpCli := a2aclient.NewA2AClient(agentDID, kp, http.DefaultClient)
 
 	return &PaymentAgent{
 		Name:        name,
 		ExternalURL: ext,
-		myDID:       didVal,
+		myDID:       agentDID,
 		myKey:       kp,
-		httpSign:    hc,
+		a2a:         httpCli,
 	}
 }
 
-// 그대로
+// Process: internal call (from Root) → signed HTTP to external payment → return external response
 func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (types.AgentMessage, error) {
 	reqBody, _ := json.Marshal(msg)
 	url := p.ExternalURL + "/process"
 
-	resp, err := p.httpSign.PostJSON(ctx, url, reqBody)
+	// Add Content-Digest to detect body tampering by gateway.
+	digest := a2autil.ComputeContentDigest(reqBody)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+	if err != nil {
+		return types.AgentMessage{}, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Digest", digest)
+
+	resp, err := p.a2a.Do(ctx, req)
 	if err != nil {
 		return types.AgentMessage{}, fmt.Errorf("outbound http: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var out types.AgentMessage
-	buf := new(bytes.Buffer)
+	var buf bytes.Buffer
 	_, _ = buf.ReadFrom(resp.Body)
 
 	if resp.StatusCode/100 != 2 {
@@ -157,7 +139,6 @@ func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (typ
 	return out, nil
 }
 
-// (작은 유틸)
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
