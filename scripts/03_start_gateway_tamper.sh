@@ -9,7 +9,6 @@ cd "$ROOT_DIR"
 HOST="${HOST:-localhost}"
 GATEWAY_PORT="${GATEWAY_PORT:-5500}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-# Support both ATTACK_MESSAGE and legacy ATTACK_MSG
 ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gateway'}}"
 
 mkdir -p logs pids

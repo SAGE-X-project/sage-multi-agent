@@ -18,18 +18,17 @@ if [[ -f "$ENV_FILE" ]]; then
 fi
 
 # Default ports (override via .env)
-API_PORT="${API_PORT:-8080}"
 CLIENT_PORT="${CLIENT_PORT:-8086}"
 ROOT_PORT="${ROOT_AGENT_PORT:-18080}"
 PLANNING_PORT="${PLANNING_AGENT_PORT:-18081}"
 ORDERING_PORT="${ORDERING_AGENT_PORT:-18082}"
-PAYMENT_PORT="${PAYMENT_AGENT_PORT:-18083}"
-GATEWAY_PORT="${GATEWAY_PORT:-5000}"
+GATEWAY_PORT="${GATEWAY_PORT:-5500}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
 
+# Internal Payment runs in-process inside Root (no separate port)
 PORTS=(
-  "$API_PORT" "$CLIENT_PORT" "$ROOT_PORT"
-  "$PLANNING_PORT" "$ORDERING_PORT" "$PAYMENT_PORT"
+  "$CLIENT_PORT" "$ROOT_PORT"
+  "$PLANNING_PORT" "$ORDERING_PORT"
   "$GATEWAY_PORT" "$EXT_PAYMENT_PORT"
 )
 
@@ -44,7 +43,6 @@ fi
 
 kill_port() {
   local port="$1"
-  # macOS/Linux: lsof is widely available
   local pids
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
   if [[ -z "$pids" ]]; then
@@ -52,10 +50,8 @@ kill_port() {
     return
   fi
   echo "[INFO] Killing port :$port -> PIDs: $pids"
-  # Soft kill
   kill $pids 2>/dev/null || true
   sleep 0.3
-  # Hard kill leftover
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
   if [[ -n "$pids" ]]; then
     echo "[WARN] Forcing kill on :$port -> $pids"
