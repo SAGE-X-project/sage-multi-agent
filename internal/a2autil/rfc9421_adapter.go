@@ -10,6 +10,7 @@ import (
 
 	sagesigner "github.com/sage-x-project/sage-a2a-go/pkg/signer"
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	_ "github.com/sage-x-project/sage/pkg/agent/crypto/keys" // Register algorithms via init()
 	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
@@ -24,11 +25,11 @@ func ComputeContentDigest(body []byte) string {
 type SignedHTTPClient struct {
 	DID        did.AgentDID
 	KeyPair    sagecrypto.KeyPair
-	Signer     sagesigner.A2ASigner
+	Signer     *sagesigner.DefaultA2ASigner
 	HTTPClient *http.Client
 }
 
-func NewSignedHTTPClient(did did.AgentDID, kp sagecrypto.KeyPair, signer sagesigner.A2ASigner, hc *http.Client) *SignedHTTPClient {
+func NewSignedHTTPClient(did did.AgentDID, kp sagecrypto.KeyPair, signer *sagesigner.DefaultA2ASigner, hc *http.Client) *SignedHTTPClient {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
