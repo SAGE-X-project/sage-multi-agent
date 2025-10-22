@@ -130,10 +130,9 @@ build-register: build-dir
 	@echo "$(GREEN)Registration tool built$(NC)"
 
 build-client: build-dir
-	@echo "$(YELLOW)Building client servers...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLIENT) ./$(CLIENT_DIR)/main.go
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ENHANCED_CLIENT) ./$(CLIENT_DIR)/enhanced_main.go
-	@echo "$(GREEN)Client servers built$(NC)"
+	@echo "$(YELLOW)Building client server...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLIENT) ./cmd/client/main.go
+	@echo "$(GREEN)Client server built$(NC)"
 
 # Clean build artifacts
 clean:
@@ -215,7 +214,7 @@ run-cli:
 
 run-payment:
 	@echo "$(YELLOW)Starting payment agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/payment -port 8085
+	@$(GOCMD) run ./$(CLI_DIR)/payment -port 18083
 
 # Run multi-agent system launcher
 run: build-launcher
