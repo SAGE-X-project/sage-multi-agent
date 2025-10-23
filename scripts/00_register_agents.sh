@@ -21,7 +21,6 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 # Defaults (adjust if your tree differs)
 CONTRACT_ADDRESS="0x5FbDB2315678afecb367f032d93F642f64180aa3"
 RPC_URL="http://localhost:8545"
-DEMO_FILE="$PROJECT_ROOT/../sage-fe/demo-agents-metadata.json"
 ABI_FILE="$PROJECT_ROOT/../sage/contracts/ethereum/artifacts/contracts/SageRegistryV4.sol/SageRegistryV4.json"
 KEYS_FILE="$PROJECT_ROOT/generated_agent_keys.json"
 
@@ -36,7 +35,6 @@ Usage: $0 [options]
 Options:
   --contract ADDRESS             SageRegistryV4 (proxy) address (default: $CONTRACT_ADDRESS)
   --rpc URL                      RPC endpoint (default: $RPC_URL)
-  --demo FILE                    Demo metadata file (default: $DEMO_FILE)
   --abi FILE                     ABI artifact file (default: $ABI_FILE)
   --keys FILE                    Agent keys JSON (default: $KEYS_FILE)
   --funding-key HEX              (optional) funder private key WITHOUT 0x
@@ -50,7 +48,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --contract)            CONTRACT_ADDRESS="$2"; shift 2 ;;
     --rpc)                 RPC_URL="$2"; shift 2 ;;
-    --demo)                DEMO_FILE="$2"; shift 2 ;;
     --abi)                 ABI_FILE="$2"; shift 2 ;;
     --keys)                KEYS_FILE="$2"; shift 2 ;;
     --funding-key)         FUNDING_KEY="$2"; shift 2 ;;
@@ -77,7 +74,6 @@ if [[ "$CODE" == "0x" || -z "$CODE" ]]; then
 fi
 echo -e "${GREEN} Contract found${NC}"
 
-[[ -f "$DEMO_FILE" ]] || { echo -e "${RED} Demo file not found: $DEMO_FILE${NC}"; exit 1; }
 [[ -f "$ABI_FILE"  ]] || { echo -e "${RED} ABI file not found: $ABI_FILE${NC}"; exit 1; }
 [[ -f "$KEYS_FILE" ]] || { echo -e "${RED} Keys file not found: $KEYS_FILE${NC}"; exit 1; }
 
@@ -87,7 +83,6 @@ echo " Registration Configuration"
 echo "======================================"
 echo "Contract: $CONTRACT_ADDRESS"
 echo "RPC URL : $RPC_URL"
-echo "Demo    : $DEMO_FILE"
 echo "ABI     : $ABI_FILE"
 echo "Keys    : $KEYS_FILE"
 if [[ -n "$FUNDING_KEY" ]]; then
@@ -103,7 +98,6 @@ cd "$PROJECT_ROOT"
 CMD=( go run tools/registration/register_agents.go
   -contract="$CONTRACT_ADDRESS"
   -rpc="$RPC_URL"
-  -demo="$DEMO_FILE"
   -abi="$ABI_FILE"
   -keys="$KEYS_FILE"
 )

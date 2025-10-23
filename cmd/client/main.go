@@ -1,80 +1,64 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"flag"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"time"
+	"strconv"
 
-	"github.com/sage-x-project/sage-a2a-go/pkg/signer"
-	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
-	"github.com/sage-x-project/sage-multi-agent/types"
+	"os"
+	"strings"
 
-	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
+	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
+	"github.com/sage-x-project/sage-multi-agent/api"
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 func main() {
 	port := flag.Int("port", 8086, "client api port")
-	rootBase := flag.String("root", "http://localhost:18080", "root base")
+	rootBase := flag.String("root", "http://localhost:18080", "root base URL")
+
+	clientJWK := flag.String("client-jwk", "", "client api JWK (private) path (optional)")
+	clientDID := flag.String("client-did", "", "client DID (optional)")
+
 	flag.Parse()
 
-	// Demo: generate ephemeral key (replace with load-from-file in your tree).
-	kp, _ := keys.GenerateSecp256k1KeyPair()
-	clientDID := did.AgentDID("did:sage:ethereum:0xclient-demo")
+	var a2a *a2aclient.A2AClient
+	if *clientJWK != "" {
+		raw, err := os.ReadFile(*clientJWK)
+		if err != nil {
+			log.Fatalf("read client-jwk: %v", err)
+		}
+		imp := formats.NewJWKImporter()
+		kp, err := imp.Import(raw, sagecrypto.KeyFormatJWK)
+		if err != nil {
+			log.Fatalf("import client-jwk: %v", err)
+		}
+		didStr := strings.TrimSpace(*clientDID)
+		if didStr == "" {
+			if id := strings.TrimSpace(kp.ID()); id != "" {
+				didStr = "did:sage:generated:" + id
+			} else {
+				didStr = "did:sage:client"
+			}
+		}
+		a2a = a2aclient.NewA2AClient(did.AgentDID(didStr), kp, http.DefaultClient)
+		log.Printf("[client] A2A enabled (DID=%s)", didStr)
+	}
 
-	signer := signer.NewDefaultA2ASigner()
-	httpSigner := a2autil.NewSignedHTTPClient(clientDID, kp, signer, http.DefaultClient)
+	apiServer := api.NewClientAPIWithA2A(*rootBase, "", http.DefaultClient, a2a)
 
 	mux := http.NewServeMux()
-
-	// UX config
+	mux.HandleFunc("/api/prompt", apiServer.HandlePrompt)
+	mux.HandleFunc("/api/payment", apiServer.HandlePayment)
 	mux.HandleFunc("/api/sage/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"enabled":true}`))
+		w.Write([]byte(`{"ok":true}`))
 	})
 
-	// POST /api/payment {prompt:string}
-	mux.HandleFunc("/api/payment", func(w http.ResponseWriter, r *http.Request) {
-		var in types.PromptRequest
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		defer r.Body.Close()
-
-		msg := types.AgentMessage{
-			ID:        fmt.Sprintf("api-%d", time.Now().UnixNano()),
-			From:      "client",
-			To:        "root",
-			Type:      "request",
-			Content:   in.Prompt,
-			Timestamp: time.Now(),
-			Metadata:  map[string]any{"domain": "payment"},
-		}
-		b, _ := json.Marshal(msg)
-
-		req, _ := http.NewRequest(http.MethodPost, *rootBase+"/process", bytes.NewReader(b))
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := httpSigner.Do(r.Context(), req)
-		if err != nil {
-			http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		data, _ := io.ReadAll(resp.Body)
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		w.WriteHeader(resp.StatusCode)
-		w.Write(data)
-	})
-
-	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("[client] on %s", addr)
+	addr := ":" + strconv.Itoa(*port)
+	log.Printf("[boot] client api on %s -> root=%s", addr, *rootBase)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

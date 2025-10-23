@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Start external payment server: agent (verifies RFC9421 + Content-Digest) or echo (no verify)
+
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -6,7 +8,7 @@ cd "$ROOT_DIR"
 
 HOST="${HOST:-localhost}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"   # .env 우선, 없으면 agent
+EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"   # .env overrides; default agent
 
 mkdir -p logs pids
 
@@ -37,22 +39,21 @@ kill_port "$EXT_PAYMENT_PORT"
 
 case "$EXTERNAL_IMPL" in
   agent)
-    # 에이전트 엔트리 확인 (go run 또는 사전 빌드된 바이너리 둘 다 허용)
-    if [[ -x bin/external-payment-agent ]]; then
+    # Prefer prebuilt binary if present
+    if [[ -x bin/external-payment ]]; then
       echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [bin]"
-      nohup bin/external-payment-agent -port "$EXT_PAYMENT_PORT" \
+      nohup bin/external-payment -port "$EXT_PAYMENT_PORT" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
 
-    elif [[ -f cmd/external-payment-agent/main.go ]]; then
+    elif [[ -f cmd/external-payment/main.go ]]; then
       echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [go run]"
-      # 필요하면 여기에서 체인 ENV (RPC_URL, REGISTRY_ADDR 등) export
-      nohup go run ./cmd/external-payment-agent/main.go \
+      nohup go run ./cmd/external-payment/main.go \
         -port "$EXT_PAYMENT_PORT" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
 
     else
-      echo "[ERR] EXTERNAL_IMPL=agent 이지만 cmd/external-payment-agent/main.go 가 없습니다."
-      echo "      에이전트 코드를 추가하거나, 임시로 EXTERNAL_IMPL=echo 로 실행하세요."
+      echo "[ERR] EXTERNAL_IMPL=agent but cmd/external-payment/main.go not found."
+      echo "      Add the agent code or run with EXTERNAL_IMPL=echo."
       exit 1
     fi
     ;;

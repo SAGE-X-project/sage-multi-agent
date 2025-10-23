@@ -4,19 +4,20 @@
 package main
 
 import (
-	"context"
-	"crypto/ecdsa"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"flag"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"math/big"
-	"path/filepath"
-	"strings"
-	"time"
+    "context"
+    "crypto/ecdsa"
+    "encoding/hex"
+    "encoding/json"
+    "errors"
+    "flag"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "math/big"
+    "os"
+    "path/filepath"
+    "strings"
+    "time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -27,31 +28,28 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-// -------- Demo formats --------
+// -------- Agent formats --------
 
 type DemoAgent struct {
-	Name     string `json:"name"`
-	DID      string `json:"did"`
-	Metadata struct {
-		Name         string                 `json:"name"`
-		Description  string                 `json:"description"`
-		Version      string                 `json:"version"`
-		Type         string                 `json:"type"`
-		Endpoint     string                 `json:"endpoint"`
-		PublicKey    string                 `json:"publicKey"`
-		Capabilities map[string]interface{} `json:"capabilities"`
-	} `json:"metadata"`
-}
-type DemoData struct {
-	Agents []DemoAgent `json:"agents"`
+    Name     string `json:"name"`
+    DID      string `json:"did"`
+    Metadata struct {
+        Name         string                 `json:"name"`
+        Description  string                 `json:"description"`
+        Version      string                 `json:"version"`
+        Type         string                 `json:"type"`
+        Endpoint     string                 `json:"endpoint"`
+        PublicKey    string                 `json:"publicKey"`
+        Capabilities map[string]interface{} `json:"capabilities"`
+    } `json:"metadata"`
 }
 
 type AgentKeyData struct {
-	Name       string `json:"name"`
-	DID        string `json:"did"`
-	PublicKey  string `json:"publicKey"`
-	PrivateKey string `json:"privateKey"`
-	Address    string `json:"address"`
+    Name       string `json:"name"`
+    DID        string `json:"did"`
+    PublicKey  string `json:"publicKey"`
+    PrivateKey string `json:"privateKey"`
+    Address    string `json:"address"`
 }
 
 // -------- ABI tuple for V4 --------
@@ -87,37 +85,43 @@ type RegistrationManager struct {
 }
 
 func main() {
-	// Flags (V4 = self-signed flow)
-	demoFile := flag.String("demo", "../sage-fe/demo-agents-metadata.json", "Path to demo metadata file")
-	abiPath := flag.String("abi", "../sage/contracts/ethereum/artifacts/contracts/SageRegistryV4.sol/SageRegistryV4.json", "ABI artifact (case-sensitive)")
-	contract := flag.String("contract", "", "SageRegistryV4 (proxy) address")
-	rpcURL := flag.String("rpc", "http://localhost:8545", "RPC URL")
+    // Flags (V4 = self-signed flow)
+    // Demo metadata file is no longer required; agents are derived from keys + env
+    abiPath := flag.String("abi", "../sage/contracts/ethereum/artifacts/contracts/SageRegistryV4.sol/SageRegistryV4.json", "ABI artifact (case-sensitive)")
+    contract := flag.String("contract", "", "SageRegistryV4 (proxy) address")
+    rpcURL := flag.String("rpc", "http://localhost:8545", "RPC URL")
 
-	keysFile := flag.String("keys", "generated_agent_keys.json", "Path to generated agent keys file")
+    keysFile := flag.String("keys", "generated_agent_keys.json", "Path to generated agent keys file")
 
-	// Optional funding for agent EOAs
-	fundingKeyHex := flag.String("funding-key", "", "Funder private key (without 0x)")
-	fundingAmountWei := flag.String("funding-amount-wei", "10000000000000000", "Wei to fund per agent (default 0.01 ETH)")
+    // Optional: filter agents by names (comma-separated). Default is all in keys file.
+    agentsFlag := flag.String("agents", "", "Comma-separated agent names to register (overrides env SAGE_AGENTS). Default: all in keys file")
 
-	flag.Parse()
-	if strings.TrimSpace(*contract) == "" {
-		log.Fatal("missing --contract (SageRegistryV4 proxy address)")
-	}
+    // Optional funding for agent EOAs
+    fundingKeyHex := flag.String("funding-key", "", "Funder private key (without 0x)")
+    fundingAmountWei := flag.String("funding-amount-wei", "10000000000000000", "Wei to fund per agent (default 0.01 ETH)")
 
-	// Load inputs
-	demo, err := loadDemo(*demoFile)
-	if err != nil {
-		log.Fatalf("load demo: %v", err)
-	}
-	keys, err := loadKeys(*keysFile)
-	if err != nil {
-		log.Fatalf("load keys: %v", err)
-	}
+    flag.Parse()
+    if strings.TrimSpace(*contract) == "" {
+        log.Fatal("missing --contract (SageRegistryV4 proxy address)")
+    }
 
-	rm, err := NewRegistrationManager(*rpcURL, *contract, *abiPath)
-	if err != nil {
-		log.Fatalf("init: %v", err)
-	}
+    // Load inputs
+    keys, err := loadKeys(*keysFile)
+    if err != nil {
+        log.Fatalf("load keys: %v", err)
+    }
+
+    // Resolve agent filter
+    selected := parseAgentsFilter(*agentsFlag)
+    // If no explicit filter, fall back to env, else default to all
+    if len(selected) == 0 {
+        selected = parseAgentsFilter(os.Getenv("SAGE_AGENTS"))
+    }
+
+    rm, err := NewRegistrationManager(*rpcURL, *contract, *abiPath)
+    if err != nil {
+        log.Fatalf("init: %v", err)
+    }
 
 	fmt.Println("======================================")
 	fmt.Println(" SAGE V4 Agent Registration (self-signed)")
@@ -154,33 +158,36 @@ func main() {
 	}
 	fmt.Printf("\n[Step %d] Registering agents (self-signed)...\n", step)
 
-	for _, a := range demo.Agents {
-		ak := findKey(keys, a.Name)
-		if ak == nil {
-			fmt.Printf(" - %s: no matching key in keys file, skip\n", a.Name)
-			continue
-		}
-		// Align metadata publicKey with keyfile
-		if normHex(a.Metadata.PublicKey) != normHex(ak.PublicKey) {
-			fmt.Printf("   notice: metadata publicKey != keyfile publicKey for %s; replacing\n", a.Name)
-			a.Metadata.PublicKey = ak.PublicKey
-		}
-		if err := rm.RegisterSelfSignedV4(a, *ak); err != nil {
-			fmt.Printf("   Failed to register %s: %v\n", a.Name, err)
-			continue
-		}
-		fmt.Printf("   Registered %s\n", a.Name)
-		time.Sleep(1200 * time.Millisecond)
-	}
+    // Build agents from keys + env metadata
+    agents := buildAgentsFromKeys(keys, selected)
 
-	// Verify
-	fmt.Println("\nVerification:")
-	for _, a := range demo.Agents {
-		ok, err := rm.ExistsByDID(a.DID)
-		if err != nil {
-			fmt.Printf(" - %s: error: %v\n", a.Name, err)
-			continue
-		}
+    for _, a := range agents {
+        ak := findKey(keys, a.Name)
+        if ak == nil {
+            fmt.Printf(" - %s: no matching key in keys file, skip\n", a.Name)
+            continue
+        }
+        // Align metadata publicKey with keyfile
+        if normHex(a.Metadata.PublicKey) != normHex(ak.PublicKey) {
+            fmt.Printf("   notice: metadata publicKey != keyfile publicKey for %s; replacing\n", a.Name)
+            a.Metadata.PublicKey = ak.PublicKey
+        }
+        if err := rm.RegisterSelfSignedV4(a, *ak); err != nil {
+            fmt.Printf("   Failed to register %s: %v\n", a.Name, err)
+            continue
+        }
+        fmt.Printf("   Registered %s\n", a.Name)
+        time.Sleep(1200 * time.Millisecond)
+    }
+
+    // Verify
+    fmt.Println("\nVerification:")
+    for _, a := range agents {
+        ok, err := rm.ExistsByDID(a.DID)
+        if err != nil {
+            fmt.Printf(" - %s: error: %v\n", a.Name, err)
+            continue
+        }
 		if ok {
 			fmt.Printf(" - %s: Registered\n", a.Name)
 		} else {
@@ -382,22 +389,11 @@ func (rm *RegistrationManager) FundAgentsIfNeeded(funder *ecdsa.PrivateKey, ks [
 
 // -------- Helpers --------
 
-func loadDemo(p string) (*DemoData, error) {
-	b, err := ioutil.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	var d DemoData
-	if err := json.Unmarshal(b, &d); err != nil {
-		return nil, err
-	}
-	return &d, nil
-}
 func loadKeys(p string) ([]AgentKeyData, error) {
-	b, err := ioutil.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
+    b, err := ioutil.ReadFile(p)
+    if err != nil {
+        return nil, err
+    }
 	var out []AgentKeyData
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, err
@@ -473,26 +469,99 @@ func personalHash32(msgHash common.Hash) common.Hash {
 }
 
 func mustNewType(t string) abi.Type {
-	ty, err := abi.NewType(t, "", nil)
-	if err != nil {
-		panic(err)
-	}
-	return ty
+    ty, err := abi.NewType(t, "", nil)
+    if err != nil {
+        panic(err)
+    }
+    return ty
 }
 
 func (rm *RegistrationManager) preflightCall(params RegistrationParams, from common.Address) error {
-	data, err := rm.contractABI.Pack("registerAgent", params)
-	if err != nil {
-		return err
-	}
-	msg := ethereum.CallMsg{
-		From: from,
-		To:   &rm.contractAddress,
-		Data: data,
-	}
-	_, callErr := rm.cli.CallContract(context.Background(), msg, nil)
-	if callErr != nil {
-		return fmt.Errorf("revert: %s", callErr.Error())
-	}
-	return nil
+    data, err := rm.contractABI.Pack("registerAgent", params)
+    if err != nil {
+        return err
+    }
+    msg := ethereum.CallMsg{
+        From: from,
+        To:   &rm.contractAddress,
+        Data: data,
+    }
+    _, callErr := rm.cli.CallContract(context.Background(), msg, nil)
+    if callErr != nil {
+        return fmt.Errorf("revert: %s", callErr.Error())
+    }
+    return nil
+}
+
+// ------- New helpers for env-driven config -------
+
+func parseAgentsFilter(csv string) []string {
+    csv = strings.TrimSpace(csv)
+    if csv == "" { return nil }
+    parts := strings.Split(csv, ",")
+    out := make([]string, 0, len(parts))
+    for _, p := range parts {
+        q := strings.TrimSpace(p)
+        if q != "" { out = append(out, q) }
+    }
+    return out
+}
+
+func buildAgentsFromKeys(keys []AgentKeyData, filter []string) []DemoAgent {
+    allowAll := len(filter) == 0
+    allowed := make(map[string]struct{})
+    for _, n := range filter { allowed[n] = struct{}{} }
+
+    var out []DemoAgent
+    for _, k := range keys {
+        if !allowAll {
+            if _, ok := allowed[k.Name]; !ok { continue }
+        }
+        var a DemoAgent
+        a.Name = k.Name
+        a.DID = k.DID
+        // Metadata
+        a.Metadata.Name = k.Name
+        a.Metadata.Description = getEnvPerAgent(k.Name, "DESC", "SAGE Agent "+k.Name)
+        a.Metadata.Version = getEnvPerAgent(k.Name, "VERSION", "0.1.0")
+        a.Metadata.Type = getEnvPerAgent(k.Name, "TYPE", "")
+        a.Metadata.Endpoint = getEnvPerAgent(k.Name, "ENDPOINT", "")
+        a.Metadata.PublicKey = k.PublicKey
+        a.Metadata.Capabilities = parseCapabilitiesEnv(k.Name)
+        out = append(out, a)
+    }
+    return out
+}
+
+func getEnvPerAgent(name, field, def string) string {
+    key := "SAGE_AGENT_" + toEnvKey(name) + "_" + field
+    if v := strings.TrimSpace(os.Getenv(key)); v != "" { return v }
+    return def
+}
+
+func parseCapabilitiesEnv(name string) map[string]interface{} {
+    key := "SAGE_AGENT_" + toEnvKey(name) + "_CAPABILITIES"
+    v := strings.TrimSpace(os.Getenv(key))
+    if v == "" { return map[string]interface{}{} }
+    dec := json.NewDecoder(strings.NewReader(v))
+    dec.UseNumber()
+    var m map[string]interface{}
+    if err := dec.Decode(&m); err != nil {
+        fmt.Printf("   warning: CAPABILITIES for %s is not valid JSON, ignoring\n", name)
+        return map[string]interface{}{}
+    }
+    return m
+}
+
+func toEnvKey(name string) string {
+    up := strings.ToUpper(name)
+    b := make([]rune, 0, len(up))
+    for _, r := range up {
+        if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+            b = append(b, r)
+        } else {
+            b = append(b, '_')
+        }
+    }
+    return string(b)
 }

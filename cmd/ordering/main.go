@@ -1,38 +1,67 @@
+// cmd/ordering/main.go
+// Debug server wrapper for the in-proc OrderingAgent.
+// NOTE: In production the RootAgent calls OrderingAgent.Process in-proc.
+
 package main
 
 import (
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/ordering"
+	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
-func envPort(names []string, def int) int {
-	for _, n := range names {
-		if v := os.Getenv(n); v != "" {
-			if p, err := strconv.Atoi(v); err == nil && p > 0 {
-				return p
-			}
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def
 }
 
 func main() {
-	// Default port resolves from ORDERING_PORT or ORDERING_AGENT_PORT, else 18082
-	defPort := envPort([]string{"ORDERING_PORT", "ORDERING_AGENT_PORT"}, 18082)
-
-	port := flag.Int("port", defPort, "HTTP port for Ordering Agent")
-	sage := flag.Bool("sage", true, "enable SAGE verification (inbound)")
+	port := flag.Int("port", getenvInt("ORDERING_AGENT_PORT", 18082), "HTTP port")
 	flag.Parse()
 
-	agent := ordering.NewOrderingAgent("ordering", *port)
-	agent.SAGEEnabled = *sage
+	agent := ordering.NewOrderingAgent("OrderingAgent")
 
-	log.Printf("[ordering] starting on :%d (SAGE=%v)", *port, *sage)
-	if err := agent.Start(); err != nil {
-		log.Fatal(err)
-	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name": "OrderingAgent",
+			"type": "ordering-debug",
+			"time": time.Now().Format(time.RFC3339),
+		})
+	})
+	mux.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var msg types.AgentMessage
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		out, err := agent.Process(r.Context(), msg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+
+	addr := fmt.Sprintf(":%d", *port)
+	log.Printf("[ordering-debug] listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One-click launcher (minimal):
-# external payment (agent|echo) -> gateway (tamper|pass) -> payment(:18083) -> root -> client
+# One-click launcher (minimal, IN-PROC sub-agents):
+# external payment (agent|echo) -> gateway (tamper|pass) -> root (in-proc planning/ordering/payment) -> client
+#
 # Options:
 #   --tamper                  start gateway with tamper ON  (default)
 #   --pass | --passthrough    start gateway pass-through
@@ -14,14 +15,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 mkdir -p logs
 
+# load .env if present
 [[ -f .env ]] && source .env
 
+# ---------- Defaults ----------
 HOST="${HOST:-localhost}"
 ROOT_PORT="${ROOT_PORT:-${ROOT_AGENT_PORT:-8080}}"
 CLIENT_PORT="${CLIENT_PORT:-8086}"
 GATEWAY_PORT="${GATEWAY_PORT:-5500}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-PAYMENT_PORT="${PAYMENT_PORT:-${PAYMENT_AGENT_PORT:-18083}}"
+
+# Payment sub-agent (IN-PROC) needs these to call outward
+PAYMENT_EXTERNAL_URL_DEFAULT="http://${HOST}:${GATEWAY_PORT}"
+PAYMENT_EXTERNAL_URL="${PAYMENT_EXTERNAL_URL:-$PAYMENT_EXTERNAL_URL_DEFAULT}"
+PAYMENT_JWK_FILE="${PAYMENT_JWK_FILE:-keys/payment.jwk}"   # MUST exist for signing
+# optional: PAYMENT_DID (derive from key if empty)
 
 GATEWAY_MODE="tamper"                         # tamper|pass
 EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"       # agent|echo
@@ -31,9 +39,16 @@ FORCE_KILL=0
 usage() {
   cat <<EOF
 Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--external agent|echo] [--force-kill]
+
+Examples:
+  $0 --tamper                           # gateway가 바디 조작 (기본)
+  $0 --pass                             # 게이트웨이 패스스루
+  $0 --tamper --attack-msg "[MITM]"     # 조작 문구 지정
+  $0 --external echo                    # 외부 결제 echo 모드
 EOF
 }
 
+# ---------- Args ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --tamper)        GATEWAY_MODE="tamper"; shift ;;
@@ -85,29 +100,40 @@ start_bg() {
   if ! wait_tcp "$HOST" "$port" 60 0.2; then tail_fail "$name"; exit 1; fi
 }
 
-# 0) optional kill
+# ---------- 0) optional kill ----------
 if [[ $FORCE_KILL -eq 1 ]]; then
   "$ROOT_DIR/scripts/kill_ports.sh" --force || true
 fi
 
-# 1) External payment (agent|echo)
+# ---------- preflight: payment JWK ----------
+if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
+  echo "[ERR] PAYMENT_JWK_FILE not found: $PAYMENT_JWK_FILE"
+  echo "      Put a JWK at that path or export PAYMENT_JWK_FILE=<path>"
+  exit 1
+fi
+
+# ---------- 1) External payment (agent|echo) ----------
 EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" \
   "$ROOT_DIR/scripts/02_start_external_payment_agent.sh"
 
-# 2) Gateway
-if [[ -f cmd/gateway/main.go ]]; then
+# ---------- 2) Gateway (relay to external payment) ----------
+if [[ -f cmd/ggateway/main.go || -f cmd/gateway/main.go ]]; then
+  # 경로 호환: cmd/ggateway 또는 cmd/gateway
+  GW_MAIN="cmd/gateway/main.go"
+  [[ -f cmd/ggateway/main.go ]] && GW_MAIN="cmd/ggateway/main.go"
+
   if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$GATEWAY_PORT"; fi
   if [[ "$GATEWAY_MODE" == "pass" ]]; then
     echo "[mode] Gateway PASS-THROUGH"
     start_bg "gateway" "$GATEWAY_PORT" \
-      go run ./cmd/gateway/main.go \
+      go run "./${GW_MAIN}" \
         -listen ":${GATEWAY_PORT}" \
         -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" \
         -attack-msg ""
   else
     echo "[mode] Gateway TAMPER (attack-msg length: ${#ATTACK_MESSAGE})"
     start_bg "gateway" "$GATEWAY_PORT" \
-      go run ./cmd/gateway/main.go \
+      go run "./${GW_MAIN}" \
         -listen ":${GATEWAY_PORT}" \
         -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" \
         -attack-msg "${ATTACK_MESSAGE}"
@@ -116,32 +142,29 @@ else
   echo "[SKIP] gateway main not found"
 fi
 
-# 3) Internal Payment (HTTP on :18083)  ← 루트가 이 URL 호출하므로 꼭 켠다
-if [[ "${INPROC_PAYMENT:-1}" == "0" ]]; then
-  echo "[START] payment on :${PAYMENT_PORT:-18083}"
-  echo "[CMD] go run ./cmd/payment/main.go -port ${PAYMENT_PORT:-18083} -external http://${HOST}:${GATEWAY_PORT}"
-  ( go run ./cmd/payment/main.go -port "${PAYMENT_PORT:-18083}" -external "http://${HOST}:${GATEWAY_PORT}" ) >"logs/payment.log" 2>&1 &
-  if ! wait_tcp "$HOST" "${PAYMENT_PORT:-18083}" 60 0.2; then tail_fail "payment"; exit 1; fi
-else
-  echo "[SKIP] payment (in-proc mode)"
-fi
+# ---------- 3) Root (IN-PROC sub agents). 서브 결제가 외부로 나갈 때 쓸 ENV 주입 ----------
+ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}" )
+if [[ -n "${PAYMENT_DID:-}" ]]; then ROOT_ENV+=( "PAYMENT_DID=${PAYMENT_DID}" ); fi
 
-# 4) Root  (※ -planning / -ordering 절대 전달하지 않음)
+echo "[ENV] PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
+echo "[ENV] PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
+[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV] PAYMENT_DID=${PAYMENT_DID}"
+
 start_bg "root" "$ROOT_PORT" \
+  env "${ROOT_ENV[@]}" \
   go run ./cmd/root/main.go \
     -port "$ROOT_PORT"
 
-# 5) Client API
+# ---------- 4) Client API ----------
 start_bg "client" "$CLIENT_PORT" \
   go run ./cmd/client/main.go \
     -port "$CLIENT_PORT" \
     -root "http://${HOST}:${ROOT_PORT}"
 
-# Summary
+# ---------- Summary ----------
 echo "--------------------------------------------------"
 printf "[CHK] %-22s %s\n" "External Payment" "http://${HOST}:${EXT_PAYMENT_PORT}/status"
 printf "[CHK] %-22s %s\n" "Gateway (TCP)"     "tcp://${HOST}:${GATEWAY_PORT}"
-printf "[CHK] %-22s %s\n" "Payment (internal)" "tcp://${HOST}:${PAYMENT_PORT}"
 printf "[CHK] %-22s %s\n" "Root"              "http://${HOST}:${ROOT_PORT}/status"
 printf "[CHK] %-22s %s\n" "Client API"        "http://${HOST}:${CLIENT_PORT}/api/sage/config"
 echo "--------------------------------------------------"
@@ -157,4 +180,4 @@ for url in \
   fi
 done
 
-echo "[DONE] Startup (minimal) initiated. Use: tail -f logs/*.log"
+echo "[DONE] Startup (minimal, in-proc sub-agents) initiated. Use: tail -f logs/*.log"

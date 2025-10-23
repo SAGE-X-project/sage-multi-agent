@@ -17,6 +17,7 @@ require (
 
 // Use local SAGE repository for development
 replace github.com/sage-x-project/sage => ../sage
+replace github.com/sage-x-project/sage-a2a-go  => ../sage-a2a-go
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

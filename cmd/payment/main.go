@@ -1,140 +1,117 @@
 // cmd/payment/main.go
+// Debug server wrapper for the in-proc PaymentAgent.
+// PaymentAgent signs outbound HTTP to the external payment service (usually via the gateway)
+// ONLY when SAGE is enabled. In production the RootAgent calls PaymentAgent.Process in-proc.
+
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/payment"
-	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
-func envPort(names []string, def int) int {
-	for _, n := range names {
-		if v := os.Getenv(n); v != "" {
-			if p, err := strconv.Atoi(v); err == nil && p > 0 {
-				return p
-			}
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+func getenvStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+func getenvBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch v {
+		case "1", "true", "TRUE", "on", "yes":
+			return true
+		case "0", "false", "FALSE", "off", "no":
+			return false
 		}
 	}
 	return def
 }
 
-func normalizeBase(u string) string {
-	u = strings.TrimSpace(u)
-	if u == "" {
-		return ""
-	}
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		u = "http://" + u
-	}
-	if _, err := url.Parse(u); err != nil {
-		return ""
-	}
-	return u
-}
-
 func main() {
-	// 기본 포트: PAYMENT_PORT / PAYMENT_AGENT_PORT / 18083
-	defPort := envPort([]string{"PAYMENT_PORT", "PAYMENT_AGENT_PORT"}, 18083)
-
-	name := flag.String("name", "payment", "Payment agent name")
-	port := flag.Int("port", defPort, "HTTP port for Payment Agent")
-	external := flag.String("external", "", "Upstream payment base URL (e.g. http://localhost:5500)")
-	upstream := flag.String("upstream", "", "Alias of --external")
-
-	// (선택) inbound DID 검증 — 기본은 꺼짐(루트→내부는 보통 in-proc)
-	sage := flag.Bool("sage", false, "Enable inbound DID verification (demo)")
-	keys := flag.String("keys", envOr("SAGE_KEYS_JSON", "generated_agent_keys.json"), "path to DID keys json for demo resolver")
-	optional := flag.Bool("optional", false, "allow unsigned requests when --sage (demo only)")
-
+	port := flag.Int("port", getenvInt("PAYMENT_AGENT_PORT", 18083), "HTTP port")
+	external := flag.String("external", getenvStr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "External payment base (gateway)")
+	jwk := flag.String("jwk", getenvStr("PAYMENT_JWK_FILE", ""), "Private JWK for outbound signing (required if SAGE enabled)")
+	did := flag.String("did", getenvStr("PAYMENT_DID", ""), "DID override (optional)")
+	sage := flag.Bool("sage", getenvBool("PAYMENT_SAGE_ENABLED", true), "Enable outbound signing (SAGE)")
 	flag.Parse()
 
-	// --upstream 별칭
-	if *upstream != "" && *external == "" {
-		*external = *upstream
+	// Export to env so agent picks them via envOr()
+	_ = os.Setenv("PAYMENT_EXTERNAL_URL", *external)
+	if *jwk != "" {
+		_ = os.Setenv("PAYMENT_JWK_FILE", *jwk)
 	}
-	// 업스트림 주소를 env로 주입 (payment.NewPaymentAgent가 이 값을 읽음)
-	if *external != "" {
-		base := normalizeBase(*external)
-		if base == "" {
-			log.Fatalf("[payment] invalid --external/--upstream value: %q", *external)
-		}
-		os.Setenv("PAYMENT_EXTERNAL_URL", base)
+	if *did != "" {
+		_ = os.Setenv("PAYMENT_DID", *did)
 	}
 
-	// 내부 에이전트 생성 (패키지 시그니처에 맞춤)
-	agent := payment.NewPaymentAgent(*name)
+	agent := payment.NewPaymentAgent("PaymentAgent")
+	agent.SAGEEnabled = *sage
 
 	mux := http.NewServeMux()
-
-	// Health
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name":         "internal-payment",
-			"agent_name":   *name,
-			"sage_enabled": *sage,
-			"upstream":     os.Getenv("PAYMENT_EXTERNAL_URL"),
+			"name":         "PaymentAgent",
+			"type":         "payment-debug",
+			"external_url": agent.ExternalURL,
+			"sage_enabled": agent.SAGEEnabled,
+			"time":         time.Now().Format(time.RFC3339),
 		})
 	})
-
-	// /process : Root가 호출하는 엔드포인트.
-	// 바디(JSON)를 types.AgentMessage로 파싱 → agent.Process 호출 → JSON 반환
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/toggle-sage", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		var in types.AgentMessage
+		var in struct {
+			Enabled bool `json:"enabled"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
-		_ = r.Body.Close()
-
-		// 타임아웃 있는 컨텍스트로 외부 결제 호출
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		out, err := agent.Process(ctx, in)
+		agent.SAGEEnabled = in.Enabled
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": in.Enabled})
+	})
+	mux.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var msg types.AgentMessage
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		out, err := agent.Process(r.Context(), msg)
 		if err != nil {
-			http.Error(w, "process error: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	})
 
-	var handler http.Handler = inner
-	if *sage {
-		// external-payment와 동일한 방식의 DID 미들웨어 (데모용)
-		mw, err := a2autil.BuildDIDMiddlewareFromChain(*keys, *optional)
-		if err != nil {
-			log.Fatalf("didauth init: %v", err)
-		}
-		handler = mw.Wrap(inner)
-	}
-	mux.Handle("/process", handler)
-
-	addr := ":" + strconv.Itoa(*port)
-	log.Printf("[payment] starting on %s (name=%s SAGE=%v upstream=%s)",
-		addr, *name, *sage, os.Getenv("PAYMENT_EXTERNAL_URL"))
+	addr := fmt.Sprintf(":%d", *port)
+	log.Printf("[payment-debug] listening on %s (SAGE=%v, external=%s)", addr, agent.SAGEEnabled, agent.ExternalURL)
 	log.Fatal(http.ListenAndServe(addr, mux))
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }
