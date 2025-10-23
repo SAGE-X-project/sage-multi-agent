@@ -137,7 +137,7 @@ func (r *RootAgent) mountRoutes() {
 }
 
 func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
-	// 1) metadata.domain
+	// 1) explicit domain
 	if msg.Metadata != nil {
 		if v, ok := msg.Metadata["domain"]; ok {
 			if s, ok2 := v.(string); ok2 && s != "" {
@@ -149,10 +149,11 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 			}
 		}
 	}
-	// 2) content keyword heuristic
-	c := strings.ToLower(msg.Content)
+
+	// 2) heuristic by content
+	c := strings.ToLower(strings.TrimSpace(msg.Content))
 	switch {
-	case containsAny(c, "pay", "payment", "송금", "결제", "wallet", "transfer", "crypto"):
+	case containsAny(c, "pay", "payment", "send", "wallet", "transfer", "crypto", "usdc", "송금", "결제"):
 		if r.payment != nil {
 			return "payment"
 		}
@@ -165,6 +166,7 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 			return "planning"
 		}
 	}
+
 	if r.planning != nil {
 		return "planning"
 	}
@@ -179,10 +181,11 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 
 func containsAny(s string, needles ...string) bool {
 	for _, n := range needles {
+		n = strings.TrimSpace(strings.ToLower(n))
 		if n == "" {
 			continue
 		}
-		if strings.Contains(s, strings.ToLower(n)) {
+		if strings.Contains(s, n) {
 			return true
 		}
 	}

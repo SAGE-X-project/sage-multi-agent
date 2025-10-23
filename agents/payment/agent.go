@@ -4,17 +4,23 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
+	"golang.org/x/crypto/sha3"
 
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
@@ -145,11 +151,62 @@ func (p *PaymentAgent) initSigning() error {
 		return fmt.Errorf("import payment JWK: %w", err)
 	}
 
+	var check formats.JWK
+	if err := json.Unmarshal(raw, &check); err != nil {
+		log.Printf("[SIGNER][JWK] unmarshal err=%v", err)
+	}
+
+	xb, errX := base64.RawURLEncoding.DecodeString(check.X)
+	yb, errY := base64.RawURLEncoding.DecodeString(check.Y)
+	db, errD := base64.RawURLEncoding.DecodeString(check.D)
+
+	log.Printf("[SIGNER][JWK] kid=%s alg=%s crv=%s use=%s", check.Kid, check.Alg, check.Crv, check.Use)
+	if errX != nil || errY != nil {
+		log.Printf("[SIGNER][JWK] coord decode error x=%v y=%v", errX, errY)
+	}
+	log.Printf("[SIGNER][JWK] X=%x", xb)
+	log.Printf("[SIGNER][JWK] Y=%x", yb)
+	if errD == nil {
+		log.Printf("[SIGNER][JWK] D=%x  (TEST ONLY! NEVER LOG IN PROD)", db)
+	} else {
+		log.Printf("[SIGNER][JWK] D=<none/err=%v>", errD)
+	}
+
+	// 비압축 공개키 0x04 || X || Y
+	uncompressed := make([]byte, 1+32+32)
+	uncompressed[0] = 0x04
+	copy(uncompressed[1:33], xb)
+	copy(uncompressed[33:], yb)
+	log.Printf("[SIGNER][JWK] pub(uncompressed)=0x%s", hex.EncodeToString(uncompressed))
+
+	// 압축 공개키 0x02/0x03 || X   (Y 짝/홀로 prefix 결정)
+	prefix := byte(0x02)
+	if (yb[len(yb)-1] & 1) == 1 {
+		prefix = 0x03
+	}
+	compressed := append([]byte{prefix}, xb...)
+	log.Printf("[SIGNER][JWK] pub(compressed)=0x%s", hex.EncodeToString(compressed))
+
+	// (선택) 이더리움 주소 추출: keccak256(uncompressed[1:])의 마지막 20바이트
+	h := sha3.NewLegacyKeccak256()
+	h.Write(uncompressed[1:])
+	sum := h.Sum(nil)
+	addr := sum[12:]
+	log.Printf("[SIGNER][JWK] eth_address=0x%s  (compare with DID suffix)", hex.EncodeToString(addr))
+
+	// (선택) *ecdsa.PublicKey로도 만들어서 좌표/커브 확인
+	pub := &ecdsa.PublicKey{
+		Curve: secp256k1.S256(),
+		X:     new(big.Int).SetBytes(xb),
+		Y:     new(big.Int).SetBytes(yb),
+	}
+	log.Printf("[SIGNER][JWK] ecdsa pub OK? X=%x Y=%x curve=%T", pub.X, pub.Y, pub.Curve)
 	didStr := strings.TrimSpace(os.Getenv("PAYMENT_DID"))
 	if didStr == "" {
 		if ecdsaPriv, ok := kp.PrivateKey().(*ecdsa.PrivateKey); ok {
 			addr := ethcrypto.PubkeyToAddress(ecdsaPriv.PublicKey).Hex()
 			didStr = "did:sage:ethereum:" + addr
+
 		} else if id := strings.TrimSpace(kp.ID()); id != "" {
 			didStr = "did:sage:generated:" + id
 		} else {
