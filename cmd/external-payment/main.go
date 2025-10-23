@@ -55,12 +55,26 @@ func main() {
 		_, _ = buf.ReadFrom(r.Body)
 		r.Body.Close()
 
+		bodyStr := strings.ReplaceAll(buf.String(), "\n", "\\n")
 		// Content-Digest check (tamper detection)
-		want := r.Header.Get("Content-Digest")
-		got := a2autil.ComputeContentDigest(buf.Bytes())
-		if want != "" && want != got {
-			http.Error(w, "content-digest mismatch (tampered in transit)", http.StatusUnauthorized)
-			return
+		if *requireSig {
+			// SAGE ON : Read RFC-9421 and verify signatrue
+			sig := r.Header.Get("Signature")
+			sigIn := r.Header.Get("Signature-Input")
+			want := r.Header.Get("Content-Digest")
+			got := a2autil.ComputeContentDigest(buf.Bytes())
+
+			log.Printf("[RX][STRICT] sig=%q sig-input=%q digest(want)=%q got=%q", sig, sigIn, want, got)
+			log.Printf("[RX][STRICT] body=%s", bodyStr)
+
+			if want != "" && want != got {
+				http.Error(w, "content-digest mismatch (tampered in transit)", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			// SAGE OFF
+			log.Printf("[RX][LENIENT] SAGE disabled; accepting without signature checks")
+			log.Printf("[RX][LENIENT] body=%s", bodyStr)
 		}
 
 		var in types.AgentMessage

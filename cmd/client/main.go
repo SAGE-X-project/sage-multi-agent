@@ -4,9 +4,8 @@ import (
 	"flag"
 	"log"
 	"net/http"
-	"strconv"
-
 	"os"
+	"strconv"
 	"strings"
 
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
@@ -20,9 +19,8 @@ func main() {
 	port := flag.Int("port", 8086, "client api port")
 	rootBase := flag.String("root", "http://localhost:18080", "root base URL")
 
-	clientJWK := flag.String("client-jwk", "", "client api JWK (private) path (optional)")
-	clientDID := flag.String("client-did", "", "client DID (optional)")
-
+	clientJWK := flag.String("client-jwk", "", "optional: path to JWK (private) for signing client->root")
+	clientDID := flag.String("client-did", "", "optional: DID to use for client signing")
 	flag.Parse()
 
 	var a2a *a2aclient.A2AClient
@@ -45,14 +43,14 @@ func main() {
 			}
 		}
 		a2a = a2aclient.NewA2AClient(did.AgentDID(didStr), kp, http.DefaultClient)
-		log.Printf("[client] A2A enabled (DID=%s)", didStr)
+		log.Printf("[client] A2A signing enabled (DID=%s)", didStr)
 	}
 
 	apiServer := api.NewClientAPIWithA2A(*rootBase, "", http.DefaultClient, a2a)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/prompt", apiServer.HandlePrompt)
-	mux.HandleFunc("/api/payment", apiServer.HandlePayment)
+	// Single public endpoint. Routing is done by Root.
+	mux.HandleFunc("/api/request", apiServer.HandleRequest)
 	mux.HandleFunc("/api/sage/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`))
