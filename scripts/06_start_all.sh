@@ -113,14 +113,26 @@ if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
 fi
 
 # ---------- 1) External payment (agent|echo) ----------
-EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" \
+SMODE="$(printf '%s' "${SAGE_MODE:-on}" | tr '[:upper:]' '[:lower:]')"
+case "$SMODE" in
+  off|false|0|no) EXT_VERIFY="off" ;;
+  *)              EXT_VERIFY="on"  ;;
+esac
+
+# on → 1, off → 0
+EXTERNAL_REQUIRE_SIG=0
+[ "$EXT_VERIFY" = "on" ] && EXTERNAL_REQUIRE_SIG=1
+
+echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
+echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG} -> -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)"
+
+EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" EXTERNAL_REQUIRE_SIG="$EXTERNAL_REQUIRE_SIG"\
   "$ROOT_DIR/scripts/02_start_external_payment_agent.sh"
 
 # ---------- 2) Gateway (relay to external payment) ----------
-if [[ -f cmd/ggateway/main.go || -f cmd/gateway/main.go ]]; then
+if [[ -f cmd/gateway/main.go ]]; then
   # 경로 호환: cmd/ggateway 또는 cmd/gateway
   GW_MAIN="cmd/gateway/main.go"
-  [[ -f cmd/ggateway/main.go ]] && GW_MAIN="cmd/ggateway/main.go"
 
   if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$GATEWAY_PORT"; fi
   if [[ "$GATEWAY_MODE" == "pass" ]]; then

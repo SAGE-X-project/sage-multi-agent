@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Start external payment server: agent (verifies RFC9421 + Content-Digest) or echo (no verify)
-
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -8,7 +6,8 @@ cd "$ROOT_DIR"
 
 HOST="${HOST:-localhost}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"   # .env overrides; default agent
+EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"
+EXTERNAL_REQUIRE_SIG="${EXTERNAL_REQUIRE_SIG:-1}"  # 1=필수, 0=선택
 
 mkdir -p logs pids
 
@@ -35,22 +34,26 @@ wait_http() {
 }
 
 echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
+echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG} -> -require $([ "$EXTERNAL_REQUIRE_SIG" = "1" ] && echo true || echo false)"
 kill_port "$EXT_PAYMENT_PORT"
+
+REQ_ARGS=()
+if [ "${EXTERNAL_REQUIRE_SIG}" = "1" ]; then
+  REQ_ARGS+=("-require")          # true (기본 true지만 명시)
+else
+  REQ_ARGS+=("-require=false")    # 선택
+fi
 
 case "$EXTERNAL_IMPL" in
   agent)
-    # Prefer prebuilt binary if present
     if [[ -x bin/external-payment ]]; then
-      echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [bin]"
-      nohup bin/external-payment -port "$EXT_PAYMENT_PORT" \
+      echo "[start] External Payment (AGENT, verify=$([ "${EXTERNAL_REQUIRE_SIG}" = "1" ] && echo true || echo false)) :${EXT_PAYMENT_PORT} [bin]"
+      nohup bin/external-payment -port "$EXT_PAYMENT_PORT" "${REQ_ARGS[@]}" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
-
     elif [[ -f cmd/external-payment/main.go ]]; then
-      echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [go run]"
-      nohup go run ./cmd/external-payment/main.go \
-        -port "$EXT_PAYMENT_PORT" \
+      echo "[start] External Payment (AGENT, verify=$([ "${EXTERNAL_REQUIRE_SIG}" = "1" ] && echo true || echo false)) :${EXT_PAYMENT_PORT} [go run]"
+      nohup go run ./cmd/external-payment/main.go -port "$EXT_PAYMENT_PORT" "${REQ_ARGS[@]}" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
-
     else
       echo "[ERR] EXTERNAL_IMPL=agent but cmd/external-payment/main.go not found."
       echo "      Add the agent code or run with EXTERNAL_IMPL=echo."
@@ -59,6 +62,7 @@ case "$EXTERNAL_IMPL" in
     ;;
 
   echo)
+    # (echo 모드는 서명검증 무의미하므로 그대로)
     if [[ ! -f cmd/ext-payment-echo/main.go ]]; then
       echo "[GEN] Creating minimal external echo at cmd/ext-payment-echo/main.go"
       mkdir -p cmd/ext-payment-echo
@@ -103,7 +107,6 @@ EOF
       -port "$EXT_PAYMENT_PORT" \
       > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
     ;;
-
   *)
     echo "[ERR] Unknown EXTERNAL_IMPL=$EXTERNAL_IMPL (use 'agent' or 'echo')"
     exit 1

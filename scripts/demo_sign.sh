@@ -2,16 +2,16 @@
 # Demo: Client API -> Root (routes to in-proc Payment) -> signed HTTP -> Gateway (tamper/pass) -> External Agent (verify) -> back
 #
 # Options:
-#   --sage on|off              # SAGE 서명 사용 여부 (기본: on; in-proc Payment -> External 서명)
-#   --tamper | --pass          # Gateway 조작 여부 (기본: --tamper)
-#   --attack-msg "<txt>"       # tamper일 때 바디에 덧붙일 텍스트
-#   --prompt "<text>"          # 결제 시나리오 프롬프트 (기본: "send 10 USDC to merchant")
-#   --force-kill               # 시작 전에 포트 점유 프로세스 강제 종료
+#   --sage on|off              # SAGE signing flag for sub-agents' outbound calls (default: on)
+#   --tamper | --pass          # Gateway tamper mode (default: --tamper)
+#   --attack-msg "<txt>"       # message to append in tamper mode
+#   --prompt "<text>"          # demo prompt (e.g., "send 10 USDC to merchant")
+#   --force-kill               # kill occupied ports before start
 #
-# 동작:
-# 1) minimal bring-up (external payment + gateway + root + client) 실행
-# 2) 클라이언트 API에 결제 요청 전송 (X-SAGE-Enabled 헤더로 on/off)
-# 3) 응답/검증 결과 요약 및 로그 tail 출력 (탐지 시 "external error: 401 ..." 확인)
+# Flow:
+#   1) bring up external payment + gateway + root + client
+#   2) POST to client /api/request with X-SAGE-Enabled header
+#   3) show summarized result + tail logs
 
 set -Eeuo pipefail
 
@@ -22,22 +22,20 @@ mkdir -p logs run tmp
 # ---- defaults (env override) ----
 [[ -f .env ]] && source .env
 
-# 안전한 기본값 강제 지정 (set -u 대비)
 : "${HOST:=localhost}"
 : "${ROOT_AGENT_PORT:=18080}"
 : "${ROOT_PORT:=${ROOT_AGENT_PORT}}"
 : "${CLIENT_PORT:=8086}"
 : "${GATEWAY_PORT:=5500}"
 : "${EXT_PAYMENT_PORT:=19083}"
-: "${PAYMENT_AGENT_PORT:=18083}"            # 디버그용 Payment HTTP를 별도로 켤 때만 사용
-: "${CHECK_PAYMENT_STATUS:=0}"               # 1이면 :PAYMENT_AGENT_PORT /status도 체크
+: "${PAYMENT_AGENT_PORT:=18083}"
+: "${CHECK_PAYMENT_STATUS:=0}"
 
-# 결제 서브에이전트가 외부로 나갈 때 사용하는 JWK (서명용)
 : "${PAYMENT_JWK_FILE:=keys/payment.jwk}"
-: "${PAYMENT_DID:=}"   # 비워두면 키에서 유도
+: "${PAYMENT_DID:=}"
 
-SAGE_MODE="on"                   # on|off (클라이언트->루트 헤더 & 루트의 /toggle-sage 동기화)
-GW_MODE="tamper"                 # tamper|pass
+SAGE_MODE="on"
+GW_MODE="tamper"
 ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gateway'}}"
 PROMPT="send 10 USDC to merchant"
 FORCE_KILL=0
@@ -45,11 +43,6 @@ FORCE_KILL=0
 usage() {
   cat <<EOF
 Usage: $0 [--sage on|off] [--tamper|--pass] [--attack-msg "<txt>"] [--prompt "<text>"] [--force-kill]
-
-Examples:
-  $0 --sage on --tamper
-  $0 --sage off --pass
-  $0 --sage on --tamper --attack-msg "[MITM TEST]" --prompt "transfer 50 USDC"
 EOF
 }
 
@@ -69,11 +62,11 @@ done
 need() { command -v "$1" >/dev/null 2>&1 || { echo "[ERR] '$1' not found"; exit 1; }; }
 need go
 need curl
+
 if ! command -v jq >/dev/null 2>&1; then
-  echo "[WARN] 'jq' not found; JSON 결과 요약이 제한됩니다. (brew/apt로 jq 설치 권장)"
+  echo "[WARN] 'jq' not found; will fallback to safe shell escaping for JSON."
 fi
 
-# ---- helper ----
 wait_http() {
   local url="$1" tries="${2:-60}" delay="${3:-0.2}"
   for ((i=1;i<=tries;i++)); do
@@ -103,7 +96,8 @@ if [[ "$GW_MODE" == "pass" ]]; then UP_ARGS+=(--pass); else UP_ARGS+=(--tamper -
 if [[ $FORCE_KILL -eq 1 ]]; then UP_ARGS+=(--force-kill); fi
 
 echo "[UP] starting stack via scripts/06_start_all.sh ${UP_ARGS[*]}"
-PAYMENT_JWK_FILE="$PAYMENT_JWK_FILE" PAYMENT_DID="$PAYMENT_DID" \
+
+SAGE_MODE="$SAGE_MODE" PAYMENT_JWK_FILE="$PAYMENT_JWK_FILE" PAYMENT_DID="$PAYMENT_DID" \
   bash ./scripts/06_start_all.sh "${UP_ARGS[@]}"
 
 # ---- 2) wait for endpoints ----
@@ -121,36 +115,33 @@ do
   fi
 done
 
-# 선택적으로 Payment 디버그 HTTP도 확인하고 싶다면
-if [[ "${CHECK_PAYMENT_STATUS}" == "1" ]]; then
-  url="http://${HOST}:${PAYMENT_AGENT_PORT}/status"
-  if wait_http "$url" 20 0.2; then
-    echo "[OK] $url"
-  else
-    echo "[WARN] not ready: $url"
-  fi
-fi
-
-# ---- 3) fire a payment request through Client API ----
-SAGE_HDR="false"
-# (macOS bash 3 호환) 소문자 비교를 tr로 수행
-SAGE_MODE_LOWER="$(printf '%s' "$SAGE_MODE" | tr '[:upper:]' '[:lower:]')"
-if [[ "$SAGE_MODE_LOWER" == "on" ]]; then
-  SAGE_HDR="true"
-fi
-
+# ---- 3) fire a request through Client API (/api/request) ----
+# Build replay-safe JSON body. NEVER use printf %q for JSON.
 REQ_PAYLOAD="$(mktemp -t req.XXXX.json)"
 RESP_PAYLOAD="$(mktemp -t resp.XXXX.json)"
 
-printf '{"prompt": %q}' "$PROMPT" > "$REQ_PAYLOAD"
+if command -v jq >/dev/null 2>&1; then
+  # jq encodes any string safely as JSON
+  printf '{"prompt": %s}\n' "$(jq -Rsa . <<<"$PROMPT")" > "$REQ_PAYLOAD"
+else
+  # portable escape: backslash and double quotes
+  esc=${PROMPT//\\/\\\\}
+  esc=${esc//\"/\\\"}
+  printf '{"prompt":"%s"}\n' "$esc" > "$REQ_PAYLOAD"
+fi
+
+# Header: X-SAGE-Enabled (lower/upper safe on macOS bash)
+SAGE_MODE_LOWER="$(printf '%s' "$SAGE_MODE" | tr '[:upper:]' '[:lower:]')"
+SAGE_HDR="false"
+if [[ "$SAGE_MODE_LOWER" == "on" ]]; then SAGE_HDR="true"; fi
 
 echo
-echo "[REQ] POST /api/payment  X-SAGE-Enabled: $SAGE_HDR  (scenario=demo)"
+echo "[REQ] POST /api/request X-SAGE-Enabled: $SAGE_HDR  (scenario=demo)"
 HTTP_CODE=$(curl -sS -o "$RESP_PAYLOAD" -w "%{http_code}" \
   -H "Content-Type: application/json" \
   -H "X-SAGE-Enabled: $SAGE_HDR" \
   -H "X-Scenario: demo" \
-  -X POST "http://${HOST}:${CLIENT_PORT}/api/payment" \
+  -X POST "http://${HOST}:${CLIENT_PORT}/api/request" \
   --data-binary @"$REQ_PAYLOAD" || true)
 
 echo "[HTTP] client-api status: $HTTP_CODE"
@@ -165,13 +156,11 @@ else
 fi
 echo "==================================================="
 
-# 탐지 여부 추정: response에 "external error: 401" 또는 digest mismatch 포함 시, 외부 검증 실패로 MITM 감지
 DETECTED="no"
 if grep -q '"external error: 401' "$RESP_PAYLOAD" || grep -q 'content-digest mismatch' "$RESP_PAYLOAD"; then
   DETECTED="yes"
 fi
 
-# 대문자 출력도 tr로 (macOS bash 3 호환)
 SAGE_MODE_UP="$(printf '%s' "$SAGE_MODE" | tr '[:lower:]' '[:upper:]')"
 GW_MODE_UP="$(printf '%s' "$GW_MODE" | tr '[:lower:]' '[:upper:]')"
 
@@ -193,10 +182,11 @@ echo "----- client.log (tail) -----"
 tail -n 60 logs/client.log 2>/dev/null || echo "(no log yet)"
 
 echo
-echo "[HINT] 정상 시나리오 비교:"
-echo "  1) 서명 ON + 패스스루  -> 성공 (MITM 없음)"
-echo "       ./scripts/demo_payment.sh --sage on  --pass"
-echo "  2) 서명 ON + 조작      -> 실패 (외부에서 401, 또는 content-digest mismatch)"
-echo "       ./scripts/demo_payment.sh --sage on  --tamper"
-echo "  3) 서명 OFF + 조작     -> 대개 통과 (검증 없으니 감지 불가)"
-echo "       ./scripts/demo_payment.sh --sage off --tamper"
+echo "[HINT] Compare scenarios:"
+echo "  1) SAGE ON + pass      -> success (no MITM)"
+echo "  2) SAGE ON + tamper    -> 401 or digest mismatch (detected)"
+echo "  3) SAGE OFF + tamper   -> likely passes (no detection)"
+
+echo
+echo "[UP] ensuring clean state via scripts/01_kill_ports.sh"
+bash ./scripts/01_kill_ports.sh || true
