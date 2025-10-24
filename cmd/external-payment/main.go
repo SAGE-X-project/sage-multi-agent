@@ -68,6 +68,10 @@ func main() {
 			log.Printf("[RX][STRICT] body=%s", bodyStr)
 
 			if want != "" && want != got {
+				log.Printf(
+					"⚠️ MITM DETECTED: Content-Digest mismatch\n  method=%s path=%s remote=%s req_id=%s\n  digest_recv=%q\n  digest_calc=%q\n  sig_input=%q\n  sig=%q\n  body_sample=%q",
+					r.Method, r.URL.Path, r.RemoteAddr, requestID(r), want, got, sigIn, sig, safeSample(bodyStr, 256),
+				)
 				http.Error(w, "content-digest mismatch (tampered in transit)", http.StatusUnauthorized)
 				return
 			}
@@ -207,4 +211,20 @@ func mustUncompressedECDSA(pk *ecdsa.PublicKey) []byte {
 	pk.X.FillBytes(out[1 : 1+byteLen])
 	pk.Y.FillBytes(out[1+byteLen:])
 	return out
+}
+
+func requestID(r *http.Request) string {
+	if v := r.Header.Get("X-Request-Id"); v != "" {
+		return v
+	}
+	if v := r.Header.Get("X-Correlation-Id"); v != "" {
+		return v
+	}
+	return "-"
+}
+func safeSample(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "...(truncated)"
 }
