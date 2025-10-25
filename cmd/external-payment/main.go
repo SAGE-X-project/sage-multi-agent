@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -16,16 +17,15 @@ import (
 
 func main() {
 	port := flag.Int("port", 19083, "port")
-	keysFile := flag.String("keys", "keys/all_keys.json", "public keys file for inbound DID verify")
 	requireSig := flag.Bool("require", true, "require signature (false = optional)")
 	flag.Parse()
 
 	// Build DID middleware (local file verifier)
-	mw, err := a2autil.BuildDIDMiddleware(*keysFile, true)
+	mw, err := a2autil.BuildDIDMiddleware(true)
 	if err != nil {
 		log.Printf("[external-payment] DID middleware init failed: %v (running without verify)", err)
 	}
-
+	mw.SetErrorHandler(newCompactDIDErrorHandler(log.Default()))
 	open := http.NewServeMux()
 	open.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -43,32 +43,6 @@ func main() {
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(r.Body)
 		r.Body.Close()
-
-		bodyStr := strings.ReplaceAll(buf.String(), "\n", "\\n")
-		// Content-Digest check (tamper detection)
-		if *requireSig {
-			// SAGE ON : Read RFC-9421 and verify signatrue
-			sig := r.Header.Get("Signature")
-			sigIn := r.Header.Get("Signature-Input")
-			want := r.Header.Get("Content-Digest")
-			got := a2autil.ComputeContentDigest(buf.Bytes())
-
-			log.Printf("[RX][STRICT] sig=%q sig-input=%q digest(want)=%q got=%q", sig, sigIn, want, got)
-			log.Printf("[RX][STRICT] body=%s", bodyStr)
-
-			if want != "" && want != got {
-				log.Printf(
-					"⚠️ MITM DETECTED: Content-Digest mismatch\n  method=%s path=%s remote=%s req_id=%s\n  digest_recv=%q\n  digest_calc=%q\n  sig_input=%q\n  sig=%q\n  body_sample=%q",
-					r.Method, r.URL.Path, r.RemoteAddr, requestID(r), want, got, sigIn, sig, safeSample(bodyStr, 256),
-				)
-				http.Error(w, "content-digest mismatch (tampered in transit)", http.StatusUnauthorized)
-				return
-			}
-		} else {
-			// SAGE OFF
-			log.Printf("[RX][LENIENT] SAGE disabled; accepting without signature checks")
-			log.Printf("[RX][LENIENT] body=%s", bodyStr)
-		}
 
 		var in types.AgentMessage
 		if err := json.Unmarshal(buf.Bytes(), &in); err != nil {
@@ -107,18 +81,35 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
-func requestID(r *http.Request) string {
-	if v := r.Header.Get("X-Request-Id"); v != "" {
-		return v
+// newCompactDIDErrorHandler logs only the final (root) error message
+// and returns a minimal JSON response to the client.
+func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *http.Request, err error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
+		re := rootError(err)
+
+		// log: 딱 에러 메시지만
+		if l != nil {
+			l.Printf("[did-auth] %s", re.Error())
+		}
+
+		// client response: 최소 정보만(JSON)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":  "unauthorized",
+			"reason": re.Error(),
+		})
 	}
-	if v := r.Header.Get("X-Correlation-Id"); v != "" {
-		return v
-	}
-	return "-"
 }
-func safeSample(s string, max int) string {
-	if len(s) <= max {
-		return s
+
+// rootError returns the deepest wrapped error.
+func rootError(err error) error {
+	e := err
+	for {
+		u := errors.Unwrap(e)
+		if u == nil {
+			return e
+		}
+		e = u
 	}
-	return s[:max] + "...(truncated)"
 }
