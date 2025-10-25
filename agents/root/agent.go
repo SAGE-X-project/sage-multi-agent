@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -131,9 +132,79 @@ func (r *RootAgent) mountRoutes() {
 			http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
 			return
 		}
+		status := http.StatusOK
+		if code, ok := httpStatusFromAgent(&out); ok {
+			status = code
+		}
+
 		w.Header().Set("Content-Type", "application/json")
+		if status/100 == 2 {
+			w.Header().Set("X-SAGE-Verified", "true")
+			w.Header().Set("X-SAGE-Signature-Valid", "true")
+		} else {
+			w.Header().Set("X-SAGE-Verified", "false")
+			w.Header().Set("X-SAGE-Signature-Valid", "false")
+		}
+
+		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(out)
 	})
+}
+
+func httpStatusFromAgent(out *types.AgentMessage) (int, bool) {
+	if out.Metadata != nil {
+		if code, ok := pickIntFromMeta(out.Metadata, "httpStatus", "status"); ok {
+			return code, true
+		}
+	}
+
+	if strings.EqualFold(out.Type, "error") {
+		return http.StatusBadGateway, true
+	}
+
+	low := strings.ToLower(strings.TrimSpace(out.Content))
+	const prefix = "external error:"
+	if strings.HasPrefix(low, prefix) {
+		rest := strings.TrimSpace(low[len(prefix):])
+
+		if f := firstToken(rest); f != "" {
+			if n, err := strconv.Atoi(f); err == nil && n >= 100 && n <= 599 {
+				return n, true
+			}
+		}
+		return http.StatusBadGateway, true
+	}
+
+	return 0, false
+}
+
+func pickIntFromMeta(m map[string]any, keys ...string) (int, bool) {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch t := v.(type) {
+			case float64:
+				return int(t), true
+			case int:
+				return t, true
+			case int32:
+				return int(t), true
+			case int64:
+				return int(t), true
+			case string:
+				if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+					return n, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func firstToken(s string) string {
+	for _, f := range strings.Fields(s) {
+		return f
+	}
+	return ""
 }
 
 func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
