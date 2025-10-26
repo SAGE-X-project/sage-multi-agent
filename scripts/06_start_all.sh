@@ -7,7 +7,12 @@
 #   --pass | --passthrough    start gateway pass-through
 #   --attack-msg "<text>"     override tamper message
 #   --external agent|echo     choose external payment impl (default: agent)
+#   --hpke on|off             enable HPKE for PaymentAgent→External (default: off)
+#   --hpke-keys <path>        keys json for DID mapping (default: generated_agent_keys.json)
 #   --force-kill              kill occupied ports automatically
+#
+# Notes:
+# - PaymentAgent runs IN-PROC inside the root process. Its logs go to logs/root.log.
 
 set -Eeuo pipefail
 
@@ -28,8 +33,12 @@ EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
 # Payment sub-agent (IN-PROC) needs these to call outward
 PAYMENT_EXTERNAL_URL_DEFAULT="http://${HOST}:${GATEWAY_PORT}"
 PAYMENT_EXTERNAL_URL="${PAYMENT_EXTERNAL_URL:-$PAYMENT_EXTERNAL_URL_DEFAULT}"
-PAYMENT_JWK_FILE="${PAYMENT_JWK_FILE:-keys/payment.jwk}"   # MUST exist for signing
-# optional: PAYMENT_DID (derive from key if empty)
+PAYMENT_JWK_FILE="${PAYMENT_JWK_FILE:-keys/payment.jwk}"   # MUST exist for outbound signing
+[[ -n "${PAYMENT_DID:-}" ]] || true
+
+# HPKE control (CLI flags; default OFF)
+PAYMENT_HPKE_ENABLE="0"                                    # 0=off, 1=on
+PAYMENT_HPKE_KEYS="${PAYMENT_HPKE_KEYS:-generated_agent_keys.json}"
 
 GATEWAY_MODE="tamper"                         # tamper|pass
 EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"       # agent|echo
@@ -38,25 +47,30 @@ FORCE_KILL=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--external agent|echo] [--force-kill]
-
-Examples:
-  $0 --tamper                           # gateway가 바디 조작 (기본)
-  $0 --pass                             # 게이트웨이 패스스루
-  $0 --tamper --attack-msg "[MITM]"     # 조작 문구 지정
-  $0 --external echo                    # 외부 결제 echo 모드
+Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--external agent|echo] [--hpke on|off] [--hpke-keys <path>] [--force-kill]
 EOF
 }
 
 # ---------- Args ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tamper)        GATEWAY_MODE="tamper"; shift ;;
-    --pass|--passthrough) GATEWAY_MODE="pass"; shift ;;
-    --attack-msg)    ATTACK_MESSAGE="${2:-}"; shift 2 ;;
-    --external)      EXTERNAL_IMPL="${2:-agent}"; shift 2 ;;
-    --force-kill)    FORCE_KILL=1; shift ;;
-    -h|--help)       usage; exit 0 ;;
+    --tamper)                 GATEWAY_MODE="tamper"; shift ;;
+    --pass|--passthrough)     GATEWAY_MODE="pass"; shift ;;
+    --attack-msg)             ATTACK_MESSAGE="${2:-}"; shift 2 ;;
+    --external)               EXTERNAL_IMPL="${2:-agent}"; shift 2 ;;
+    --hpke)
+      v="${2:-on}"; shift 2
+      v="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
+      case "$v" in
+        on|true|1|yes)  PAYMENT_HPKE_ENABLE="1" ;;
+        off|false|0|no) PAYMENT_HPKE_ENABLE="0" ;;
+        *) echo "[ERR] --hpke expects on|off (got: $v)"; exit 1 ;;
+      esac
+      ;;
+    --hpke-keys)
+      PAYMENT_HPKE_KEYS="${2:-generated_agent_keys.json}"; shift 2 ;;
+    --force-kill)             FORCE_KILL=1; shift ;;
+    -h|--help)                usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
   esac
 done
@@ -118,30 +132,26 @@ case "$SMODE" in
   off|false|0|no) EXT_VERIFY="off" ;;
   *)              EXT_VERIFY="on"  ;;
 esac
-
-# on → 1, off → 0
-EXTERNAL_REQUIRE_SIG=0
-[ "$EXT_VERIFY" = "on" ] && EXTERNAL_REQUIRE_SIG=1
+EXTERNAL_REQUIRE_SIG=0; [ "$EXT_VERIFY" = "on" ] && EXTERNAL_REQUIRE_SIG=1
 
 echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
 echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG} -> -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)"
 
-EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" EXTERNAL_REQUIRE_SIG="$EXTERNAL_REQUIRE_SIG"\
+EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" EXTERNAL_REQUIRE_SIG="$EXTERNAL_REQUIRE_SIG" \
   "$ROOT_DIR/scripts/02_start_external_payment_agent.sh"
 
 # ---------- 2) Gateway (relay to external payment) ----------
 if [[ -f cmd/gateway/main.go ]]; then
-  # 경로 호환: cmd/ggateway 또는 cmd/gateway
   GW_MAIN="cmd/gateway/main.go"
-
   if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$GATEWAY_PORT"; fi
   if [[ "$GATEWAY_MODE" == "pass" ]]; then
     echo "[mode] Gateway PASS-THROUGH"
     start_bg "gateway" "$GATEWAY_PORT" \
+      env -u ATTACK_MESSAGE \
       go run "./${GW_MAIN}" \
         -listen ":${GATEWAY_PORT}" \
         -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" \
-        -attack-msg ""
+        -attack-msg=""
   else
     echo "[mode] Gateway TAMPER (attack-msg length: ${#ATTACK_MESSAGE})"
     start_bg "gateway" "$GATEWAY_PORT" \
@@ -154,18 +164,25 @@ else
   echo "[SKIP] gateway main not found"
 fi
 
-# ---------- 3) Root (IN-PROC sub agents). 서브 결제가 외부로 나갈 때 쓸 ENV 주입 ----------
+# ---------- 3) Root (IN-PROC sub agents). Env for outward call + HPKE flags ----------
 ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}" )
-if [[ -n "${PAYMENT_DID:-}" ]]; then ROOT_ENV+=( "PAYMENT_DID=${PAYMENT_DID}" ); fi
+[[ -n "${PAYMENT_DID:-}" ]] && ROOT_ENV+=( "PAYMENT_DID=${PAYMENT_DID}" )
 
-echo "[ENV] PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
-echo "[ENV] PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
-[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV] PAYMENT_DID=${PAYMENT_DID}"
+# Build root CLI flags (← 여기서 -hpke/-hpke-keys 전달)
+ROOT_ARGS=( -port "$ROOT_PORT" )
+if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
+  ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )
+fi
+
+echo "[ENV]  PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
+echo "[ENV]  PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
+[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV]  PAYMENT_DID=${PAYMENT_DID}"
+echo "[HPKE] enable=${PAYMENT_HPKE_ENABLE} keys=${PAYMENT_HPKE_KEYS}"
+echo "[ROOT_ARGS] ${ROOT_ARGS[*]}"
 
 start_bg "root" "$ROOT_PORT" \
   env "${ROOT_ENV[@]}" \
-  go run ./cmd/root/main.go \
-    -port "$ROOT_PORT"
+  go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
 
 # ---------- 4) Client API ----------
 start_bg "client" "$CLIENT_PORT" \

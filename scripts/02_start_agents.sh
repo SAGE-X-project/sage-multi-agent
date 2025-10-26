@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Start external payment server: agent (verifies RFC9421 + Content-Digest) or echo (no verify)
+# Run Payment Agent (in-proc) with optional A2A signing and HPKE payload encryption.
+# - Only two HPKE options are exposed to the app: -hpke (bool) and -hpke-keys (path).
+# - All other chain/key settings are taken from the payment app itself (initSigning/env).
 
 set -Eeuo pipefail
+
+# ---------- Paths ----------
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 [[ -f .env ]] && source .env
 
-HOST="${HOST:-localhost}"
-EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"   # .env overrides; default agent
-
 mkdir -p logs pids
 
+# ---------- Helpers ----------
 kill_port() {
   local port="$1"; local pids
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
   [[ -z "$pids" ]] && return
-  echo "[kill] external-payment on :$port -> $pids"
+  echo "[kill] payment-agent on :$port -> $pids"
   kill $pids 2>/dev/null || true
   sleep 0.2
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
@@ -34,86 +35,92 @@ wait_http() {
   return 1
 }
 
-echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
-kill_port "$EXT_PAYMENT_PORT"
+to_bool() {
+  # normalize various truthy/falsey values to "true"/"false"
+  local v="${1:-}"
+  v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    1|true|on|yes)  echo "true" ;;
+    0|false|off|no) echo "false" ;;
+    *)              echo "$2" ;; # default if unknown
+  esac
+}
 
-case "$EXTERNAL_IMPL" in
-  agent)
-    # Prefer prebuilt binary if present
-    if [[ -x bin/external-payment ]]; then
-      echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [bin]"
-      nohup bin/external-payment -port "$EXT_PAYMENT_PORT" \
-        > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
+# ---------- Config (env defaults) ----------
+HOST="${HOST:-localhost}"
 
-    elif [[ -f cmd/external-payment/main.go ]]; then
-      echo "[start] External Payment (AGENT, verify=ON) :${EXT_PAYMENT_PORT} [go run]"
-      nohup go run ./cmd/external-payment/main.go \
-        -port "$EXT_PAYMENT_PORT" \
-        > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
+# Payment agent port
+PAYMENT_AGENT_PORT="${PAYMENT_AGENT_PORT:-18083}"
 
-    else
-      echo "[ERR] EXTERNAL_IMPL=agent but cmd/external-payment/main.go not found."
-      echo "      Add the agent code or run with EXTERNAL_IMPL=echo."
-      exit 1
-    fi
-    ;;
+# Where the agent will send requests (gateway/external payment base)
+PAYMENT_EXTERNAL_URL="${PAYMENT_EXTERNAL_URL:-http://localhost:5500}"
 
-  echo)
-    if [[ ! -f cmd/ext-payment-echo/main.go ]]; then
-      echo "[GEN] Creating minimal external echo at cmd/ext-payment-echo/main.go"
-      mkdir -p cmd/ext-payment-echo
-      cat > cmd/ext-payment-echo/main.go <<'EOF'
-// Minimal external echo (NO signature verify)
-package main
+# A2A signing key (required when SAGE=true)
+PAYMENT_JWK_FILE="${PAYMENT_JWK_FILE:-}"
+PAYMENT_DID="${PAYMENT_DID:-}"
 
-import (
-  "encoding/json"
-  "flag"
-  "fmt"
-  "log"
-  "net/http"
+# Enable outbound signing
+PAYMENT_SAGE_ENABLED="$(to_bool "${PAYMENT_SAGE_ENABLED:-true}" true)"
+
+# HPKE switches (only two!)
+HPKE_ENABLE="$(to_bool "${HPKE_ENABLE:-false}" false)"
+HPKE_KEYS_PATH="${HPKE_KEYS_PATH:-generated_agent_keys.json}"
+
+# ---------- Show effective config ----------
+echo "[cfg] PAYMENT_AGENT_PORT=${PAYMENT_AGENT_PORT}"
+echo "[cfg] PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
+echo "[cfg] PAYMENT_SAGE_ENABLED=${PAYMENT_SAGE_ENABLED}"
+echo "[cfg] PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE:-<empty>}"
+echo "[cfg] PAYMENT_DID=${PAYMENT_DID:-<empty>}"
+echo "[cfg] HPKE_ENABLE=${HPKE_ENABLE}"
+echo "[cfg] HPKE_KEYS_PATH=${HPKE_KEYS_PATH}"
+
+# ---------- Kill previous ----------
+kill_port "${PAYMENT_AGENT_PORT}"
+
+# ---------- Build command ----------
+ARGS=(
+  -port "${PAYMENT_AGENT_PORT}"
+  -external "${PAYMENT_EXTERNAL_URL}"
+  -sage "${PAYMENT_SAGE_ENABLED}"
+  -hpke "${HPKE_ENABLE}"
+  -hpke-keys "${HPKE_KEYS_PATH}"
 )
 
-func main() {
-  port := flag.Int("port", 19083, "port")
-  flag.Parse()
+# JWK/DID are optional flags; pass only when set
+if [[ -n "${PAYMENT_JWK_FILE}" ]]; then
+  ARGS+=( -jwk "${PAYMENT_JWK_FILE}" )
+fi
+if [[ -n "${PAYMENT_DID}" ]]; then
+  ARGS+=( -did "${PAYMENT_DID}" )
+fi
 
-  mux := http.NewServeMux()
-  mux.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type","application/json")
-    w.Write([]byte(`{"id":"ext","from":"external","to":"payment","content":"OK (external echo)","type":"response"}`))
-  })
-  mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-    w.Header().Set("Content-Type","application/json")
-    json.NewEncoder(w).Encode(map[string]any{
-      "name":"external-echo",
-      "type":"payment",
-      "sage_enabled": false,
-    })
-  })
-  addr := fmt.Sprintf(":%d", *port)
-  log.Printf("external echo on %s\n", addr)
-  log.Fatal(http.ListenAndServe(addr, mux))
-}
-EOF
-    fi
+# Warn if SAGE is enabled but JWK is missing
+if [[ "${PAYMENT_SAGE_ENABLED}" == "true" && -z "${PAYMENT_JWK_FILE}" ]]; then
+  echo "[warn] SAGE is enabled but PAYMENT_JWK_FILE is empty. The agent will fail to sign outbound requests."
+fi
 
-    echo "[start] External Payment (ECHO, verify=OFF) :${EXT_PAYMENT_PORT}"
-    nohup go run ./cmd/ext-payment-echo/main.go \
-      -port "$EXT_PAYMENT_PORT" \
-      > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
-    ;;
+# ---------- Start ----------
+if [[ -x bin/payment-agent ]]; then
+  echo "[start] PaymentAgent :${PAYMENT_AGENT_PORT} [bin]"
+  nohup bin/payment-agent "${ARGS[@]}" \
+    > logs/payment-agent.log 2>&1 & echo $! > pids/payment-agent.pid
 
-  *)
-    echo "[ERR] Unknown EXTERNAL_IMPL=$EXTERNAL_IMPL (use 'agent' or 'echo')"
-    exit 1
-    ;;
-esac
+elif [[ -f cmd/payment/main.go ]]; then
+  echo "[start] PaymentAgent :${PAYMENT_AGENT_PORT} [go run]"
+  nohup go run ./cmd/payment/main.go "${ARGS[@]}" \
+    > logs/payment-agent.log 2>&1 & echo $! > pids/payment-agent.pid
 
-if ! wait_http "http://${HOST}:${EXT_PAYMENT_PORT}/status" 40 0.25; then
-  echo "[FAIL] external-payment failed to respond on /status"
-  tail -n 120 logs/external-payment.log || true
+else
+  echo "[ERR] cmd/payment/main.go not found and bin/payment-agent not present."
   exit 1
 fi
 
-echo "[ok] logs: logs/external-payment.log  pid: $(cat pids/external-payment.pid 2>/dev/null || echo '?')"
+# ---------- Health check ----------
+if ! wait_http "http://${HOST}:${PAYMENT_AGENT_PORT}/status" 40 0.25; then
+  echo "[FAIL] payment-agent failed to respond on /status"
+  tail -n 120 logs/payment-agent.log || true
+  exit 1
+fi
+
+echo "[ok] logs: logs/payment-agent.log  pid: $(cat pids/payment-agent.pid 2>/dev/null || echo '?')"

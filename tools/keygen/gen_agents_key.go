@@ -1,4 +1,6 @@
-// tools/keys/gen_agent_keys.go
+//go:build reg_agents_key
+// +build reg_agents_key
+
 // SPDX-License-Identifier: MIT
 //
 // One canonical key generator for SAGE demo agents.

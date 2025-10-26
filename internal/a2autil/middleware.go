@@ -1,6 +1,8 @@
 package a2autil
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -53,4 +55,11 @@ func BuildDIDMiddleware(optional bool) (*server.DIDAuthMiddleware, error) {
 	mw := server.NewDIDAuthMiddleware(ethClient)
 	mw.SetOptional(optional)
 	return mw, nil
+}
+
+// ComputeContentDigest makes RFC9421-compatible Content-Digest header (sha-256).
+func ComputeContentDigest(body []byte) string {
+	sum := sha256.Sum256(body)
+	b64 := base64.StdEncoding.EncodeToString(sum[:])
+	return fmt.Sprintf("sha-256=:%s:", b64)
 }

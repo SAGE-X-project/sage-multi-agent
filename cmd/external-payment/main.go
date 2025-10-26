@@ -1,31 +1,206 @@
+// cmd/external-payment/main.go
 package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
+
+	// DID / Resolver
+	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
+	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	sagehttp "github.com/sage-x-project/sage/pkg/agent/transport/http"
+
+	// HPKE
+	"github.com/sage-x-project/sage/pkg/agent/hpke"
+	"github.com/sage-x-project/sage/pkg/agent/session"
+	"github.com/sage-x-project/sage/pkg/agent/transport"
+
+	// Keys
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 )
+
+// External Payment Server:
+// - Verifies inbound RFC9421 (via DID middleware) over the HTTP body.
+// - If request is HPKE-wrapped (Content-Type: application/sage+hpke OR X-SAGE-HPKE: v1):
+//   - With X-KID and existing session  -> decrypt, handle JSON, encrypt response.
+//   - Without X-KID or unknown KID     -> treat as HPKE handshake (transport.SecureMessage) and respond with HandleMessage().
+//
+// - Otherwise, handle plaintext JSON.
+//
+// Modifications:
+//   - Server signing key is loaded from EXTERNAL_JWK_FILE (JWK; Ed25519 expected).
+//   - Server HPKE KEM key is loaded from EXTERNAL_KEM_JWK_FILE (JWK; X25519 expected).
+//   - Server DID is loaded from merged keys JSON (MERGED_KEYS_FILE; default ./merged_agent_keys.json) by EXTERNAL_AGENT_NAME (default "external").
+//     Fallback: EXTERNAL_DID env when not found.
+var (
+	hpkeSrvMgr *session.Manager
+	hpkeSrv    *hpke.Server
+)
+
+type agentKeyRow struct {
+	Name string `json:"name"`
+	DID  string `json:"did"`
+}
+
+// ---------- env helpers ----------
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// Load Ed25519 signing key from EXTERNAL_JWK_FILE (JWK).
+func loadServerSigningKeyFromEnv() sagecrypto.KeyPair {
+	path := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
+	if path == "" {
+		log.Fatal("missing EXTERNAL_JWK_FILE for server signing key (JWK)")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("read EXTERNAL_JWK_FILE (%s): %v", path, err)
+	}
+	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
+	if err != nil {
+		log.Fatalf("import EXTERNAL_JWK_FILE (%s) as JWK: %v", path, err)
+	}
+	return kp
+}
+
+// Load X25519 KEM key from EXTERNAL_KEM_JWK_FILE (JWK).
+func loadServerKEMFromEnv() sagecrypto.KeyPair {
+	path := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
+	if path == "" {
+		log.Fatal("missing EXTERNAL_KEM_JWK_FILE for server KEM key (JWK)")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatalf("read EXTERNAL_KEM_JWK_FILE (%s): %v", path, err)
+	}
+	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
+	if err != nil {
+		log.Fatalf("import EXTERNAL_KEM_JWK_FILE (%s) as JWK: %v", path, err)
+	}
+	return kp
+}
+
+// Create a MultiChain resolver from env (ETH_RPC_URL / SAGE_REGISTRY_V4_ADDRESS / SAGE_EXTERNAL_KEY).
+func buildResolver() sagedid.Resolver {
+	rpc := firstNonEmpty(os.Getenv("ETH_RPC_URL"), "http://127.0.0.1:8545")
+	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_V4_ADDRESS"), "0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	priv := strings.TrimPrefix(strings.TrimSpace(os.Getenv("SAGE_EXTERNAL_KEY")), "0x")
+
+	cfgV4 := &sagedid.RegistryConfig{
+		RPCEndpoint:        rpc,
+		ContractAddress:    contract,
+		PrivateKey:         priv, // optional (read-only resolve OK)
+		GasPrice:           0,
+		MaxRetries:         24,
+		ConfirmationBlocks: 0,
+	}
+	ethV4, err := dideth.NewEthereumClientV4(cfgV4)
+	if err != nil {
+		log.Fatalf("HPKE: init resolver failed: %v", err)
+	}
+
+	return ethV4
+}
+
+// ---------- main ----------
 
 func main() {
 	port := flag.Int("port", 19083, "port")
-	requireSig := flag.Bool("require", true, "require signature (false = optional)")
+	requireSig := flag.Bool("require", true, "require RFC9421 signature (false = optional)")
 	flag.Parse()
 
-	// Build DID middleware (local file verifier)
-	mw, err := a2autil.BuildDIDMiddleware(true)
+	// HPKE 서버 부트스트랩 (그대로)
+	hpkeSrvMgr = session.NewManager()
+	srvSigningKey := loadServerSigningKeyFromEnv()
+	resolver := buildResolver()
+	kemKey := loadServerKEMFromEnv()
+
+	nameToDID, err := loadDIDsFromKeys("merged_agent_keys.json")
+	if err != nil {
+		log.Fatalf("HPKE: load keys: %v", err)
+	}
+	serverDID := strings.TrimSpace(nameToDID["external"])
+	if serverDID == "" {
+		log.Fatal("HPKE: server DID not found for name 'external' in merged_agent_keys.json")
+	}
+
+	hpkeSrv = hpke.NewServer(
+		srvSigningKey,
+		hpkeSrvMgr,
+		serverDID,
+		resolver,
+		&hpke.ServerOpts{KEM: kemKey},
+	)
+
+	// ⬇️ (핸드셰이크 전용) transport/http 서버 어댑터
+	hsrv := sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
+		// 핸드셰이크는 HPKE 서버에 위임
+		return hpkeSrv.HandleMessage(ctx, msg)
+	})
+
+	// ⬇️ (데이터모드 전용) 우리 쪽 앱 핸들러 (transport.MessageHandler 시그니처)
+	appHandler := func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
+		// msg.Payload 는 반드시 "평문 JSON(AgentMessage)" 이어야 함 (HPKE 데이터는 위에서 복호화됨)
+		var in types.AgentMessage
+		if err := json.Unmarshal(msg.Payload, &in); err != nil {
+			// transport.Response 형태로 오류를 돌려주되, 상위에서 raw 바디 응답을 쓸 것이므로
+			// 여기서는 데이터 없이 에러만 싣는다(핸드셰이크가 아니므로 이 Response는 내부에서만 사용).
+			return &transport.Response{
+				Success:   false,
+				MessageID: msg.ID,
+				TaskID:    msg.TaskID,
+				Error:     fmt.Errorf("bad json: %w", err),
+			}, nil
+		}
+
+		// 기존 echo 로직 유지
+		out := types.AgentMessage{
+			ID:        in.ID + "-ok",
+			From:      "external-payment",
+			To:        in.From,
+			Type:      "response",
+			Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
+			Timestamp: time.Now(),
+		}
+		b, _ := json.Marshal(out)
+		return &transport.Response{
+			Success:   true,
+			MessageID: msg.ID,
+			TaskID:    msg.TaskID,
+			Data:      b, // ⬅️ 데이터모드는 raw 바디로 그대로 내려보낼 것
+		}, nil
+	}
+
+	// DID 미들웨어 (그대로)
+	mw, err := a2autil.BuildDIDMiddleware(!*requireSig)
 	if err != nil {
 		log.Printf("[external-payment] DID middleware init failed: %v (running without verify)", err)
+		mw = nil
 	}
-	mw.SetErrorHandler(newCompactDIDErrorHandler(log.Default()))
+	if mw != nil {
+		mw.SetErrorHandler(newCompactDIDErrorHandler(log.Default()))
+	}
+
 	open := http.NewServeMux()
 	open.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -39,40 +214,103 @@ func main() {
 
 	protected := http.NewServeMux()
 	protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
-		// read body
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(r.Body)
-		r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
 
-		var in types.AgentMessage
-		if err := json.Unmarshal(buf.Bytes(), &in); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
+		// === 공통: transport.SecureMessage(유사) 컨텍스트 정보 추출용 헤더 ===
+		// 클라이언트 A2ATransport는 데이터모드에선 raw payload만 보내므로,
+		// 여기서 SecureMessage를 재구성해 appHandler에 넘긴다.
+		did := strings.TrimSpace(r.Header.Get("X-SAGE-DID"))
+		mid := strings.TrimSpace(r.Header.Get("X-SAGE-Message-ID"))
+		ctxID := strings.TrimSpace(r.Header.Get("X-SAGE-Context-ID"))
+		taskID := strings.TrimSpace(r.Header.Get("X-SAGE-Task-ID"))
+
+		// === HPKE 여부 판단 ===
+		if isHPKE(r) {
+			kid := strings.TrimSpace(r.Header.Get("X-KID"))
+
+			// [핸드셰이크] KID 없음 → transport/http 서버 핸들러에 위임 (SecureMessage JSON)
+			if kid == "" {
+				// 클라(핸드셰이크)는 SecureMessage JSON을 보냄 → 그대로 MessagesHandler로
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				hsrv.MessagesHandler().ServeHTTP(w, r)
+				return
+			}
+
+			// [데이터모드/HPKE] KID 있음 → 세션 복호화 → appHandler → 재암호화 → raw 바디 응답
+			sess, ok := hpkeSrvMgr.GetByKeyID(kid)
+			if !ok {
+				// 모르는 KID면 혹시 핸드셰이크 바디일 수 있으니 한 번 더 시도
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				hsrv.MessagesHandler().ServeHTTP(w, r)
+				return
+			}
+			pt, err := sess.Decrypt(body)
+			if err != nil {
+				http.Error(w, "hpke decrypt failed", http.StatusBadRequest)
+				return
+			}
+
+			// transport.SecureMessage 형태로 래핑해 앱 핸들러 호출
+			sm := &transport.SecureMessage{
+				ID:        mid,
+				ContextID: ctxID,
+				TaskID:    taskID,
+				Payload:   pt,
+				DID:       did,
+				Metadata:  map[string]string{"hpke": "true"},
+				Role:      "agent",
+			}
+			resp, _ := appHandler(r.Context(), sm)
+			if !resp.Success {
+				http.Error(w, "application error", http.StatusBadRequest)
+				return
+			}
+
+			// 재암호화 후 raw 바디로 응답 (클라 A2ATransport가 그대로 respBody 사용)
+			ct, err := sess.Encrypt(resp.Data)
+			if err != nil {
+				http.Error(w, "hpke encrypt failed", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/sage+hpke")
+			w.Header().Set("X-SAGE-HPKE", "v1")
+			w.Header().Set("X-KID", kid)
+			w.Header().Set("Content-Digest", a2autil.ComputeContentDigest(ct))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(ct)
 			return
 		}
 
-		// Do "payment" work (demo: echo)
-		out := types.AgentMessage{
-			ID:        in.ID + "-ok",
-			From:      "external-payment",
-			To:        in.From,
-			Type:      "response",
-			Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
-			Timestamp: time.Now(),
+		// [데이터모드/평문] → transport.SecureMessage로 래핑 → appHandler → raw 바디 응답
+		sm := &transport.SecureMessage{
+			ID:        mid,
+			ContextID: ctxID,
+			TaskID:    taskID,
+			Payload:   body, // 평문 payload
+			DID:       did,
+			Metadata:  map[string]string{"hpke": "false"},
+			Role:      "agent",
+		}
+		resp, _ := appHandler(r.Context(), sm)
+		if !resp.Success {
+			http.Error(w, "application error", http.StatusBadRequest)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(resp.Data) // ⬅️ 데이터모드는 raw 바디 그대로
 	})
 
 	var handler http.Handler = open
 	if mw != nil {
 		wrapped := mw.Wrap(protected)
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/status":
+			if r.URL.Path == "/status" {
 				open.ServeHTTP(w, r)
-			default:
-				wrapped.ServeHTTP(w, r)
+				return
 			}
+			wrapped.ServeHTTP(w, r)
 		})
 	}
 
@@ -81,18 +319,43 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, handler))
 }
 
-// newCompactDIDErrorHandler logs only the final (root) error message
-// and returns a minimal JSON response to the client.
+// ---------- helpers ----------
+func isHPKE(r *http.Request) bool {
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.HasPrefix(ct, "application/sage+hpke") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-SAGE-HPKE")), "v1") {
+		return true
+	}
+	return false
+}
+
+func loadDIDsFromKeys(path string) (map[string]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rows []agentKeyRow
+	if err := json.Unmarshal(b, &rows); err != nil {
+		return nil, err
+	}
+	m := make(map[string]string, len(rows))
+	for _, r := range rows {
+		if n := strings.TrimSpace(r.Name); n != "" && strings.TrimSpace(r.DID) != "" {
+			m[n] = r.DID
+		}
+	}
+	return m, nil
+}
+
+// DID middleware compact error shape
 func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *http.Request, err error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		re := rootError(err)
-
-		// log: 딱 에러 메시지만
 		if l != nil {
-			l.Printf("[did-auth] %s", re.Error())
+			l.Printf("⚠️ [did-auth] %s", re.Error())
 		}
-
-		// client response: 최소 정보만(JSON)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -102,7 +365,6 @@ func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *htt
 	}
 }
 
-// rootError returns the deepest wrapped error.
 func rootError(err error) error {
 	e := err
 	for {

@@ -6,6 +6,8 @@
 #   --tamper | --pass          # Gateway tamper mode (default: --tamper)
 #   --attack-msg "<txt>"       # message to append in tamper mode
 #   --prompt "<text>"          # demo prompt (e.g., "send 10 USDC to merchant")
+#   --hpke on|off              # enable HPKE to external (default: off)
+#   --hpke-keys <path>         # keys file for DID mapping (default: generated_agent_keys.json)
 #   --force-kill               # kill occupied ports before start
 #
 # Flow:
@@ -20,7 +22,13 @@ cd "$ROOT_DIR"
 mkdir -p logs run tmp
 
 # ---- defaults (env override) ----
-[[ -f .env ]] && source .env
+# Load .env and EXPORT all variables from it
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
 
 : "${HOST:=localhost}"
 : "${ROOT_AGENT_PORT:=18080}"
@@ -31,6 +39,14 @@ mkdir -p logs run tmp
 : "${PAYMENT_AGENT_PORT:=18083}"
 : "${CHECK_PAYMENT_STATUS:=0}"
 
+# External (server) signing & KEM keys (JWK)
+: "${EXTERNAL_JWK_FILE:=keys/external.jwk}"
+: "${EXTERNAL_KEM_JWK_FILE:=keys/kem/external.x25519.jwk}"
+
+# Merged keys (used by external-payment to pick DID by agent name)
+: "${MERGED_KEYS_FILE:=merged_agent_keys.json}"
+: "${EXTERNAL_AGENT_NAME:=external}"
+
 : "${PAYMENT_JWK_FILE:=keys/payment.jwk}"
 : "${PAYMENT_DID:=}"
 
@@ -40,9 +56,13 @@ ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gate
 PROMPT="send 10 USDC to merchant"
 FORCE_KILL=0
 
+# HPKE flags (default OFF)
+HPKE_MODE="off"                       # on|off
+HPKE_KEYS="generated_agent_keys.json"
+
 usage() {
   cat <<EOF
-Usage: $0 [--sage on|off] [--tamper|--pass] [--attack-msg "<txt>"] [--prompt "<text>"] [--force-kill]
+Usage: $0 [--sage on|off] [--tamper|--pass] [--attack-msg "<txt>"] [--prompt "<text>"] [--hpke on|off] [--hpke-keys <path>] [--force-kill]
 EOF
 }
 
@@ -53,6 +73,16 @@ while [[ $# -gt 0 ]]; do
     --pass|--passthrough) GW_MODE="pass"; shift ;;
     --attack-msg)  ATTACK_MESSAGE="${2:-}"; shift 2 ;;
     --prompt)      PROMPT="${2:-}"; shift 2 ;;
+    --hpke)
+      val="${2:-off}"
+      case "$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" in
+        on|true|1|yes) HPKE_MODE="on" ;;
+        off|false|0|no|"") HPKE_MODE="off" ;;
+        *) echo "[ERR] --hpke expects on|off (got: $val)"; exit 1 ;;
+      esac
+      shift 2
+      ;;
+    --hpke-keys)   HPKE_KEYS="${2:-generated_agent_keys.json}"; shift 2 ;;
     --force-kill)  FORCE_KILL=1; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
@@ -78,25 +108,53 @@ wait_http() {
 }
 
 # ---- 0) preflight ----
+# Payment agent (in-proc) key file must exist for root/payment chain
 if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
   echo "[ERR] PAYMENT_JWK_FILE not found: $PAYMENT_JWK_FILE"
   exit 1
 fi
 
-echo "[CFG] SAGE_MODE         = $SAGE_MODE"
-echo "[CFG] GATEWAY_MODE      = $GW_MODE"
-echo "[CFG] ATTACK_MESSAGE    = ${#ATTACK_MESSAGE} bytes"
-echo "[CFG] PROMPT            = $PROMPT"
-echo "[CFG] PAYMENT_JWK_FILE  = $PAYMENT_JWK_FILE"
-[[ -n "$PAYMENT_DID" ]] && echo "[CFG] PAYMENT_DID        = $PAYMENT_DID"
+# External-payment service requires these (export for children too)
+if [[ ! -f "$EXTERNAL_JWK_FILE" ]]; then
+  echo "[ERR] EXTERNAL_JWK_FILE not found: $EXTERNAL_JWK_FILE"
+  exit 1
+fi
+if [[ "$HPKE_MODE" == "on" ]] && [[ ! -f "$EXTERNAL_KEM_JWK_FILE" ]]; then
+  echo "[ERR] EXTERNAL_KEM_JWK_FILE not found (HPKE on): $EXTERNAL_KEM_JWK_FILE"
+  exit 1
+fi
+if [[ ! -f "$MERGED_KEYS_FILE" ]]; then
+  echo "[ERR] MERGED_KEYS_FILE not found: $MERGED_KEYS_FILE"
+  exit 1
+fi
+
+export EXTERNAL_JWK_FILE
+export EXTERNAL_KEM_JWK_FILE
+export MERGED_KEYS_FILE
+export EXTERNAL_AGENT_NAME
+
+echo "[CFG] SAGE_MODE                = $SAGE_MODE"
+echo "[CFG] GATEWAY_MODE             = $GW_MODE"
+echo "[CFG] ATTACK_MESSAGE           = ${#ATTACK_MESSAGE} bytes"
+echo "[CFG] PROMPT                   = $PROMPT"
+echo "[CFG] PAYMENT_JWK_FILE         = $PAYMENT_JWK_FILE"
+echo "[CFG] HPKE_ENABLE              = $( [[ "$HPKE_MODE" == "on" ]] && echo 1 || echo 0 )"
+echo "[CFG] HPKE_KEYS                = $HPKE_KEYS"
+echo "[CFG] EXTERNAL_JWK_FILE        = $EXTERNAL_JWK_FILE"
+echo "[CFG] EXTERNAL_KEM_JWK_FILE    = $EXTERNAL_KEM_JWK_FILE"
+echo "[CFG] MERGED_KEYS_FILE         = $MERGED_KEYS_FILE"
+echo "[CFG] EXTERNAL_AGENT_NAME      = $EXTERNAL_AGENT_NAME"
 
 # ---- 1) bring up stack (minimal) ----
 UP_ARGS=()
 if [[ "$GW_MODE" == "pass" ]]; then UP_ARGS+=(--pass); else UP_ARGS+=(--tamper --attack-msg "$ATTACK_MESSAGE"); fi
 if [[ $FORCE_KILL -eq 1 ]]; then UP_ARGS+=(--force-kill); fi
+# pass HPKE flags through
+UP_ARGS+=( --hpke "$HPKE_MODE" --hpke-keys "$HPKE_KEYS" )
 
 echo "[UP] starting stack via scripts/06_start_all.sh ${UP_ARGS[*]}"
 
+# Exported env will be inherited; still pass some explicit vars used by child scripts
 SAGE_MODE="$SAGE_MODE" PAYMENT_JWK_FILE="$PAYMENT_JWK_FILE" PAYMENT_DID="$PAYMENT_DID" \
   bash ./scripts/06_start_all.sh "${UP_ARGS[@]}"
 
@@ -116,21 +174,16 @@ do
 done
 
 # ---- 3) fire a request through Client API (/api/request) ----
-# Build replay-safe JSON body. NEVER use printf %q for JSON.
 REQ_PAYLOAD="$(mktemp -t req.XXXX.json)"
 RESP_PAYLOAD="$(mktemp -t resp.XXXX.json)"
 
 if command -v jq >/dev/null 2>&1; then
-  # jq encodes any string safely as JSON
   printf '{"prompt": %s}\n' "$(jq -Rsa . <<<"$PROMPT")" > "$REQ_PAYLOAD"
 else
-  # portable escape: backslash and double quotes
-  esc=${PROMPT//\\/\\\\}
-  esc=${esc//\"/\\\"}
+  esc=${PROMPT//\\/\\\\}; esc=${esc//\"/\\\"}
   printf '{"prompt":"%s"}\n' "$esc" > "$REQ_PAYLOAD"
 fi
 
-# Header: X-SAGE-Enabled (lower/upper safe on macOS bash)
 SAGE_MODE_LOWER="$(printf '%s' "$SAGE_MODE" | tr '[:upper:]' '[:lower:]')"
 SAGE_HDR="false"
 if [[ "$SAGE_MODE_LOWER" == "on" ]]; then SAGE_HDR="true"; fi
@@ -146,7 +199,6 @@ HTTP_CODE=$(curl -sS -o "$RESP_PAYLOAD" -w "%{http_code}" \
 
 echo "[HTTP] client-api status: $HTTP_CODE"
 
-# ---- 4) summarize result ----
 echo
 echo "========== Client API Response (summary) =========="
 if command -v jq >/dev/null 2>&1; then
@@ -167,7 +219,6 @@ GW_MODE_UP="$(printf '%s' "$GW_MODE" | tr '[:lower:]' '[:upper:]')"
 echo
 echo "[RESULT] SAGE=${SAGE_MODE_UP}, GATEWAY=${GW_MODE_UP} -> MITM detected by external? => $DETECTED"
 
-# ---- 5) helpful logs ----
 echo
 echo "----- external-payment.log (tail) -----"
 tail -n 60 logs/external-payment.log 2>/dev/null || echo "(no log yet)"

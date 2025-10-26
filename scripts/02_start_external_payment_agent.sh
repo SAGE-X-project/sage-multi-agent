@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
+# Start the external payment server.
+# - agent mode: verifies RFC9421 + Content-Digest with DID middleware
+# - echo  mode: no verification, just returns a static JSON
+#
+# Flags passed through to the Go binary:
+#   -port <n>
+#   -require[=true|false]   # require RFC9421 signature on requests
+
 set -Eeuo pipefail
+
+# ---------- Resolve repo root ----------
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 [[ -f .env ]] && source .env
 
+# ---------- Config (env overridable) ----------
 HOST="${HOST:-localhost}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
-EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"
-EXTERNAL_REQUIRE_SIG="${EXTERNAL_REQUIRE_SIG:-1}"  # 1=필수, 0=선택
+EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"      # "agent" or "echo"
+EXTERNAL_REQUIRE_SIG="${EXTERNAL_REQUIRE_SIG:-1}"  # 1=require, 0=optional
 
 mkdir -p logs pids
 
+# ---------- Helpers ----------
 kill_port() {
-  local port="$1"; local pids
+  local port="$1"
+  local pids
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
   [[ -z "$pids" ]] && return
   echo "[kill] external-payment on :$port -> $pids"
   kill $pids 2>/dev/null || true
-  sleep 0.2
+  sleep 0.25
   pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
   [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
 }
@@ -33,36 +46,60 @@ wait_http() {
   return 1
 }
 
+bool_word() {
+  # convert 1/0,true/false,yes/no,on/off → true|false (defaults to  false)
+  local v="${1:-}"
+  v="$(echo "$v" | tr '[:upper:]' '[:lower:]')"
+  case "$v" in
+    1|true|on|yes)  echo "true" ;;
+    0|false|off|no) echo "false" ;;
+    *)              echo "false" ;;
+  esac
+}
+
+# ---------- Show effective config ----------
 echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
-echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG} -> -require $([ "$EXTERNAL_REQUIRE_SIG" = "1" ] && echo true || echo false)"
+echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG}"
+echo "[cfg] EXT_PAYMENT_PORT=${EXT_PAYMENT_PORT}"
+
+# ---------- Ensure previous process is stopped ----------
 kill_port "$EXT_PAYMENT_PORT"
 
+# Build -require arg
 REQ_ARGS=()
-if [ "${EXTERNAL_REQUIRE_SIG}" = "1" ]; then
-  REQ_ARGS+=("-require")          # true (기본 true지만 명시)
+if [[ "$(bool_word "$EXTERNAL_REQUIRE_SIG")" == "true" ]]; then
+  # Passing -require (no value) sets it to true in Go's flag parser
+  REQ_ARGS+=( "-require" )
 else
-  REQ_ARGS+=("-require=false")    # 선택
+  REQ_ARGS+=( "-require=false" )
 fi
 
+# ---------- Launch ----------
 case "$EXTERNAL_IMPL" in
   agent)
     if [[ -x bin/external-payment ]]; then
-      echo "[start] External Payment (AGENT, verify=$([ "${EXTERNAL_REQUIRE_SIG}" = "1" ] && echo true || echo false)) :${EXT_PAYMENT_PORT} [bin]"
-      nohup bin/external-payment -port "$EXT_PAYMENT_PORT" "${REQ_ARGS[@]}" \
+      echo "[start] External Payment (AGENT, requireSig=$(bool_word "$EXTERNAL_REQUIRE_SIG")) :${EXT_PAYMENT_PORT} [bin]"
+      nohup bin/external-payment \
+        -port "$EXT_PAYMENT_PORT" \
+        "${REQ_ARGS[@]}" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
+
     elif [[ -f cmd/external-payment/main.go ]]; then
-      echo "[start] External Payment (AGENT, verify=$([ "${EXTERNAL_REQUIRE_SIG}" = "1" ] && echo true || echo false)) :${EXT_PAYMENT_PORT} [go run]"
-      nohup go run ./cmd/external-payment/main.go -port "$EXT_PAYMENT_PORT" "${REQ_ARGS[@]}" \
+      echo "[start] External Payment (AGENT, requireSig=$(bool_word "$EXTERNAL_REQUIRE_SIG")) :${EXT_PAYMENT_PORT} [go run]"
+      nohup go run ./cmd/external-payment/main.go \
+        -port "$EXT_PAYMENT_PORT" \
+        "${REQ_ARGS[@]}" \
         > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
+
     else
       echo "[ERR] EXTERNAL_IMPL=agent but cmd/external-payment/main.go not found."
-      echo "      Add the agent code or run with EXTERNAL_IMPL=echo."
+      echo "      Provide the agent code or run with EXTERNAL_IMPL=echo."
       exit 1
     fi
     ;;
 
   echo)
-    # (echo 모드는 서명검증 무의미하므로 그대로)
+    # Simple echo server (no signature verification)
     if [[ ! -f cmd/ext-payment-echo/main.go ]]; then
       echo "[GEN] Creating minimal external echo at cmd/ext-payment-echo/main.go"
       mkdir -p cmd/ext-payment-echo
@@ -102,17 +139,19 @@ func main() {
 EOF
     fi
 
-    echo "[start] External Payment (ECHO, verify=OFF) :${EXT_PAYMENT_PORT}"
+    echo "[start] External Payment (ECHO) :${EXT_PAYMENT_PORT}"
     nohup go run ./cmd/ext-payment-echo/main.go \
       -port "$EXT_PAYMENT_PORT" \
       > logs/external-payment.log 2>&1 & echo $! > pids/external-payment.pid
     ;;
+
   *)
     echo "[ERR] Unknown EXTERNAL_IMPL=$EXTERNAL_IMPL (use 'agent' or 'echo')"
     exit 1
     ;;
 esac
 
+# ---------- Health check ----------
 if ! wait_http "http://${HOST}:${EXT_PAYMENT_PORT}/status" 40 0.25; then
   echo "[FAIL] external-payment failed to respond on /status"
   tail -n 120 logs/external-payment.log || true

@@ -1,20 +1,22 @@
 package payment
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/google/uuid"
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
-	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
+	prototx "github.com/sage-x-project/sage-multi-agent/protocol"
 	"github.com/sage-x-project/sage-multi-agent/types"
+	"github.com/sage-x-project/sage/pkg/agent/transport"
 
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
@@ -22,38 +24,41 @@ import (
 )
 
 // PaymentAgent runs IN-PROC and (optionally) calls an EXTERNAL payment service.
-// Only outbound (agent -> external) is A2A-signed when SAGE is ON.
 type PaymentAgent struct {
 	Name        string
 	SAGEEnabled bool
 
-	ExternalURL string // Gateway/relay or external payment (e.g. http://localhost:5500)
+	ExternalURL string
 
 	myDID did.AgentDID
 	myKey sagecrypto.KeyPair
-	a2a   *a2aclient.A2AClient
+	A2A   *a2aclient.A2AClient
 
 	httpClient *http.Client
+
+	// 항상 transport 경유(평문/HPKE 데이터 전송용)
+	txPlain transport.MessageTransport
 }
 
 func NewPaymentAgent(name string) *PaymentAgent {
-	return &PaymentAgent{
+	p := &PaymentAgent{
 		Name:        name,
 		SAGEEnabled: envBool("PAYMENT_SAGE_ENABLED", true),
 		ExternalURL: strings.TrimRight(envOr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "/"),
 		httpClient:  http.DefaultClient,
 	}
+	// 평문/HPKE 데이터 전송도 transport 사용 (내부에서 p.Do() 호출 → A2A 서명)
+	p.txPlain = prototx.NewA2ATransport(p, p.ExternalURL, false)
+	return p
 }
 
 // IN-PROC entrypoint (Root -> Payment)
 func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (types.AgentMessage, error) {
-	// Always try external if configured
 	if p.ExternalURL != "" {
 		out, err := p.forwardExternal(ctx, &msg)
 		if err == nil {
 			return *out, nil
 		}
-		// If external fails, return error (payment usually must go out)
 		return types.AgentMessage{
 			ID:        msg.ID + "-exterr",
 			From:      "payment",
@@ -63,8 +68,6 @@ func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (typ
 			Timestamp: time.Now(),
 		}, nil
 	}
-
-	// No external configured: respond gracefully
 	return types.AgentMessage{
 		ID:        "resp-" + msg.ID,
 		From:      p.Name,
@@ -78,54 +81,93 @@ func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (typ
 
 func (p *PaymentAgent) forwardExternal(ctx context.Context, msg *types.AgentMessage) (*types.AgentMessage, error) {
 	body, _ := json.Marshal(msg)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.ExternalURL+"/process", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("new req: %w", err)
+
+	// HPKE on 시 암호화 (반드시 호출)
+	var kid string
+	if ct, k, used, err := p.encryptIfHPKE(body); used {
+		if err != nil {
+			return nil, fmt.Errorf("hpke: %w", err)
+		}
+		body = ct
+		kid = k
+		log.Printf("[encrypt] hpke kid=%s bytes=%d", k, len(ct))
+	} else {
+		log.Printf("[payment] HPKE not used (plaintext) bytes=%d", len(body))
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Content-Digest", a2autil.ComputeContentDigest(body))
 
-	resp, err := p.do(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("http: %w", err)
+	// 항상 transport 경유
+	sm := &transport.SecureMessage{
+		ID:      uuid.NewString(),
+		Payload: body,
+		DID:     string(p.myDID),
+		Metadata: map[string]string{
+			"ctype": "application/json",
+		},
+		Role: "agent",
 	}
-	defer resp.Body.Close()
+	if kid != "" {
+		sm.Metadata["hpke_kid"] = kid // A2ATransport가 HPKE 헤더 자동 세팅
+	}
 
-	var out types.AgentMessage
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(resp.Body)
-
-	if resp.StatusCode/100 != 2 {
+	resp, err := p.txPlain.Send(ctx, sm)
+	if err != nil {
+		return nil, fmt.Errorf("transport send: %w", err)
+	}
+	if !resp.Success {
+		reason := strings.TrimSpace(string(resp.Data))
+		if reason == "" && resp.Error != nil {
+			reason = resp.Error.Error()
+		}
+		if reason == "" {
+			reason = "unknown upstream error"
+		}
 		return &types.AgentMessage{
 			ID:        msg.ID + "-exterr",
 			From:      "external-payment",
 			To:        msg.From,
 			Type:      "error",
-			Content:   fmt.Sprintf("external error: %d %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+			Content:   "external error: " + reason,
 			Timestamp: time.Now(),
 		}, nil
 	}
-	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+	if kid != "" {
+		if pt, _, derr := p.decryptIfHPKEResponse(kid, resp.Data); derr != nil {
+			// 서버가 평문 에러를 줄 수도 있으니, 실패 시 메시지로 래핑
+			return &types.AgentMessage{
+				ID:        msg.ID + "-exterr",
+				From:      "external-payment",
+				To:        msg.From,
+				Type:      "error",
+				Content:   "external error: " + derr.Error(),
+				Timestamp: time.Now(),
+			}, nil
+		} else {
+			resp.Data = pt
+		}
+	}
+
+	var out types.AgentMessage
+	if err := json.Unmarshal(resp.Data, &out); err != nil {
 		out = types.AgentMessage{
 			ID:        msg.ID + "-ext",
 			From:      "external-payment",
 			To:        msg.From,
 			Type:      "response",
-			Content:   strings.TrimSpace(buf.String()),
+			Content:   strings.TrimSpace(string(resp.Data)),
 			Timestamp: time.Now(),
 		}
 	}
 	return &out, nil
 }
 
-func (p *PaymentAgent) do(ctx context.Context, req *http.Request) (*http.Response, error) {
+func (p *PaymentAgent) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if p.SAGEEnabled {
-		if p.a2a == nil {
+		if p.A2A == nil {
 			if err := p.initSigning(); err != nil {
 				return nil, err
 			}
 		}
-		return p.a2a.Do(ctx, req)
+		return p.A2A.Do(ctx, req)
 	}
 	return p.httpClient.Do(req)
 }
@@ -150,7 +192,6 @@ func (p *PaymentAgent) initSigning() error {
 		if ecdsaPriv, ok := kp.PrivateKey().(*ecdsa.PrivateKey); ok {
 			addr := ethcrypto.PubkeyToAddress(ecdsaPriv.PublicKey).Hex()
 			didStr = "did:sage:ethereum:" + addr
-
 		} else if id := strings.TrimSpace(kp.ID()); id != "" {
 			didStr = "did:sage:generated:" + id
 		} else {
@@ -160,12 +201,11 @@ func (p *PaymentAgent) initSigning() error {
 
 	p.myKey = kp
 	p.myDID = did.AgentDID(didStr)
-	p.a2a = a2aclient.NewA2AClient(p.myDID, p.myKey, http.DefaultClient)
+	p.A2A = a2aclient.NewA2AClient(p.myDID, p.myKey, http.DefaultClient)
 	return nil
 }
 
 // ---- utils ----
-
 func envOr(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v

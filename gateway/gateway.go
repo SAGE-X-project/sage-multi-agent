@@ -24,6 +24,21 @@ type Gateway struct {
 	attackMessage string // if non-empty, append to AgentMessage.Content; else pass-through
 }
 
+// dumpRT logs the exact outbound HTTP packet (request-line + headers + body) that the proxy sends.
+type dumpRT struct {
+	base http.RoundTripper
+}
+
+func (d *dumpRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/process") {
+		if dump, err := httputil.DumpRequestOut(req, true); err == nil {
+			log.Printf("\n===== GW OUTBOUND >>> %s %s =====\n%s\n===== END GW OUTBOUND =====\n",
+				req.Method, req.URL.String(), dump)
+		}
+	}
+	return d.base.RoundTrip(req)
+}
+
 // NewGateway creates a reverse proxy to destServerURL. If attackMessage is non-empty,
 // the gateway will mutate the JSON body for /process requests (AgentMessage).
 func NewGateway(destServerURL string, attackMessage string) (*Gateway, error) {
@@ -47,6 +62,9 @@ func NewGateway(destServerURL string, attackMessage string) (*Gateway, error) {
 		// Force Host header to match upstream
 		req.Host = u.Host
 	}
+
+	// Log the exact outbound packet the proxy sends
+	proxy.Transport = &dumpRT{base: http.DefaultTransport}
 
 	// Optional: nicer error logging from the proxy
 	proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
@@ -74,26 +92,55 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = r.Body.Close()
 
+		// Dump the incoming packet EXACTLY as received by the gateway
+		// (request-line + headers + body)
+		{
+			clone := r.Clone(r.Context())
+			clone.Body = io.NopCloser(bytes.NewReader(origBytes))
+			clone.ContentLength = int64(len(origBytes))
+			clone.Header.Set("Content-Length", strconv.Itoa(len(origBytes)))
+			if dump, err := httputil.DumpRequest(clone, true); err == nil {
+				// print ONLY the raw HTTP packet
+				log.Printf("\n===== GW INBOUND  <<< %s %s =====\n%s\n===== END GW INBOUND  =====\n",
+					clone.Method, clone.URL.String(), dump)
+			}
+		}
 		// Default: forward original body (no tamper)
 		bodyToSend := origBytes
 
-		// If attack message is set, try to parse as AgentMessage and mutate Content
 		if g.attackMessage != "" {
-			var msg types.AgentMessage
-			if err := json.Unmarshal(origBytes, &msg); err == nil {
-				// Mutate the content to simulate MITM
-				oldLen := len(msg.Content)
-				msg.Content = msg.Content + g.attackMessage
-				if mutated, mErr := json.Marshal(msg); mErr == nil {
-					log.Printf("[GW] MITM: AgentMessage.Content mutated (len %d → %d)", oldLen, len(msg.Content))
-					bodyToSend = mutated
+			switch {
+			case isHPKEHandshake(r):
+				// 핸드셰이크는 절대 변조 금지
+				log.Printf("[GW] SKIP tamper: HPKE handshake")
+
+			case isHPKEData(r):
+				//  HPKE 데이터 모드: ciphertext 바이트를 살짝 깨뜨린다
+				mut := tamperCiphertextFlip(origBytes)
+				if !bytes.Equal(mut, origBytes) {
+					bodyToSend = mut
+					log.Printf("[GW] MITM: HPKE ciphertext mutated (flip 1 byte) len=%d", len(bodyToSend))
 				} else {
-					log.Printf("[GW] failed to marshal mutated body: %v", mErr)
+					log.Printf("[GW] WARN: ciphertext tamper produced identical bytes (len=%d)", len(origBytes))
 				}
-			} else {
-				// Not an AgentMessage JSON; still mutate a byte to break signatures.
-				bodyToSend = append(bodyToSend, ' ')
-				log.Printf("[GW] MITM: non-AgentMessage body mutated by 1 byte")
+
+			default:
+				// 평문 AgentMessage 에서만 Content 변조 시도
+				var msg types.AgentMessage
+				if err := json.Unmarshal(origBytes, &msg); err == nil {
+					oldLen := len(msg.Content)
+					msg.Content = msg.Content + g.attackMessage
+					if mutated, mErr := json.Marshal(msg); mErr == nil {
+						bodyToSend = mutated
+						log.Printf("[GW] MITM: AgentMessage.Content mutated (len %d → %d)", oldLen, len(msg.Content))
+					} else {
+						log.Printf("[GW] failed to marshal mutated body: %v", mErr)
+					}
+				} else {
+					// JSON 아님 → 1바이트만 덧붙여 서명 깨뜨리기(선택)
+					bodyToSend = append(append([]byte{}, origBytes...), ' ')
+					log.Printf("[GW] MITM: non-JSON body mutated by 1 byte (len=%d→%d)", len(origBytes), len(bodyToSend))
+				}
 			}
 		}
 
@@ -113,4 +160,28 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Forward (including Signature headers) to the destination server
 	g.proxy.ServeHTTP(w, r)
+}
+
+func isHPKEHandshake(r *http.Request) bool {
+	// HPKE 핸드셰이크: X-SAGE-HPKE: v1 && X-KID 없음 && TaskID == "hpke/complete@v1"
+	hpke := strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1")
+	kid := strings.TrimSpace(r.Header.Get("X-KID"))
+	task := strings.TrimSpace(r.Header.Get("X-SAGE-Task-Id"))
+	return hpke && kid == "" && (task == "hpke/complete@v1" || task == "hpke/complete@v1")
+}
+
+func isHPKEData(r *http.Request) bool {
+	// HPKE 데이터 모드: X-SAGE-HPKE: v1 && X-KID 존재
+	return strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1") &&
+		strings.TrimSpace(r.Header.Get("X-KID")) != ""
+}
+
+func tamperCiphertextFlip(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	out[0] ^= 0x01
+	return out
 }

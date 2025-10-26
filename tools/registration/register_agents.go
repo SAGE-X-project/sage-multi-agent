@@ -1,3 +1,6 @@
+//go:build reg_agent
+// +build reg_agent
+
 // tools/registration/register_agents.go
 // SPDX-License-Identifier: MIT
 //

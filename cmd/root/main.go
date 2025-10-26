@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 
+	// 필요하면 "os" 추가
 	"github.com/sage-x-project/sage-multi-agent/agents/ordering"
 	"github.com/sage-x-project/sage-multi-agent/agents/payment"
 	"github.com/sage-x-project/sage-multi-agent/agents/planning"
@@ -15,28 +17,34 @@ func main() {
 	rootName := flag.String("name", "root", "root agent name")
 	rootPort := flag.Int("port", 18080, "root agent port")
 
-	// Payment (outbound to gateway/external)
+	// External (게이트웨이) 표시용만 사용 — 실제로는 PaymentAgent가 env 기본값을 씀
 	paymentExternal := flag.String("payment-external", "http://localhost:5500", "external payment base (gateway)")
-	// paymentJWK := flag.String("payment-jwk", "", "payment agent JWK (private) file path [required]")
-	// paymentDID := flag.String("payment-did", "", "payment agent DID (optional; derived from key if empty)")
 
-	// flag.Parse()
+	// HPKE 플래그 (기본 OFF)
+	hpke := flag.Bool("hpke", false, "Enable HPKE to external from PaymentAgent")
+	hpkeKeys := flag.String("hpke-keys", "generated_agent_keys.json", "Path to generated agent keys JSON")
 
-	// if *paymentJWK == "" {
-	// 	log.Fatal("missing -payment-jwk (required)")
-	// }
+	// 반드시 호출!
+	flag.Parse()
 
-	// // Inject ENV for payment agent
-	// _ = os.Setenv("PAYMENT_EXTERNAL_URL", *paymentExternal)
-	// _ = os.Setenv("PAYMENT_JWK_FILE", *paymentJWK)
-	// if *paymentDID != "" {
-	// 	_ = os.Setenv("PAYMENT_DID", *paymentDID)
-	// }
-
-	// Build in-proc agents
+	// IN-PROC agents
 	pl := planning.NewPlanningAgent("planning")
 	or := ordering.NewOrderingAgent("ordering")
 	pa := payment.NewPaymentAgent("payment")
+
+	// HPKE 켜기 (선택)
+	if *hpke {
+		if err := pa.EnableHPKE(context.Background(), payment.HPKEConfig{
+			Enable:   true,
+			KeysFile: *hpkeKeys,
+		}); err != nil {
+			log.Printf("[root] HPKE init FAILED: %v", err)
+		} else {
+			log.Printf("[root] HPKE init OK (keys=%s)", *hpkeKeys)
+		}
+	} else {
+		log.Printf("[root] HPKE disabled")
+	}
 
 	// Root
 	r := root.NewRootAgent(*rootName, *rootPort, pl, or, pa)
