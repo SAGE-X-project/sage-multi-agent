@@ -59,24 +59,28 @@ Demo keys are provided under `keys/` and `generated_agent_keys.json` for conveni
 ```
 
 If you don't have keys yet:
+
 - Generate signing (ECDSA secp256k1) keys and summary first (required before registration):
-  - `go run -tags=reg_agents_key tools/keygen/gen_agents_key.go --agents "payment,ordering,planing,external"`
+  - `go run tools/keygen/gen_agents_key.go --agents "payment,ordering,planing,external"`
 - To use HPKE, generate KEM (X25519) keys (External server requires a KEM private JWK):
-  - `go run -tags=reg_kem_key tools/keygen/gen_kem_keys.go --agents "payment,external"`
+  - `go run tools/keygen/gen_kem_keys.go --agents "payment,external"`
   - Ensure `EXTERNAL_KEM_JWK_FILE` points to the external agent's KEM JWK (default: `keys/kem/external.x25519.jwk`).
 
 2. Run the demo with three toggles
 
 - SAGE on/off (request‑time):
+
   - SAGE ON: send requests with `-H 'X-SAGE-Enabled: true'` to sign agent→external (default)
   - SAGE OFF: use `-H 'X-SAGE-Enabled: false'` (no signing)
   - Optional global switch: `scripts/toggle_sage.sh on|off`
 
 - Gateway tamper/pass (process‑start):
+
   - `./demo_SAGE.sh --tamper` (mutate bodies; demo attack) — default
   - `./demo_SAGE.sh --pass` (pass‑through)
 
 - HPKE on/off (process‑start):
+
   - `./demo_SAGE.sh --hpke on --hpke-keys generated_agent_keys.json`
   - `./demo_SAGE.sh --hpke off` (default)
   - Requires KEM keys (see above). HPKE is only available when SAGE mode is ON (`X-SAGE-Enabled: true`).
