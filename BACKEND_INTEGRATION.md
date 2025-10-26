@@ -1,188 +1,108 @@
-# SAGE Multi-Agent 백엔드 연동 가이드
+# SAGE Multi‑Agent 백엔드 연동 가이드
 
-##  개요
+본 문서는 `sage-fe` 프론트엔드와 본 레포(`sage-multi-agent`) 백엔드를 연동하는 방법과, SAGE 프로토콜(A2A 서명, DID 검증, HPKE)을 데모 옵션에 따라 체험하는 방법을 설명합니다.
 
-이 문서는 `sage-fe` 프론트엔드와 `sage-multi-agent` 백엔드 간의 통신 및 SAGE 프로토콜 연동에 대한 상세 가이드입니다.
+## 아키텍처 개요
 
-##  아키텍처
-
-### 통신 구조
 ```
-Frontend (Next.js) 
-    ↓ HTTP POST
-API Route (/api/send-prompt)
-    ↓ HTTP POST + Headers
-Backend Client (port 8086)
-    ↓ A2A Protocol
-Root Agent (port 8080)
-    ↓ WebSocket
-WebSocket Server (port 8085)
-    ↓ Real-time logs
-Frontend (WebSocket Client)
+Frontend
+  ↓ HTTP POST (/api/request)
+Client API (:8086)
+  ↓ HTTP POST (/process)
+Root (:18080, in‑proc Planning/Ordering/Payment)
+  ↓ HTTP POST
+Gateway (:5500, tamper/pass)
+  ↓ HTTP POST
+External Payment (:19083, DID 미들웨어로 서명 검증, HPKE 수신)
 ```
 
-##  프론트엔드 변경사항
+선택적으로 WebSocket 로그 서버를 붙일 수 있습니다(`websocket/enhanced_server.go`). 기본 실행 흐름에는 포함되어 있지 않습니다.
 
-### 1. 환경변수 설정 (`.env.local`)
+## 프론트엔드 변경사항
+
+### 1) 환경 변수 예시 (`.env.local`)
+
 ```env
-# Backend API Configuration
+# Backend API endpoint
 NEXT_PUBLIC_API_URL=http://localhost:8086
-NEXT_PUBLIC_API_ENDPOINT=/send/prompt
+NEXT_PUBLIC_API_ENDPOINT=/api/request
 
-# WebSocket Configuration  
+# Optional WebSocket (if enabled)
 NEXT_PUBLIC_WS_URL=ws://localhost:8085
 NEXT_PUBLIC_WS_ENDPOINT=/ws
-
-# WebSocket Settings
 NEXT_PUBLIC_WS_RECONNECT_INTERVAL=1000
 NEXT_PUBLIC_WS_MAX_RECONNECT_ATTEMPTS=5
 NEXT_PUBLIC_WS_HEARTBEAT_INTERVAL=30000
 
-# Feature Flags
+# Feature flags
 NEXT_PUBLIC_ENABLE_SAGE_PROTOCOL=true
-NEXT_PUBLIC_ENABLE_REALTIME_LOGS=true
+NEXT_PUBLIC_ENABLE_REALTIME_LOGS=false
 ```
 
-### 2. WebSocket 연결 관리 시스템
+### 2) WebSocket(선택)
 
-#### WebSocketManager 클래스
-- **위치**: `/src/lib/websocket/WebSocketManager.ts`
-- **기능**:
-  - 자동 재연결 (exponential backoff)
-  - 하트비트 메커니즘
-  - 메시지 큐잉
-  - 에러 핸들링 및 복구
-  - 상태 관리 (연결/끊김/재연결/에러)
+`websocket/enhanced_server.go`를 사용해 /ws, /health, /stats 엔드포인트를 제공할 수 있습니다. 기본 데모에는 필수는 아닙니다.
 
-#### useWebSocket 훅
-- **위치**: `/src/hooks/useWebSocket.ts`
-- **기능**:
-  - React 컴포넌트에서 WebSocket 사용
-  - 자동 연결/해제
-  - 이벤트 핸들러 관리
+### 3) SAGE 프로토콜 통합
 
-### 3. SAGE 프로토콜 통합
-
-#### API 요청 구조
+#### 요청 바디 + 헤더
 ```typescript
 interface PromptRequest {
   prompt: string;
-  sageEnabled?: boolean;  // SAGE 프로토콜 활성화 여부
-  scenario?: "accommodation" | "delivery" | "payment";
-  metadata?: {
-    userId?: string;
-    sessionId?: string;
-    timestamp?: string;
-  };
+  sageEnabled?: boolean;  // (선택) 클라에서 관리 시 사용. 권장: 헤더로 제어
+  scenario?: "planning" | "ordering" | "payment";
+  metadata?: Record<string, string>;
 }
 ```
 
-#### HTTP 헤더 추가
+권장 헤더 예시:
+
 ```typescript
-headers: {
+{
   "Content-Type": "application/json",
-  "X-SAGE-Enabled": "true",  // SAGE 활성화 시
-  "X-Scenario": "accommodation"  // 시나리오 정보
+  "X-SAGE-Enabled": "true",   // SAGE ON/OFF (per request)
+  "X-Scenario": "payment"      // 선택: UI 시나리오 표시용
 }
 ```
 
-### 4. 에러 처리 강화
+### 4) 에러 처리/로그
 
-- **연결 실패 감지**: 백엔드 서버 미실행 시 명확한 에러 메시지
-- **자동 재연결**: WebSocket 연결 끊김 시 자동 재시도
-- **사용자 알림**: 연결 상태 UI 표시
-- **에러 로깅**: 상세한 에러 정보 콘솔 출력
+- 백엔드 미실행 시 사용자에게 명확한 오류 표시
+- (선택) WebSocket 사용 시 자동 재연결/하트비트/상태 표시
+- 서버 로그는 `logs/*.log` 확인(external-payment, gateway, root, client)
 
-## 🔌 백엔드 연동 요구사항
+## 🔌 데모 토글 및 효과
 
-### 1. WebSocket 서버 (포트 8085)
+실행 스크립트(`demo_SAGE.sh`, `scripts/06_start_all.sh`)로 다음을 제어할 수 있습니다.
 
-백엔드에서 제공해야 할 WebSocket 메시지 형식:
+- SAGE ON/OFF (요청 단위)
+  - 헤더 `X-SAGE-Enabled: true|false` (기본: ON)
 
-```go
-type WebSocketMessage struct {
-    Type      string      `json:"type"`      // "log", "error", "status", "heartbeat"
-    Payload   interface{} `json:"payload"`   
-    Timestamp string      `json:"timestamp"`
-}
+- Gateway tamper/pass (프로세스 시작 시)
+  - `--tamper`(기본) 또는 `--pass`
+  - tamper일 때 게이트웨이는 JSON 바디를 변조하거나 HPKE ciphertext의 1바이트를 flip합니다.
 
-type AgentLog struct {
-    Type           string `json:"type"`      // "routing", "planning", "ordering", "gateway", "sage", "error"
-    From           string `json:"from"`      
-    To             string `json:"to"`        
-    Content        string `json:"content"`   
-    Timestamp      string `json:"timestamp"`
-    MessageId      string `json:"messageId,omitempty"`
-    OriginalPrompt string `json:"originalPrompt,omitempty"`
-    TamperedPrompt string `json:"tamperedPrompt,omitempty"`
-}
-```
+- HPKE ON/OFF (프로세스 시작 시)
+  - `--hpke on|off` (기본 off)
+  - KEM(X25519) 키 필요: `keys/kem/external.x25519.jwk`
+  - 본 데모에서 HPKE는 SAGE가 ON일 때만 유효하게 사용됩니다.
 
-### 2. HTTP API 엔드포인트 (포트 8086)
+효과 요약:
+- HPKE ON + tamper → 게이트웨이가 ciphertext를 변조하면 External에서 복호화 오류(검출)
+- HPKE OFF + SAGE ON + tamper → External DID 미들웨어가 RFC9421 서명 불일치로 거부(4xx)
+- HPKE OFF + SAGE OFF + tamper → 변조가 통과(보안 위험 데모)
 
-#### 요청 처리
-```go
-// client/main.go 수정 필요
-func (s *Server) handlePrompt(w http.ResponseWriter, r *http.Request) {
-    // 1. SAGE 활성화 여부 확인
-    sageEnabled := r.Header.Get("X-SAGE-Enabled") == "true"
-    scenario := r.Header.Get("X-Scenario")
-    
-    // 2. 요청 본문 파싱
-    var req PromptRequest
-    json.NewDecoder(r.Body).Decode(&req)
-    
-    // 3. SAGE 모드에 따른 처리 분기
-    if sageEnabled {
-        // SAGE 프로토콜을 사용한 에이전트 통신
-        // RFC-9421 서명 검증 활성화
-    } else {
-        // 일반 모드 (서명 검증 없음)
-    }
-    
-    // 4. 응답에 로그 및 검증 결과 포함
-    response := PromptResponse{
-        Response: agentResponse,
-        Logs: collectedLogs,
-        SageVerification: verificationResult,
-    }
-}
-```
+## HTTP API 엔드포인트 (Client API :8086)
 
-### 3. SAGE 프로토콜 구현
+- 엔드포인트: `POST /api/request`
+- 헤더: `Content-Type: application/json`, `X-SAGE-Enabled: true|false`, `X-Scenario: <opt>`
+- 바디: `{ "prompt": "..." }`
 
-#### RFC-9421 HTTP Message Signatures 사용
-```go
-// sage/request_handler.go 활용
-type SageHttpRequestHandler struct {
-    verifier   *rfc9421.HTTPVerifier
-    agentDID   string
-    privateKey ed25519.PrivateKey
-}
+## SAGE/HPKE 구현(요약)
 
-// 서명 생성
-func (h *SageHttpRequestHandler) SignRequest(req *http.Request) error {
-    params := &rfc9421.SignatureInputParams{
-        CoveredComponents: []string{
-            `"@method"`,
-            `"@path"`,
-            `"content-type"`,
-            `"date"`,
-            `"x-agent-did"`,
-        },
-        KeyID:     h.agentDID,
-        Algorithm: "ed25519",
-        Created:   time.Now().Unix(),
-    }
-    return h.verifier.SignRequest(req, "sig1", params, h.privateKey)
-}
-
-// 서명 검증
-func (h *SageHttpRequestHandler) VerifyRequest(req *http.Request) error {
-    publicKey := h.getPublicKeyForAgent(req.Header.Get("X-Agent-DID"))
-    return h.verifier.VerifyRequest(req, "sig1", publicKey)
-}
-```
+- A2A 서명: `github.com/sage-x-project/sage-a2a-go` 클라이언트를 사용해 RFC9421 서명을 생성/첨부
+- DID 검증: External Payment에서 a2a-go 미들웨어가 검증
+- HPKE: Payment→External 간 초기화/세션(`agents/payment/hpke_wrap.go`, `cmd/external-payment/main.go`)
 
 ### 4. Gateway 모드 처리
 
@@ -203,86 +123,65 @@ if !sageEnabled && scenario != "" {
 }
 ```
 
-##  데이터 흐름
+## 데이터 흐름
 
 ### 1. 사용자 요청 (SAGE ON)
 ```
-User Input → Frontend → API Route → Backend Client
+User Input → Frontend → Client API
     ↓
-Root Agent (SAGE 서명 생성)
+Root Agent
     ↓
-Planning/Ordering Agent (서명 검증)
+Sub‑Agents (in‑proc)
     ↓
 Response (검증 성공) → Frontend
 ```
 
 ### 2. 사용자 요청 (SAGE OFF)
 ```
-User Input → Frontend → API Route → Backend Client
+User Input → Frontend → Client API
     ↓
-Root Agent → Gateway (메시지 변조)
+Root Agent → Gateway (tamper)
     ↓
-Planning/Ordering Agent (변조된 메시지 처리)
+Sub‑Agents (변조된 메시지 처리)
     ↓
 Response (위험 경고 없음) → Frontend
 ```
 
-##  실행 방법
+## 실행 방법
 
-### 1. 백엔드 서버 시작
+### 간단 실행(추천)
+
 ```bash
-# Root Agent (포트 8080)
-cd sage-multi-agent
-go run cli/root/main.go --ws-port 8085
+# 게이트웨이 변조 + HPKE off (기본)
+./demo_SAGE.sh --tamper --hpke off
 
-# Client Server (포트 8086)
-go run client/main.go --port 8086 --root-url http://localhost:8080
+# 게이트웨이 변조 + HPKE on
+./demo_SAGE.sh --tamper --hpke on --hpke-keys generated_agent_keys.json
 
-# Sub-agents
-go run cli/ordering/main.go --port 8083
-go run cli/planning/main.go --port 8084
+# 패스스루 + HPKE on
+./demo_SAGE.sh --pass --hpke on --hpke-keys generated_agent_keys.json
 ```
 
-### 2. 프론트엔드 시작
+### 수동 실행(그대로)
+
+1) External Payment: `scripts/02_start_external_payment_agent.sh`
+2) Gateway: `scripts/03_start_gateway_tamper.sh` 또는 `scripts/03_start_gateway_pass.sh`
+3) Root: `go run ./cmd/root/main.go -port 18080 [-hpke -hpke-keys ...]`
+4) Client API: `go run ./cmd/client/main.go -port 8086 -root http://localhost:18080`
+
+## 프론트엔드에서 호출 예시
+
 ```bash
-cd sage-fe
-npm install
-npm run dev
+curl -sS POST http://localhost:8086/api/request \
+  -H 'Content-Type: application/json' \
+  -H 'X-SAGE-Enabled: true' \
+  -H 'X-Scenario: payment' \
+  -d '{"prompt":"send 5 usdc to bob"}' | jq
 ```
 
-##  테스트 체크리스트
+## 참고/보안
 
-- [ ] WebSocket 연결 확인 (포트 8085)
-- [ ] 실시간 로그 수신 확인
-- [ ] SAGE ON 모드 동작 확인
-- [ ] SAGE OFF 모드 동작 확인
-- [ ] 시나리오별 데모 동작 확인
-- [ ] 에러 처리 및 재연결 확인
-- [ ] 백엔드 미실행 시 에러 메시지 확인
-
-##  추가 개발 필요사항
-
-### 백엔드 (sage-multi-agent)
-1. WebSocket 메시지 포맷 통일
-2. Agent 간 통신 로그 수집 및 전송
-3. SAGE 서명 검증 결과 응답에 포함
-4. 시나리오별 데모 로직 구현
-
-### 프론트엔드 (sage-fe)
-1. ~~WebSocket 연결 관리~~ 
-2. ~~SAGE 상태 전달~~ 
-3. ~~에러 처리 강화~~ 
-4. ~~환경변수 설정~~ 
-
-##  보안 고려사항
-
-1. **DID 관리**: 각 에이전트의 DID를 안전하게 관리
-2. **키 관리**: Ed25519 개인키를 안전한 저장소에 보관
-3. **서명 검증**: 모든 에이전트 간 통신에서 서명 검증 수행
-4. **타임스탬프 검증**: 재생 공격 방지를 위한 타임스탬프 확인
-
-## 📚 참고 자료
-
-- [RFC 9421 - HTTP Message Signatures](https://datatracker.ietf.org/doc/html/rfc9421)
-- [SAGE Protocol Documentation](../sage/docs/)
-- [A2A Protocol Documentation](https://github.com/trpc-group/trpc-a2a-go)
+- 에이전트 등록/키 준비: README의 “Registering Agents (on‑chain)” 절 참고
+- 포트 정리: `scripts/01_kill_ports.sh --force`
+- 데모 키는 로컬 개발용. 운영에 재사용 금지
+- RFC 9421: https://datatracker.ietf.org/doc/html/rfc9421
