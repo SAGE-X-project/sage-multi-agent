@@ -1,16 +1,16 @@
 package a2autil
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"fmt"
-	"os"
-	"strings"
+    "crypto/sha256"
+    "encoding/base64"
+    "fmt"
+    "os"
+    "strings"
 
-	// a2a-go: DID verifier, key selector, RFC9421 verifier 인터페이스/구현
-	"github.com/sage-x-project/sage-a2a-go/pkg/server"
-	"github.com/sage-x-project/sage/pkg/agent/did"
-	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+    // a2a-go: DID verifier, key selector, RFC9421 verifier interfaces/implementations
+    "github.com/sage-x-project/sage-a2a-go/pkg/server"
+    "github.com/sage-x-project/sage/pkg/agent/did"
+    dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
 
 // DIDAuth wraps the a2a-go server middleware so callers don't depend on a2a-go directly.

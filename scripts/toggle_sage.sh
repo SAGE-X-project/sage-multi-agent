@@ -46,7 +46,7 @@ get_enabled() {
   if command -v jq >/dev/null 2>&1 && [[ "${ct:-}" == application/json* ]]; then
     jq -r 'try .sage_enabled catch "unknown"' "$tmp" 2>/dev/null || echo "unknown"
   else
-    # 아주 단순한 grep fallback
+    # Very simple grep-based fallback
     if grep -qi '"sage_enabled"[[:space:]]*:[[:space:]]*true' "$tmp"; then echo true
     elif grep -qi '"sage_enabled"[[:space:]]*:[[:space:]]*false' "$tmp"; then echo false
     else echo "unknown"; fi

@@ -19,21 +19,21 @@ import (
 )
 
 /*
-변경사항 핵심
-- generated_kem_keys.json(개인 JSON)에 address 필드 추가
-- signing summary(generated_agent_keys.json)에서 이름→DID, 이름→address 매핑을 함께 가져옴
-- DID만 있고 address가 비어있으면 DID에서 0x주소를 파싱해 address 채움
-- public JSON에도 address(optional) 포함(소비자가 무시해도 무방)
+Key changes
+- Add address field to generated_kem_keys.json (private JSON)
+- Load name→DID and name→address mappings from signing summary (generated_agent_keys.json)
+- If only DID is present and address is empty, parse 0x-address from DID and fill address
+- Include address (optional) in public JSON as well (consumers may ignore it)
 */
 
-// ---------- JSON 모델 ----------
+// ---------- JSON Model ----------
 
 type KemAgent struct {
-	Name          string `json:"name"`
-	DID           string `json:"did"`
-	Address       string `json:"address,omitempty"` // ★ 추가
-	X25519Private string `json:"x25519Private"`     // 0x-hex (32B)
-	X25519Public  string `json:"x25519Public"`      // 0x-hex (32B)
+    Name          string `json:"name"`
+    DID           string `json:"did"`
+    Address       string `json:"address,omitempty"` // added
+    X25519Private string `json:"x25519Private"`     // 0x-hex (32B)
+    X25519Public  string `json:"x25519Public"`      // 0x-hex (32B)
 }
 
 type KemPrivateList struct {
@@ -41,30 +41,30 @@ type KemPrivateList struct {
 }
 
 type KemPublicList struct {
-	Agents []struct {
-		Name         string `json:"name"`
-		DID          string `json:"did"`
-		Address      string `json:"address,omitempty"` // ★ 추가(선택)
-		X25519Public string `json:"x25519Public"`
-	} `json:"agents"`
+    Agents []struct {
+        Name         string `json:"name"`
+        DID          string `json:"did"`
+        Address      string `json:"address,omitempty"` // added (optional)
+        X25519Public string `json:"x25519Public"`
+    } `json:"agents"`
 }
 
-// signing summary(generated_agent_keys.json)와 호환되는 구조
+// Structure compatible with signing summary (generated_agent_keys.json)
 type SigningSummaryRow struct {
-	Name    string `json:"name"`
-	DID     string `json:"did"`
-	Address string `json:"address"` // 0x...
+    Name    string `json:"name"`
+    DID     string `json:"did"`
+    Address string `json:"address"` // 0x...
 }
 
 // OKP JWK (X25519)
 type OKPJWK struct {
-	Kty string `json:"kty"`           // "OKP"
-	Crv string `json:"crv"`           // "X25519"
-	X   string `json:"x"`             // b64url(pub)
-	D   string `json:"d,omitempty"`   // b64url(priv) — private 파일에만
-	Kid string `json:"kid,omitempty"` // DID 또는 name
-	Use string `json:"use,omitempty"` // "enc"
-	Alg string `json:"alg,omitempty"` // "X25519"
+    Kty string `json:"kty"`           // "OKP"
+    Crv string `json:"crv"`           // "X25519"
+    X   string `json:"x"`             // b64url(pub)
+    D   string `json:"d,omitempty"`   // b64url(priv) — only in private files
+    Kid string `json:"kid,omitempty"` // DID or name
+    Use string `json:"use,omitempty"` // "enc"
+    Alg string `json:"alg,omitempty"` // "X25519"
 }
 type JWKSet struct {
 	Keys []OKPJWK `json:"keys"`
@@ -77,12 +77,12 @@ func main() {
 	pubJSON := flag.String("public-json", "keys/kem/kem_all_keys.json", "Public KEM JSON (no private material)")
 	pemDir := flag.String("pem-dir", "keys/kem/pem", "Optional PEM dir for per-agent files")
 
-	// JWK 산출 경로
-	jwkDir := flag.String("jwk-out", "keys/kem", "Directory to write per-agent X25519 JWK files")
-	jwkSetPub := flag.String("jwkset-public", "keys/kem/kem_jwks.json", "Public JWK Set (no private key)")
+    // JWK output paths
+    jwkDir := flag.String("jwk-out", "keys/kem", "Directory to write per-agent X25519 JWK files")
+    jwkSetPub := flag.String("jwkset-public", "keys/kem/kem_jwks.json", "Public JWK Set (no private key)")
 
-	// DID/Address 채움: signing summary에서 이름→DID/Address 매핑 읽기
-	signingSummary := flag.String("signing-summary", "generated_agent_keys.json", "Path to signing summary (for DID/address mapping)")
+    // Fill DID/Address: read name→DID/Address mapping from signing summary
+    signingSummary := flag.String("signing-summary", "generated_agent_keys.json", "Path to signing summary (for DID/address mapping)")
 	flag.Parse()
 
 	names := splitCSV(*agentsFlag)
@@ -107,11 +107,11 @@ func main() {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 
-	// 이름 -> DID/Address 매핑
-	nameToDID := map[string]string{}
-	nameToAddr := map[string]string{}
-	loadDIDFromEnvInto(nameToDID, names)
-	loadDIDAddrFromSigningSummaryInto(nameToDID, nameToAddr, *signingSummary) // env 부족분 summary로 보충
+    // name -> DID/Address mapping
+    nameToDID := map[string]string{}
+    nameToAddr := map[string]string{}
+    loadDIDFromEnvInto(nameToDID, names)
+    loadDIDAddrFromSigningSummaryInto(nameToDID, nameToAddr, *signingSummary) // supplement missing env values with summary
 
 	var privList KemPrivateList
 	var pubList KemPublicList
@@ -135,15 +135,15 @@ func main() {
 			continue
 		}
 
-		did := strings.TrimSpace(nameToDID[name])   // 없으면 빈 문자열
-		addr := strings.TrimSpace(nameToAddr[name]) // 없으면 빈 문자열
+        did := strings.TrimSpace(nameToDID[name])   // empty if missing
+        addr := strings.TrimSpace(nameToAddr[name]) // empty if missing
 
-		// DID만 있고 address가 없으면 DID에서 0x주소 파싱 시도
-		if addr == "" && did != "" {
-			if a := parseAddressFromDID(did); a != "" {
-				addr = a
-			}
-		}
+        // If only DID is set and address is empty, parse 0x-address from DID
+        if addr == "" && did != "" {
+            if a := parseAddressFromDID(did); a != "" {
+                addr = a
+            }
+        }
 
 		// 1) X25519 generate
 		priv, pub, err := genX25519()
@@ -154,14 +154,14 @@ func main() {
 		privHex := "0x" + hex.EncodeToString(priv)
 		pubHex := "0x" + hex.EncodeToString(pub)
 
-		// 2) JSON 산출 (개인/공개)
-		privList.Agents = append(privList.Agents, KemAgent{
-			Name:          name,
-			DID:           did,
-			Address:       addr, // ★ 포함
-			X25519Private: privHex,
-			X25519Public:  pubHex,
-		})
+        // 2) Emit JSON (private/public)
+        privList.Agents = append(privList.Agents, KemAgent{
+            Name:          name,
+            DID:           did,
+            Address:       addr, // include
+            X25519Private: privHex,
+            X25519Public:  pubHex,
+        })
 		pubList.Agents = append(pubList.Agents, struct {
 			Name         string `json:"name"`
 			DID          string `json:"did"`
@@ -169,17 +169,17 @@ func main() {
 			X25519Public string `json:"x25519Public"`
 		}{Name: name, DID: did, Address: addr, X25519Public: pubHex})
 
-		// 3) PEM (옵션)
-		if *pemDir != "" {
-			writePEM(filepath.Join(*pemDir, fmt.Sprintf("%s_x25519_priv.pem", name)), "X25519 PRIVATE KEY", priv)
-			writePEM(filepath.Join(*pemDir, fmt.Sprintf("%s_x25519_pub.pem", name)), "X25519 PUBLIC KEY", pub)
-		}
+        // 3) PEM (optional)
+        if *pemDir != "" {
+            writePEM(filepath.Join(*pemDir, fmt.Sprintf("%s_x25519_priv.pem", name)), "X25519 PRIVATE KEY", priv)
+            writePEM(filepath.Join(*pemDir, fmt.Sprintf("%s_x25519_pub.pem", name)), "X25519 PUBLIC KEY", pub)
+        }
 
-		// 4) JWK per-agent (OKP/X25519)
-		kid := did
-		if kid == "" {
-			kid = name
-		}
+        // 4) JWK per-agent (OKP/X25519)
+        kid := did
+        if kid == "" {
+            kid = name
+        }
 		privJWK := OKPJWK{
 			Kty: "OKP",
 			Crv: "X25519",
@@ -198,21 +198,21 @@ func main() {
 			Alg: "X25519",
 		}
 
-		//   - 개인 JWK 파일
-		privPath := filepath.Join(*jwkDir, fmt.Sprintf("%s.x25519.jwk", name))
-		mustWriteJSONPrivate(privPath, privJWK)
+        //   - private JWK file
+        privPath := filepath.Join(*jwkDir, fmt.Sprintf("%s.x25519.jwk", name))
+        mustWriteJSONPrivate(privPath, privJWK)
 
-		//   - 공개 JWK Set에 추가
-		jwkSetPublic.Keys = append(jwkSetPublic.Keys, pubJWK)
+        //   - append to public JWK Set
+        jwkSetPublic.Keys = append(jwkSetPublic.Keys, pubJWK)
 
 		fmt.Printf(" - %s  DID=%s  addr=%s  pub=%s  (jwk:%s)\n",
 			name, firstNonEmpty(did, "(unset)"), firstNonEmpty(addr, "(unset)"), pubHex, privPath)
 	}
 
-	// 5) 쓰기
-	mustWriteJSON(*kemJSON, privList)       // 0600
-	mustWriteJSON(*pubJSON, pubList)        // 0644
-	mustWriteJSON(*jwkSetPub, jwkSetPublic) // 0644
+    // 5) Write outputs
+    mustWriteJSON(*kemJSON, privList)       // 0600
+    mustWriteJSON(*pubJSON, pubList)        // 0644
+    mustWriteJSON(*jwkSetPub, jwkSetPublic) // 0644
 
 	fmt.Println("DONE.")
 }
@@ -241,14 +241,14 @@ func loadDIDFromEnvInto(m map[string]string, names []string) {
 	}
 }
 
-// generated_agent_keys.json에서 이름→DID/Address 보충
+// Supplement name→DID/Address from generated_agent_keys.json
 func loadDIDAddrFromSigningSummaryInto(did map[string]string, addr map[string]string, summaryPath string) {
 	b, err := os.ReadFile(summaryPath)
 	if err != nil {
 		return
 	}
-	// 일반형: []SigningSummaryRow
-	var rows []SigningSummaryRow
+    // Primary form: []SigningSummaryRow
+    var rows []SigningSummaryRow
 	if err := json.Unmarshal(b, &rows); err == nil && len(rows) > 0 {
 		for _, r := range rows {
 			if strings.TrimSpace(did[r.Name]) == "" && strings.TrimSpace(r.DID) != "" {
@@ -260,8 +260,8 @@ func loadDIDAddrFromSigningSummaryInto(did map[string]string, addr map[string]st
 		}
 		return
 	}
-	// fallback: {"agents":[...]} 같은 래핑
-	var obj map[string]any
+    // fallback: wrapping such as {"agents":[...]}
+    var obj map[string]any
 	if err := json.Unmarshal(b, &obj); err == nil {
 		if v, ok := obj["agents"]; ok {
 			ba, _ := json.Marshal(v)
@@ -291,7 +291,7 @@ func parseAddressFromDID(did string) string {
 		return ""
 	}
 	part := did[len(prefix):]
-	// did:sage:ethereum:0xADDR 또는 did:sage:ethereum:0xADDR:nonce 형태 지원
+    // Support both did:sage:ethereum:0xADDR and did:sage:ethereum:0xADDR:nonce forms
 	if idx := strings.IndexByte(part, ':'); idx >= 0 {
 		part = part[:idx]
 	}
@@ -350,9 +350,9 @@ func mustMkdirAll(path string, mode os.FileMode) {
 func mustWriteJSON(path string, v interface{}) {
 	mode := os.FileMode(0o644)
 	base := filepath.Base(path)
-	if strings.Contains(base, "generated_kem_keys.json") || strings.HasSuffix(base, ".jwk") {
-		mode = 0o600 // private 성격
-	}
+    if strings.Contains(base, "generated_kem_keys.json") || strings.HasSuffix(base, ".jwk") {
+        mode = 0o600 // contains private material
+    }
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {

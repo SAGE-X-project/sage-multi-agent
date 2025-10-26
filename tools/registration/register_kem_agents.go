@@ -9,12 +9,12 @@
 //  - ECDSA key: from signing-keys JSON (required; self-signed flow)
 //  - X25519 key: from kem-keys JSON (32 bytes public key; no signature)
 //
-// 변경점:
-//  - Register에 사용할 DID를 signing-keys가 아니라 **KEM JSON의 DID**로 사용.
-//  - Register 전에 해당 DID가 이미 온체인에 있으면, **addKey(X25519)** 로 추가 등록.
-//    (owner 제약: 등록에 사용한 같은 ECDSA 개인키로 트랜잭션 전송)
+// Changes:
+//  - Use the DID from the KEM JSON (not signing-keys) for Register.
+//  - If the DID already exists on-chain, add the X25519 key via addKey(X25519).
+//    (owner requirement: the tx sender must be the same ECDSA key used at registration)
 //
-// 사용법:
+// Usage:
 //   go run -tags=reg_kem tools/registration/register_kem_agents.go \
 //     -contract 0x... \
 //     -rpc http://127.0.0.1:8545 \
@@ -53,18 +53,18 @@ import (
 /********** input & meta types **********/
 
 type signingRow struct {
-	Name       string `json:"name"`
-	DID        string `json:"did"`
-	PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... 권장; 33B compressed 가능)
-	PrivateKey string `json:"privateKey"` // agent EOA (self-signed tx sender)
-	Address    string `json:"address"`
+    Name       string `json:"name"`
+    DID        string `json:"did"`
+    PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... recommended; 33B compressed allowed)
+    PrivateKey string `json:"privateKey"` // agent EOA (self-signed tx sender)
+    Address    string `json:"address"`
 }
 
 type kemAgentRow struct {
-	Name          string `json:"name"`
-	DID           string `json:"did,omitempty"` // 사용 (Register/AddKey에 쓸 DID)
-	X25519Public  string `json:"x25519Public"`  // 32B (hex)
-	X25519Private string `json:"x25519Private,omitempty"`
+    Name          string `json:"name"`
+    DID           string `json:"did,omitempty"` // used (DID for Register/AddKey)
+    X25519Public  string `json:"x25519Public"`  // 32B (hex)
+    X25519Private string `json:"x25519Private,omitempty"`
 }
 
 type kemFile struct {
@@ -88,8 +88,8 @@ type DemoAgent struct {
 /********** main **********/
 
 func main() {
-	// Flags (register_agents.go 스타일과 동일한 느낌)
-	contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
+    // Flags (similar style to register_agents.go)
+    contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
 	rpcURL := flag.String("rpc", "", "RPC URL (env ETH_RPC_URL or default)")
 
 	signingPath := flag.String("signing-keys", "generated_agent_keys.json", "Signing summary JSON (array)")
@@ -136,8 +136,8 @@ func main() {
 		selected = parseAgentsFilter(os.Getenv("SAGE_AGENTS"))
 	}
 
-	// Build agent metas (env 기반 메타 채움)
-	agents := buildAgentsFromSigning(signingRows, selected)
+    // Build agent metas (fill metadata from env)
+    agents := buildAgentsFromSigning(signingRows, selected)
 
 	fmt.Println("======================================")
 	fmt.Println(" SAGE V4 Agent Registration (ECDSA + X25519 via Register/AddKey, KEM DID)")
@@ -231,8 +231,8 @@ func main() {
 
 		// 6) pre-check: DID already registered?
 		if _, err := viewClient.Resolve(context.Background(), did.AgentDID(targetDID)); err == nil {
-			// 이미 등록됨 → addKey(X25519)
-			agentID, err := computeAgentID(targetDID, pubBytes)
+            // Already registered → addKey(X25519)
+            agentID, err := computeAgentID(targetDID, pubBytes)
 			if err != nil {
 				fmt.Printf("   compute agentId failed for %s: %v\n", a.Name, err)
 				continue
@@ -250,13 +250,13 @@ func main() {
 				continue
 			}
 			fmt.Printf(" - %s: DID already existed; X25519 key added via addKey\n", a.Name)
-			// 약간의 딜레이 (UI/log 가독성)
-			time.Sleep(900 * time.Millisecond)
-			continue
-		}
+            // Small delay for UI/log readability
+            time.Sleep(900 * time.Millisecond)
+            continue
+        }
 
-		// 7) 새 등록: self-signed signature (ECDSA first key)
-		sig, err := signSelfRegistrationMessage(agentPriv, targetDID, pubBytes)
+        // 7) New registration: self-signed signature (ECDSA first key)
+        sig, err := signSelfRegistrationMessage(agentPriv, targetDID, pubBytes)
 		if err != nil {
 			fmt.Printf("   Failed to sign message for %s: %v\n", a.Name, err)
 			continue
@@ -363,8 +363,8 @@ func parseAgentsFilter(csv string) []string {
 }
 
 func findSigning(all []signingRow, name string) *signingRow {
-	for i := range all {
-		if all[i].Name == name { // register_agents.go와 동일 (대소문자 구분)
+    for i := range all {
+        if all[i].Name == name { // same as register_agents.go (case-sensitive)
 			return &all[i]
 		}
 	}
@@ -486,7 +486,7 @@ func computeAgentID(didStr string, firstKey []byte) ([32]byte, error) {
 }
 
 // addKEMKey calls registry.addKey(agentId, X25519, xpub, emptySig)
-// 사용 조건: msg.sender == 해당 agentId의 owner (register 시 사용한 EOA)
+// Usage requirement: msg.sender must be the owner of agentId (the EOA used at registration)
 func addKEMKey(ctx context.Context, rpcURL, contractAddr, privHex string, gasPriceWei uint64, agentID [32]byte, x25519Pub []byte) error {
 	if len(x25519Pub) != 32 {
 		return fmt.Errorf("x25519 pub must be 32 bytes")
@@ -526,10 +526,10 @@ func addKEMKey(ctx context.Context, rpcURL, contractAddr, privHex string, gasPri
 	addr := common.HexToAddress(contractAddr)
 	contract := bind.NewBoundContract(addr, parsed, cli, cli, cli)
 
-	// enum KeyType.X25519 == 2 (컨트랙트/SDK 동일 가정). SDK 쓰면 캐스팅해서 사용.
-	keyType := uint8(did.KeyTypeX25519) // 보통 2
+    // enum KeyType.X25519 == 2 (assume contract and SDK agree). If using SDK types, cast accordingly.
+    keyType := uint8(did.KeyTypeX25519) // usually 2
 
-	// signature는 반드시 빈 바이트
+    // signature must be empty bytes
 	tx, err := contract.Transact(auth, "addKey", agentID, keyType, x25519Pub, []byte{})
 	if err != nil {
 		return fmt.Errorf("addKey tx: %w", err)
@@ -593,7 +593,7 @@ func buildAgentsFromSigning(keys []signingRow, filter []string) []DemoAgent {
 		}
 		var a DemoAgent
 		a.Name = k.Name
-		a.DID = k.DID // 메타 채우기용(실제 Register/추가는 KEM JSON의 DID 사용)
+            a.DID = k.DID // populate metadata (actual Register/add uses DID from KEM JSON)
 		a.Metadata.Name = k.Name
 		a.Metadata.Description = getEnvPerAgent(k.Name, "DESC", "SAGE Agent "+k.Name)
 		a.Metadata.Version = getEnvPerAgent(k.Name, "VERSION", "0.1.0")

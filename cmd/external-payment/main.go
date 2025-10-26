@@ -129,7 +129,7 @@ func main() {
 	requireSig := flag.Bool("require", true, "require RFC9421 signature (false = optional)")
 	flag.Parse()
 
-	// HPKE 서버 부트스트랩 (그대로)
+    // HPKE server bootstrap (unchanged)
 	hpkeSrvMgr = session.NewManager()
 	srvSigningKey := loadServerSigningKeyFromEnv()
 	resolver := buildResolver()
@@ -152,19 +152,19 @@ func main() {
 		&hpke.ServerOpts{KEM: kemKey},
 	)
 
-	// ⬇️ (핸드셰이크 전용) transport/http 서버 어댑터
+    // ⬇️ Handshake-only: transport/http server adapter
 	hsrv := sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
-		// 핸드셰이크는 HPKE 서버에 위임
+        // Delegate handshake to the HPKE server
 		return hpkeSrv.HandleMessage(ctx, msg)
 	})
 
-	// ⬇️ (데이터모드 전용) 우리 쪽 앱 핸들러 (transport.MessageHandler 시그니처)
+// ⬇️ Data-mode only: our app handler (transport.MessageHandler signature)
 	appHandler := func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
-		// msg.Payload 는 반드시 "평문 JSON(AgentMessage)" 이어야 함 (HPKE 데이터는 위에서 복호화됨)
+        // msg.Payload must be plaintext JSON (AgentMessage); HPKE data was decrypted above
 		var in types.AgentMessage
 		if err := json.Unmarshal(msg.Payload, &in); err != nil {
-			// transport.Response 형태로 오류를 돌려주되, 상위에서 raw 바디 응답을 쓸 것이므로
-			// 여기서는 데이터 없이 에러만 싣는다(핸드셰이크가 아니므로 이 Response는 내부에서만 사용).
+            // Return errors as transport.Response, but upper layer writes raw body response.
+            // Since this is not the handshake, this Response is only used internally (no data).
 			return &transport.Response{
 				Success:   false,
 				MessageID: msg.ID,
@@ -173,7 +173,7 @@ func main() {
 			}, nil
 		}
 
-		// 기존 echo 로직 유지
+        // Keep existing echo logic
 		out := types.AgentMessage{
 			ID:        in.ID + "-ok",
 			From:      "external-payment",
@@ -187,11 +187,11 @@ func main() {
 			Success:   true,
 			MessageID: msg.ID,
 			TaskID:    msg.TaskID,
-			Data:      b, // ⬅️ 데이터모드는 raw 바디로 그대로 내려보낼 것
+            Data:      b, // In data mode, return raw body as-is
 		}, nil
 	}
 
-	// DID 미들웨어 (그대로)
+// DID middleware (unchanged)
 	mw, err := a2autil.BuildDIDMiddleware(!*requireSig)
 	if err != nil {
 		log.Printf("[external-payment] DID middleware init failed: %v (running without verify)", err)
@@ -217,30 +217,29 @@ func main() {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
 
-		// === 공통: transport.SecureMessage(유사) 컨텍스트 정보 추출용 헤더 ===
-		// 클라이언트 A2ATransport는 데이터모드에선 raw payload만 보내므로,
-		// 여기서 SecureMessage를 재구성해 appHandler에 넘긴다.
+        // Common: headers used to reconstruct transport.SecureMessage-like context
+        // Client A2ATransport sends only raw payload in data mode; reconstruct here for appHandler
 		did := strings.TrimSpace(r.Header.Get("X-SAGE-DID"))
 		mid := strings.TrimSpace(r.Header.Get("X-SAGE-Message-ID"))
 		ctxID := strings.TrimSpace(r.Header.Get("X-SAGE-Context-ID"))
 		taskID := strings.TrimSpace(r.Header.Get("X-SAGE-Task-ID"))
 
-		// === HPKE 여부 판단 ===
+        // === HPKE decision ===
 		if isHPKE(r) {
 			kid := strings.TrimSpace(r.Header.Get("X-KID"))
 
-			// [핸드셰이크] KID 없음 → transport/http 서버 핸들러에 위임 (SecureMessage JSON)
+            // [Handshake] No KID → delegate to transport/http server handler (SecureMessage JSON)
 			if kid == "" {
-				// 클라(핸드셰이크)는 SecureMessage JSON을 보냄 → 그대로 MessagesHandler로
+                // Client (handshake) sends SecureMessage JSON → pass through to MessagesHandler
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				hsrv.MessagesHandler().ServeHTTP(w, r)
 				return
 			}
 
-			// [데이터모드/HPKE] KID 있음 → 세션 복호화 → appHandler → 재암호화 → raw 바디 응답
+            // [Data mode/HPKE] KID present → decrypt with session → appHandler → re-encrypt → raw body response
 			sess, ok := hpkeSrvMgr.GetByKeyID(kid)
 			if !ok {
-				// 모르는 KID면 혹시 핸드셰이크 바디일 수 있으니 한 번 더 시도
+                // If unknown KID, it might be a handshake body; try delegating once more
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				hsrv.MessagesHandler().ServeHTTP(w, r)
 				return
@@ -251,7 +250,7 @@ func main() {
 				return
 			}
 
-			// transport.SecureMessage 형태로 래핑해 앱 핸들러 호출
+            // Wrap as transport.SecureMessage and call app handler
 			sm := &transport.SecureMessage{
 				ID:        mid,
 				ContextID: ctxID,
@@ -267,7 +266,7 @@ func main() {
 				return
 			}
 
-			// 재암호화 후 raw 바디로 응답 (클라 A2ATransport가 그대로 respBody 사용)
+            // After re-encrypting, respond with raw body (client A2ATransport uses respBody as-is)
 			ct, err := sess.Encrypt(resp.Data)
 			if err != nil {
 				http.Error(w, "hpke encrypt failed", http.StatusInternalServerError)
@@ -282,12 +281,12 @@ func main() {
 			return
 		}
 
-		// [데이터모드/평문] → transport.SecureMessage로 래핑 → appHandler → raw 바디 응답
+        // [Data mode/plain] → wrap into transport.SecureMessage → appHandler → raw body response
 		sm := &transport.SecureMessage{
 			ID:        mid,
 			ContextID: ctxID,
 			TaskID:    taskID,
-			Payload:   body, // 평문 payload
+            Payload:   body, // plaintext payload
 			DID:       did,
 			Metadata:  map[string]string{"hpke": "false"},
 			Role:      "agent",
@@ -299,7 +298,7 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(resp.Data) // ⬅️ 데이터모드는 raw 바디 그대로
+        _, _ = w.Write(resp.Data) // In data mode, write raw body as-is
 	})
 
 	var handler http.Handler = open

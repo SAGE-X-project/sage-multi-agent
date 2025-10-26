@@ -110,13 +110,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		if g.attackMessage != "" {
 			switch {
-			case isHPKEHandshake(r):
-				// 핸드셰이크는 절대 변조 금지
-				log.Printf("[GW] SKIP tamper: HPKE handshake")
+            case isHPKEHandshake(r):
+                // Never tamper with HPKE handshake
+                log.Printf("[GW] SKIP tamper: HPKE handshake")
 
-			case isHPKEData(r):
-				//  HPKE 데이터 모드: ciphertext 바이트를 살짝 깨뜨린다
-				mut := tamperCiphertextFlip(origBytes)
+            case isHPKEData(r):
+                // HPKE data mode: slightly corrupt one byte of ciphertext
+                mut := tamperCiphertextFlip(origBytes)
 				if !bytes.Equal(mut, origBytes) {
 					bodyToSend = mut
 					log.Printf("[GW] MITM: HPKE ciphertext mutated (flip 1 byte) len=%d", len(bodyToSend))
@@ -124,9 +124,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					log.Printf("[GW] WARN: ciphertext tamper produced identical bytes (len=%d)", len(origBytes))
 				}
 
-			default:
-				// 평문 AgentMessage 에서만 Content 변조 시도
-				var msg types.AgentMessage
+            default:
+                // Attempt to mutate Content only for plaintext AgentMessage
+                var msg types.AgentMessage
 				if err := json.Unmarshal(origBytes, &msg); err == nil {
 					oldLen := len(msg.Content)
 					msg.Content = msg.Content + g.attackMessage
@@ -136,9 +136,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					} else {
 						log.Printf("[GW] failed to marshal mutated body: %v", mErr)
 					}
-				} else {
-					// JSON 아님 → 1바이트만 덧붙여 서명 깨뜨리기(선택)
-					bodyToSend = append(append([]byte{}, origBytes...), ' ')
+                } else {
+                    // Not JSON → append a single byte to break signature (optional)
+                    bodyToSend = append(append([]byte{}, origBytes...), ' ')
 					log.Printf("[GW] MITM: non-JSON body mutated by 1 byte (len=%d→%d)", len(origBytes), len(bodyToSend))
 				}
 			}
@@ -163,17 +163,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func isHPKEHandshake(r *http.Request) bool {
-	// HPKE 핸드셰이크: X-SAGE-HPKE: v1 && X-KID 없음 && TaskID == "hpke/complete@v1"
-	hpke := strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1")
-	kid := strings.TrimSpace(r.Header.Get("X-KID"))
-	task := strings.TrimSpace(r.Header.Get("X-SAGE-Task-Id"))
-	return hpke && kid == "" && (task == "hpke/complete@v1" || task == "hpke/complete@v1")
+    // HPKE handshake: X-SAGE-HPKE: v1 && no X-KID && TaskID == "hpke/complete@v1"
+    hpke := strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1")
+    kid := strings.TrimSpace(r.Header.Get("X-KID"))
+    task := strings.TrimSpace(r.Header.Get("X-SAGE-Task-Id"))
+    return hpke && kid == "" && (task == "hpke/complete@v1" || task == "hpke/complete@v1")
 }
 
 func isHPKEData(r *http.Request) bool {
-	// HPKE 데이터 모드: X-SAGE-HPKE: v1 && X-KID 존재
-	return strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1") &&
-		strings.TrimSpace(r.Header.Get("X-KID")) != ""
+    // HPKE data mode: X-SAGE-HPKE: v1 && X-KID present
+    return strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1") &&
+        strings.TrimSpace(r.Header.Get("X-KID")) != ""
 }
 
 func tamperCiphertextFlip(b []byte) []byte {

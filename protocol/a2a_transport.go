@@ -12,18 +12,18 @@ import (
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 )
 
-// A2ADoer: payment.Agent가 이미 가지고 있는 Do(ctx, req) 시그니처만 요구
+// A2ADoer: requires only the Do(ctx, req) signature that payment.Agent already exposes
 type A2ADoer interface {
 	Do(ctx context.Context, req *http.Request) (*http.Response, error)
 }
 
 // A2ATransport:
-//   - 항상 {baseURL}/process 로 전송
-//   - 서명/Content-Digest 헤더는 절대 직접 추가하지 않음 (A2ADoer가 처리)
-//   - 모드:
-//   - Handshake: SecureMessage(JSON) + X-SAGE-HPKE:v1 (KID 없음)
-//   - HPKE 데이터: msg.Metadata["hpke_kid"] 존재 시 payload 그대로 + (Content-Type: sage+hpke, X-SAGE-HPKE, X-KID)
-//   - 평문 데이터: payload 그대로 + (Content-Type: application/json)
+//   - Always POST to {baseURL}/process
+//   - Never add Signature/Content-Digest directly (A2ADoer handles signing)
+//   - Modes:
+//     - Handshake: SecureMessage(JSON) + X-SAGE-HPKE: v1 (no KID)
+//     - HPKE data: when msg.Metadata["hpke_kid"] exists, send payload as-is with (Content-Type: application/sage+hpke, X-SAGE-HPKE, X-KID)
+//     - Plain data: send payload as-is with (Content-Type: application/json)
 type A2ATransport struct {
 	doer          A2ADoer
 	baseURL       string
@@ -51,12 +51,12 @@ func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (
 	)
 
 	if t.hpkeHandshake {
-		// 핸드셰이크: SecureMessage 전체를 JSON으로 보냄
+    // Handshake: send the entire SecureMessage as JSON
 		body, err = json.Marshal(msg)
 		if err != nil {
 			return nil, fmt.Errorf("marshal secure message: %w", err)
 		}
-		useHPKE = true // X-SAGE-HPKE: v1 (KID 없음)
+        useHPKE = true // X-SAGE-HPKE: v1 (no KID)
 	} else {
 		if len(msg.Payload) == 0 {
 			return nil, fmt.Errorf("empty payload")
@@ -96,7 +96,7 @@ func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (
 	req.ContentLength = int64(len(body))
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 
-	// A2A 서명 + DID 미들웨어 경유
+    // Pass through A2A signing + DID middleware
 	resp, err := t.doer.Do(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("http send (a2a): %w", err)
@@ -106,7 +106,7 @@ func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (
 
 	respBody, _ := io.ReadAll(resp.Body)
 
-	// 핸드셰이크는 transport.Response JSON을 기대
+    // Handshake expects a transport.Response JSON
 	if t.hpkeHandshake {
 		var wire struct {
 			Success   bool   `json:"success"`
@@ -143,7 +143,7 @@ func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (
 		return out, nil
 	}
 
-	// 데이터 모드: 바디 그대로 Data로 전달
+    // Data mode: forward raw body as Response.Data
 	return &transport.Response{
 		Success:   resp.StatusCode/100 == 2,
 		MessageID: msg.ID,

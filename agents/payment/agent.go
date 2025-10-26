@@ -36,7 +36,7 @@ type PaymentAgent struct {
 
 	httpClient *http.Client
 
-	// 항상 transport 경유(평문/HPKE 데이터 전송용)
+    // Always route through transport (for plaintext/HPKE data transfer)
 	txPlain transport.MessageTransport
 }
 
@@ -47,7 +47,7 @@ func NewPaymentAgent(name string) *PaymentAgent {
 		ExternalURL: strings.TrimRight(envOr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "/"),
 		httpClient:  http.DefaultClient,
 	}
-	// 평문/HPKE 데이터 전송도 transport 사용 (내부에서 p.Do() 호출 → A2A 서명)
+    // Use transport for plaintext/HPKE data as well (internally calls p.Do() → A2A signing)
 	p.txPlain = prototx.NewA2ATransport(p, p.ExternalURL, false)
 	return p
 }
@@ -82,7 +82,7 @@ func (p *PaymentAgent) Process(ctx context.Context, msg types.AgentMessage) (typ
 func (p *PaymentAgent) forwardExternal(ctx context.Context, msg *types.AgentMessage) (*types.AgentMessage, error) {
 	body, _ := json.Marshal(msg)
 
-	// HPKE on 시 암호화 (반드시 호출)
+    // When HPKE is enabled, encrypt (must call)
 	var kid string
 	if ct, k, used, err := p.encryptIfHPKE(body); used {
 		if err != nil {
@@ -95,7 +95,7 @@ func (p *PaymentAgent) forwardExternal(ctx context.Context, msg *types.AgentMess
 		log.Printf("[payment] HPKE not used (plaintext) bytes=%d", len(body))
 	}
 
-	// 항상 transport 경유
+    // Always send via transport
 	sm := &transport.SecureMessage{
 		ID:      uuid.NewString(),
 		Payload: body,
@@ -106,7 +106,7 @@ func (p *PaymentAgent) forwardExternal(ctx context.Context, msg *types.AgentMess
 		Role: "agent",
 	}
 	if kid != "" {
-		sm.Metadata["hpke_kid"] = kid // A2ATransport가 HPKE 헤더 자동 세팅
+        sm.Metadata["hpke_kid"] = kid // A2ATransport will set HPKE headers automatically
 	}
 
 	resp, err := p.txPlain.Send(ctx, sm)
@@ -132,8 +132,8 @@ func (p *PaymentAgent) forwardExternal(ctx context.Context, msg *types.AgentMess
 	}
 	if kid != "" {
 		if pt, _, derr := p.decryptIfHPKEResponse(kid, resp.Data); derr != nil {
-			// 서버가 평문 에러를 줄 수도 있으니, 실패 시 메시지로 래핑
-			return &types.AgentMessage{
+            // Server may return a plaintext error; wrap into message on failure
+            return &types.AgentMessage{
 				ID:        msg.ID + "-exterr",
 				From:      "external-payment",
 				To:        msg.From,

@@ -42,7 +42,7 @@ func (p *PaymentAgent) EnableHPKE(ctx context.Context, cfg HPKEConfig) error {
 	if !cfg.Enable {
 		return nil
 	}
-	// A2A 서명에 쓰는 키/디드를 재사용
+    // Reuse the key/DID used for A2A signing
 	if p.myKey == nil || strings.TrimSpace(string(p.myDID)) == "" {
 		if err := p.initSigning(); err != nil {
 			return fmt.Errorf("HPKE: initSigning failed: %w", err)
@@ -84,13 +84,13 @@ func (p *PaymentAgent) EnableHPKE(ctx context.Context, cfg HPKEConfig) error {
 		return fmt.Errorf("HPKE: init resolver: %w", err)
 	}
 
-	// 세션 매니저
+    // Session manager
 	sMgr := session.NewManager()
 
-	// Handshake 전송체: A2ATransport (hpkeHandshake=true)
+    // Handshake transport: A2ATransport (hpkeHandshake=true)
 	t := prototx.NewA2ATransport(p, p.ExternalURL, true)
 
-	// HPKE 클라이언트
+    // HPKE client
 	cli := hpke.NewClient(t, ethV4, p.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr)
 
 	// Initialize
@@ -130,10 +130,10 @@ func (p *PaymentAgent) encryptIfHPKE(plaintext []byte) ([]byte, string, bool, er
 }
 
 func (p *PaymentAgent) decryptIfHPKEResponse(kid string, data []byte) ([]byte, bool, error) {
-	if kid == "" {
-		// HPKE 미사용
-		return data, false, nil
-	}
+    if kid == "" {
+        // HPKE not used
+        return data, false, nil
+    }
 	v, ok := hpkeStates.Load(p)
 	if !ok {
 		return nil, true, fmt.Errorf("HPKE: state missing")

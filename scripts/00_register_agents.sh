@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 # SAGE V4 Agent Registration (self-signed by agents)
-# - Signing only: register_agents.go (//go:build reg_agent)            ← ECDSA만 등록
-# - KEM Register: register_kem_agents.go (//go:build reg_kem)          ← ECDSA+X25519을 한 번에 Register 또는 addKey
-# - 기본 동작: --kem/--kem-only 시 signing JSON 기반으로 merged JSON을 빌드(ecdsa+x25519, did=address) 후 등록
+# - Signing only: register_agents.go (//go:build reg_agent)            ← register ECDSA only
+# - KEM Register: register_kem_agents.go (//go:build reg_kem)          ← register ECDSA+X25519 in one shot (Register or addKey)
+# - Default behavior: when --kem/--kem-only is set, build merged JSON from signing JSON (ecdsa+x25519, did=address) and register
 #
-# 예:
-#   # 1) 서명키만 등록
+# Examples:
+#   # 1) Register signing keys only
 #   sh ./scripts/00_register_agents.sh \
 #     --signing-keys ./generated_agent_keys.json \
 #     --agents "ordering,planing,payment,external"
 #
-#   # 2) KEM만 등록(미등록이면 Register, 이미 있으면 addKey)
+#   # 2) Register KEM only (Register if not exists, addKey if exists)
 #   sh ./scripts/00_register_agents.sh \
 #     --kem \
 #     --signing-keys ./generated_agent_keys.json \
 #     --agents "ordering,planing,payment,external"
 #
-#   # 3) 두 개 다(서명 → KEM)
+#   # 3) Both (signing → KEM)
 #   sh ./scripts/00_register_agents.sh \
 #     --both \
 #     --signing-keys ./generated_agent_keys.json \
 #     --agents "ordering,planing,payment,external"
 #
-#   # 참고: KEM JSON을 이미 따로 갖고 있고 그대로 쓰고 싶다면 --no-merge와 --kem-keys 지정
+#   # Note: If you already have a KEM JSON and want to use it as-is, set --no-merge and specify --kem-keys
 #   sh ./scripts/00_register_agents.sh \
 #     --kem --no-merge \
 #     --kem-keys ./keys/kem/generated_kem_keys.json \
@@ -65,10 +65,10 @@ fi
 SIGNING_KEYS="$SIGNING_KEYS_DEFAULT"
 KEM_KEYS="$KEM_KEYS_DEFAULT"
 
-# merged(통합) 키 파일 경로 & 플래그
+# Merged key file path & flags
 COMBINED_OUT="$PROJECT_ROOT/merged_agent_keys.json"
-BUILD_MERGED=1             # 기본: KEM 실행 시 signing 기반으로 merged JSON 자동 생성
-ADDR_SOURCE="$SIGNING_KEYS" # 펀딩/주소 추출 시 사용할 JSON (기본은 signing)
+BUILD_MERGED=1             # Default: when KEM is enabled, auto-build merged JSON from signing
+ADDR_SOURCE="$SIGNING_KEYS" # JSON used to extract addresses for funding (default: signing)
 
 # Funding
 FUNDING_KEY=""
@@ -78,10 +78,10 @@ FUNDING_AMOUNT_WEI="10000000000000000"   # 0.01 ETH
 AGENTS="${SAGE_AGENTS:-}"
 
 # Execution toggles
-DO_SIGNING=1      # 기본: ECDSA만 등록
-DO_KEM=0          # --kem / --kem-only / --both 로 켜기
+DO_SIGNING=1      # Default: register ECDSA only
+DO_KEM=0          # Enable via --kem / --kem-only / --both
 
-# Optional: build KEM JSON from PEM before registering (레거시 경로)
+# Optional: build KEM JSON from PEM before registering (legacy path)
 PEM_DIR=""
 REQUIRE_PRIV=0   # pass to builder if supported
 
@@ -115,11 +115,11 @@ Options:
   --help                     Show help
 
 Notes:
-- KEM Register는 tx sender가 에이전트 EOA여야 하며, Register 메시지의 sender와 일치해야 합니다.
-- 기본 동작은 signing-keys에 포함된 각 에이전트의 privateKey(EOA)로 트랜잭션을 보냅니다.
-- 펀딩(로컬 dev 편의):
-    1) dev node면 hardhat_setBalance / anvil_setBalance 로 바로 잔액 세팅
-    2) (1) 실패 + --funding-key 제공 + cast 설치 시, funder가 실제 송금
+- For KEM Register, the tx sender must be the agent's EOA and must match the Register message sender.
+- By default, each agent's privateKey (EOA) from signing-keys is used to send transactions.
+- Funding (local dev convenience):
+    1) On dev nodes, set balance directly via hardhat_setBalance / anvil_setBalance
+    2) If (1) fails and --funding-key is provided and cast is installed, the funder sends actual transfers
 EOF
 }
 
@@ -145,14 +145,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# jq/curl/go/cast 체크
+# Check for jq/curl/go/cast
 need() { command -v "$1" >/dev/null 2>&1 || { echo -e "${RED}Error: '$1' not found${NC}"; exit 1; }; }
 need go
 need curl
 has_jq=0; command -v jq >/dev/null 2>&1 && has_jq=1
 has_cast=0; command -v cast >/dev/null 2>&1 && has_cast=1
 
-# AGENTS를 jq env에서 쓰므로 export
+# Export AGENTS for jq filters
 [[ -n "${AGENTS:-}" ]] && export AGENTS
 
 # ---------- Helpers ----------
@@ -188,7 +188,7 @@ fund_one_addr_devnode() {
   fi
 }
 
-# ADDR_SOURCE(JSON)가 top-level array 또는 {"agents":[...]} 모두 지원
+# ADDR_SOURCE (JSON) supports either a top-level array or {"agents":[...]}
 jq_addresses() {
   local file="$1"
   if [[ $has_jq -ne 1 ]]; then
@@ -210,14 +210,14 @@ jq_addresses() {
 }
 
 fund_addresses_devnode() {
-  [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} jq 미설치로 자동 펀딩 스킵"; return 1; }
+  [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} skipping auto-funding because jq is not installed"; return 1; }
   local addrs
   addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
-  [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} 펀딩할 address 없음 ($ADDR_SOURCE)"; return 1; }
+  [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} no addresses to fund ($ADDR_SOURCE)"; return 1; }
   local ok_any=0
   while IFS= read -r addr; do
     [[ -z "$addr" ]] && continue
-    if fund_one_addr_devnode "$addr"; then ok_any=1; else echo "  - setBalance 실패 (addr=$addr)"; fi
+    if fund_one_addr_devnode "$addr"; then ok_any=1; else echo "  - setBalance failed (addr=$addr)"; fi
   done <<< "$addrs"
   [[ $ok_any -eq 1 ]] && return 0 || return 1
 }
@@ -225,10 +225,10 @@ fund_addresses_devnode() {
 fund_addresses_cast() {
   [[ $has_cast -ne 1 ]] && return 1
   [[ -z "$FUNDING_KEY" ]] && return 1
-  [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} jq 미설치로 cast 펀딩 스킵"; return 1; }
+  [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} skipping cast funding because jq is not installed"; return 1; }
   local addrs
   addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
-  [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} 펀딩할 address 없음 ($ADDR_SOURCE)"; return 1; }
+  [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} no addresses to fund ($ADDR_SOURCE)"; return 1; }
   local ok_any=0
   while IFS= read -r addr; do
     [[ -z "$addr" ]] && continue
@@ -239,10 +239,10 @@ fund_addresses_cast() {
       if cast send --rpc-url "$RPC_URL" --private-key "$FUNDING_KEY" "$addr" --value "$FUNDING_AMOUNT_WEI" >/dev/null 2>&1; then
         ok_any=1
       else
-        echo "    * cast 송금 실패 (addr=$addr)"
+        echo "    * cast transfer failed (addr=$addr)"
       fi
     else
-      echo "  - 잔액 존재: $addr ($bal_hex) → 송금 스킵"
+      echo "  - balance exists: $addr ($bal_hex) → skip transfer"
       ok_any=1
     fi
   done <<< "$addrs"
@@ -271,7 +271,7 @@ validate_kem_json() {
   local f="$1"
   [[ -f "$f" ]] || { echo -e "${RED}KEM keys file not found: $f${NC}"; exit 1; }
   if [[ $has_jq -eq 1 ]]; then
-    # object.agents[] OR top-level array — 둘 다 허용
+    # object.agents[] OR top-level array — both allowed
     if ! jq -e '
       (
         (type=="object") and (.agents|type=="array") and
@@ -401,7 +401,7 @@ fi
 if [[ $DO_KEM -eq 1 ]]; then
   echo -e "${YELLOW}>>> Registering agents with KEM (ECDSA+X25519)...${NC}"
 
-  # (0) merged JSON 만들기(기본) 또는 기존 KEM JSON 사용
+  # (0) Build merged JSON (default) or use existing KEM JSON
   if [[ $BUILD_MERGED -eq 1 ]]; then
     echo -e "${YELLOW}>>> Building MERGED JSON (ECDSA+X25519, did=address) -> ${COMBINED_OUT}${NC}"
     go run tools/registration/build_combined_from_signing.go \
@@ -409,7 +409,7 @@ if [[ $DO_KEM -eq 1 ]]; then
       -out "$COMBINED_OUT" \
       ${AGENTS:+-agents "$AGENTS"}
     echo -e "${GREEN}Merged keys at ${COMBINED_OUT}${NC}"
-    # 이후 주소/펀딩/등록 모두 merged 파일 기준으로
+    # After this, all address/funding/registration use the merged file
     KEM_KEYS="$COMBINED_OUT"
     ADDR_SOURCE="$COMBINED_OUT"
   else
@@ -424,12 +424,12 @@ if [[ $DO_KEM -eq 1 ]]; then
     if [[ -n "$FUNDING_KEY" ]] && fund_addresses_cast; then
       echo -e "${GREEN}cast funding for agents done.${NC}"
     else
-      echo -e "${YELLOW}Warning:${NC} 자동 펀딩 실패 → sender(에이전트) 잔액 직접 확인 필요"
+      echo -e "${YELLOW}Warning:${NC} automatic funding failed → manually check sender (agent) balances"
     fi
   fi
   echo ""
 
-  # (2) (옵션) PEM → JSON 빌드 경로 (no-merge일 때만 의미)
+  # (2) (optional) PEM → JSON build path (only when no-merge)
   if [[ -n "$PEM_DIR" && $BUILD_MERGED -eq 0 ]]; then
     if [[ -f tools/registration/build_kem_json_from_pem.go ]]; then
       echo -e "${YELLOW}>>> Building KEM JSON from PEM (${PEM_DIR}) -> ${KEM_KEYS}${NC}"
@@ -456,7 +456,7 @@ if [[ $DO_KEM -eq 1 ]]; then
     exit 1
   fi
 
-  # merged 모드에서는 두 입력 모두 동일 파일을 넘겨 DID/주소/키 일치 보장
+  # In merged mode, pass the same file for both inputs to ensure DID/address/key consistency
   if [[ $BUILD_MERGED -eq 1 ]]; then
     CMD2=( go run -tags=reg_kem tools/registration/register_kem_agents.go
       -contract="$CONTRACT_ADDRESS"

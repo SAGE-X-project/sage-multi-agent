@@ -168,7 +168,7 @@ fi
 ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}" )
 [[ -n "${PAYMENT_DID:-}" ]] && ROOT_ENV+=( "PAYMENT_DID=${PAYMENT_DID}" )
 
-# Build root CLI flags (← 여기서 -hpke/-hpke-keys 전달)
+# Build root CLI flags (pass -hpke/-hpke-keys here)
 ROOT_ARGS=( -port "$ROOT_PORT" )
 if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
   ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )

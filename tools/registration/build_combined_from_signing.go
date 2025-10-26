@@ -87,36 +87,36 @@ func main() {
 			}
 		}
 		kr, ok := kemByName[name]
-		if !ok {
-			// 강제: KEM 항목 없으면 스킵 (요청 사항)
-			fmt.Printf(" - %s: missing KEM entry in %s -> skip\n", name, shortPath(*kemPath))
-			continue
-		}
+        if !ok {
+            // Enforced: skip if KEM entry is missing (per requirement)
+            fmt.Printf(" - %s: missing KEM entry in %s -> skip\n", name, shortPath(*kemPath))
+            continue
+        }
 
-		// DID/Address는 KEM JSON 것을 우선 사용
-		addr := ensure0x(strings.TrimSpace(kr.Address))
-		did := strings.TrimSpace(kr.DID)
-		if did == "" {
-			// fallback: address로 DID 구성
-			if addr == "" {
-				did = strings.TrimSpace(r.DID)
-			} else {
-				did = "did:sage:ethereum:" + addr
-			}
-		}
+        // Prefer DID/Address from KEM JSON
+        addr := ensure0x(strings.TrimSpace(kr.Address))
+        did := strings.TrimSpace(kr.DID)
+        if did == "" {
+            // Fallback: construct DID from address
+            if addr == "" {
+                did = strings.TrimSpace(r.DID)
+            } else {
+                did = "did:sage:ethereum:" + addr
+            }
+        }
 
-		// x25519 필드: 반드시 KEM JSON에서 읽음 (생성하지 않음)
-		xpriv := ensure0x(kr.X25519Private)
-		xpub := ensure0x(kr.X25519Public)
+        // x25519 fields: must be read from KEM JSON (do not generate)
+        xpriv := ensure0x(kr.X25519Private)
+        xpub := ensure0x(kr.X25519Public)
 
-		// 간단 유효성 체크(선택)
-		if err := mustBeHex32(xpub); err != nil {
-			fatalf("%s: invalid x25519Public: %v", name, err)
-		}
-		if err := mustBeHex32(xpriv); err != nil {
-			// private은 배포/테스트 용도에서만 필요할 수 있지만, 요청사항에 따라 강제 체크
-			fatalf("%s: invalid x25519Private: %v", name, err)
-		}
+        // Simple validation (optional)
+        if err := mustBeHex32(xpub); err != nil {
+            fatalf("%s: invalid x25519Public: %v", name, err)
+        }
+        if err := mustBeHex32(xpriv); err != nil {
+            // Private may only be needed for deploy/test, but enforce check per requirement
+            fatalf("%s: invalid x25519Private: %v", name, err)
+        }
 
 		combined := CombinedRow{
 			Name:          name,
@@ -205,10 +205,10 @@ func ensure0x(s string) string {
 
 func mustBeHex32(h string) error {
 	h = strings.TrimPrefix(strings.TrimSpace(h), "0x")
-	// 32바이트(64 hex chars)
-	if len(h) != 64 {
-		return fmt.Errorf("want 32 bytes (64 hex), got %d", len(h))
-	}
+    // 32 bytes (64 hex chars)
+    if len(h) != 64 {
+        return fmt.Errorf("want 32 bytes (64 hex), got %d", len(h))
+    }
 	_, err := hex.DecodeString(h)
 	return err
 }
