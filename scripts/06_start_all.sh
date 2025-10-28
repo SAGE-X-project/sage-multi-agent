@@ -127,7 +127,7 @@ if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
 fi
 
 # ---------- 1) External payment (agent|echo) ----------
-SMODE="$(printf '%s' "${SAGE_MODE:-on}" | tr '[:upper:]' '[:lower:]')"
+SMODE="$(printf '%s' "${SAGE_MODE:-off}" | tr '[:upper:]' '[:lower:]')"
 case "$SMODE" in
   off|false|0|no) EXT_VERIFY="off" ;;
   *)              EXT_VERIFY="on"  ;;

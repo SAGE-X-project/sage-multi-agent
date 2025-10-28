@@ -33,19 +33,18 @@ import (
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 )
 
-// External Payment Server:
+// External Payment Server (frontend-facing notes):
+// - Expects agent-to-agent HTTP from Payment via Gateway. Frontend does not call this service directly.
 // - Verifies inbound RFC9421 (via DID middleware) over the HTTP body.
-// - If request is HPKE-wrapped (Content-Type: application/sage+hpke OR X-SAGE-HPKE: v1):
-//   - With X-KID and existing session  -> decrypt, handle JSON, encrypt response.
-//   - Without X-KID or unknown KID     -> treat as HPKE handshake (transport.SecureMessage) and respond with HandleMessage().
-//
-// - Otherwise, handle plaintext JSON.
-//
-// Modifications:
-//   - Server signing key is loaded from EXTERNAL_JWK_FILE (JWK; Ed25519 expected).
-//   - Server HPKE KEM key is loaded from EXTERNAL_KEM_JWK_FILE (JWK; X25519 expected).
-//   - Server DID is loaded from merged keys JSON (MERGED_KEYS_FILE; default ./merged_agent_keys.json) by EXTERNAL_AGENT_NAME (default "external").
-//     Fallback: EXTERNAL_DID env when not found.
+// - HPKE support:
+//   - Content-Type: application/sage+hpke OR X-SAGE-HPKE: v1 marks HPKE traffic.
+//   - X-KID present -> decrypt payload with existing session, handle JSON (AgentMessage), re-encrypt response.
+//   - No X-KID      -> treat as HPKE handshake (transport.SecureMessage JSON) and reply with HandleMessage().
+// - Plaintext JSON is also accepted when HPKE is off.
+// - Keys/env:
+//   - Signing key (Ed25519 JWK):    EXTERNAL_JWK_FILE
+//   - KEM key (X25519 JWK):         EXTERNAL_KEM_JWK_FILE
+//   - DID mapping (for server DID): merged_agent_keys.json (lookup name "external")
 var (
 	hpkeSrvMgr *session.Manager
 	hpkeSrv    *hpke.Server
@@ -125,32 +124,44 @@ func buildResolver() sagedid.Resolver {
 // ---------- main ----------
 
 func main() {
-	port := flag.Int("port", 19083, "port")
-	requireSig := flag.Bool("require", true, "require RFC9421 signature (false = optional)")
-	flag.Parse()
+    port := flag.Int("port", 19083, "port")
+    requireSig := flag.Bool("require", true, "require RFC9421 signature (false = optional)")
+    flag.Parse()
 
-    // HPKE server bootstrap (unchanged)
-	hpkeSrvMgr = session.NewManager()
-	srvSigningKey := loadServerSigningKeyFromEnv()
-	resolver := buildResolver()
-	kemKey := loadServerKEMFromEnv()
+    // HPKE server bootstrap (optional)
+    // Minimal change: if key envs are missing, start without HPKE instead of exiting.
+    var hpkeEnabled bool
+    sigPath := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
+    kemPath := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
+    if sigPath != "" && kemPath != "" {
+        hpkeEnabled = true
+    }
+    if hpkeEnabled {
+        hpkeSrvMgr = session.NewManager()
+        srvSigningKey := loadServerSigningKeyFromEnv()
+        resolver := buildResolver()
+        kemKey := loadServerKEMFromEnv()
 
-	nameToDID, err := loadDIDsFromKeys("merged_agent_keys.json")
-	if err != nil {
-		log.Fatalf("HPKE: load keys: %v", err)
-	}
-	serverDID := strings.TrimSpace(nameToDID["external"])
-	if serverDID == "" {
-		log.Fatal("HPKE: server DID not found for name 'external' in merged_agent_keys.json")
-	}
+        nameToDID, err := loadDIDsFromKeys("merged_agent_keys.json")
+        if err != nil {
+            log.Fatalf("HPKE: load keys: %v", err)
+        }
+        serverDID := strings.TrimSpace(nameToDID["external"])
+        if serverDID == "" {
+            log.Fatal("HPKE: server DID not found for name 'external' in merged_agent_keys.json")
+        }
 
-	hpkeSrv = hpke.NewServer(
-		srvSigningKey,
-		hpkeSrvMgr,
-		serverDID,
-		resolver,
-		&hpke.ServerOpts{KEM: kemKey},
-	)
+        hpkeSrv = hpke.NewServer(
+            srvSigningKey,
+            hpkeSrvMgr,
+            serverDID,
+            resolver,
+            &hpke.ServerOpts{KEM: kemKey},
+        )
+        log.Printf("[boot] external-payment HPKE enabled")
+    } else {
+        log.Printf("[boot] external-payment HPKE disabled (missing EXTERNAL_JWK_FILE or EXTERNAL_KEM_JWK_FILE)")
+    }
 
     // ⬇️ Handshake-only: transport/http server adapter
 	hsrv := sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
@@ -212,10 +223,10 @@ func main() {
 		})
 	})
 
-	protected := http.NewServeMux()
-	protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		_ = r.Body.Close()
+    protected := http.NewServeMux()
+    protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+        body, _ := io.ReadAll(r.Body)
+        _ = r.Body.Close()
 
         // Common: headers used to reconstruct transport.SecureMessage-like context
         // Client A2ATransport sends only raw payload in data mode; reconstruct here for appHandler
@@ -225,8 +236,12 @@ func main() {
 		taskID := strings.TrimSpace(r.Header.Get("X-SAGE-Task-ID"))
 
         // === HPKE decision ===
-		if isHPKE(r) {
-			kid := strings.TrimSpace(r.Header.Get("X-KID"))
+        if isHPKE(r) {
+            if hpkeSrv == nil || hpkeSrvMgr == nil {
+                http.Error(w, "hpke disabled", http.StatusBadRequest)
+                return
+            }
+            kid := strings.TrimSpace(r.Header.Get("X-KID"))
 
             // [Handshake] No KID → delegate to transport/http server handler (SecureMessage JSON)
 			if kid == "" {
@@ -234,7 +249,7 @@ func main() {
 				r.Body = io.NopCloser(bytes.NewReader(body))
 				hsrv.MessagesHandler().ServeHTTP(w, r)
 				return
-			}
+        }
 
             // [Data mode/HPKE] KID present → decrypt with session → appHandler → re-encrypt → raw body response
 			sess, ok := hpkeSrvMgr.GetByKeyID(kid)

@@ -14,7 +14,16 @@ import (
 )
 
 // ClientAPI is a thin HTTP facade for frontend -> Root.
-// It may sign the request (client->root) via A2A. Routing is done by Root.
+// Frontend sends a single request per user action:
+//   - POST /api/request
+//   - Headers:
+//       X-SAGE-Enabled: true|false  (per-request A2A signature toggle)
+//       X-HPKE-Enabled: true|false  (per-request HPKE toggle; SAGE=false forces HPKE=false)
+//   - Body: {"prompt": "..."}
+// ClientAPI forwards the prompt to Root and passes SAGE/HPKE flags in message metadata.
+// Root does in‑proc routing to sub‑agents (planning/ordering/payment).
+// NOTE: For backward compatibility, this API also hits Root /toggle-sage to reflect the header
+//       into the legacy global toggle; per‑request behavior is still driven by message metadata.
 type ClientAPI struct {
 	rootBase    string
 	paymentBase string // legacy; unused
@@ -40,20 +49,24 @@ func NewClientAPIWithA2A(rootBase, paymentBase string, httpClient *http.Client, 
 }
 
 // Single endpoint: /api/request
-// - Header X-SAGE-Enabled: true|false (propagated to Root /toggle-sage; controls ONLY sub-agents' outbound signing)
+// - Headers from frontend (see file header)
 // - Body: {"prompt": "..."}; if JSON decode fails, treat body as plain text prompt
+// - Response: PromptResponse { response, sageVerification, metadata, logs? }
 func (g *ClientAPI) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	sageEnabled := strings.EqualFold(r.Header.Get("X-SAGE-Enabled"), "true")
-	scenario := r.Header.Get("X-Scenario")
+    // Per-request security toggles from frontend
+    sageEnabled := strings.EqualFold(r.Header.Get("X-SAGE-Enabled"), "true")
+    hpkeRaw := r.Header.Get("X-HPKE-Enabled")
+    hpkeEnabled := strings.EqualFold(hpkeRaw, "true")
+    scenario := r.Header.Get("X-Scenario")
 
-	// Read raw body once; we may need it for tolerant parsing and for replays.
-	rawIn, _ := io.ReadAll(r.Body)
-	_ = r.Body.Close()
+    // Read raw body once; we may need it for tolerant parsing and for replays.
+    rawIn, _ := io.ReadAll(r.Body)
+    _ = r.Body.Close()
 
 	var prompt string
 	if len(rawIn) > 0 {
@@ -67,19 +80,38 @@ func (g *ClientAPI) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Toggle Root flag (controls ONLY sub-agents' outbound signing to external).
-	_ = g.toggleSAGE(r.Context(), g.rootBase+"/toggle-sage", sageEnabled)
+    // Reject invalid combination early: HPKE requires SAGE=true (only when HPKE header is explicitly set)
+    if hpkeRaw != "" && hpkeEnabled && !sageEnabled {
+        w.Header().Set("Content-Type", "application/json")
+        w.WriteHeader(http.StatusBadRequest)
+        _ = json.NewEncoder(w).Encode(map[string]any{
+            "error":   "bad_request",
+            "message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
+        })
+        return
+    }
 
-	// Build AgentMessage for Root. No domain -> Root routes.
-	msg := types.AgentMessage{
-		ID:        "api-" + time.Now().Format("20060102T150405.000000000"),
-		From:      "client-api",
-		To:        "root",
-		Content:   prompt,
-		Timestamp: time.Now(),
-		Type:      "request",
-		Metadata:  map[string]any{"scenario": scenario},
-	}
+    // Legacy global switch for visibility/back-compat (per-request behavior is metadata-driven)
+    _ = g.toggleSAGE(r.Context(), g.rootBase+"/toggle-sage", sageEnabled)
+
+    // Build AgentMessage for Root. No domain -> Root routes.
+    meta := map[string]any{
+        "scenario":    scenario,
+        "sageEnabled": sageEnabled, // consumed by sub-agents for per-request signing
+    }
+    if hpkeRaw != "" { // only propagate if header explicitly present; otherwise allow server defaults
+        meta["hpkeEnabled"] = hpkeEnabled // consumed by payment for per-request HPKE
+    }
+
+    msg := types.AgentMessage{
+        ID:        "api-" + time.Now().Format("20060102T150405.000000000"),
+        From:      "client-api",
+        To:        "root",
+        Content:   prompt,
+        Timestamp: time.Now(),
+        Type:      "request",
+        Metadata:  meta,
+    }
 	body, _ := json.Marshal(msg)
 
 	// Provide GetBody so any signer/middleware can safely re-read the payload.

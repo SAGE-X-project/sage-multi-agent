@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
-	github.com/sage-x-project/sage v1.2.0
+	github.com/sage-x-project/sage v1.3.1
 	github.com/sage-x-project/sage-a2a-go v0.0.0-20251018160016-70aba076445f
 	golang.org/x/crypto v0.43.0
 )

@@ -200,6 +200,65 @@ Header semantics:
 
 - `X-SAGE-Enabled: true|false` toggles A2A signing at sub‑agents (Payment→External)
 - `X-Scenario` is forwarded to agents as metadata (optional)
+ - `X-HPKE-Enabled: true|false` toggles HPKE per request. When omitted, the server uses its current session default (e.g., demo_SAGE.sh process‑start HPKE).
+
+## Frontend Integration
+
+- Endpoint
+  - `POST /api/request`
+  - Headers
+    - `X-SAGE-Enabled: true|false` (per-request signing toggle)
+    - `X-HPKE-Enabled: true|false` (per-request HPKE toggle; requires SAGE=true)
+  - Body
+    - `{ "prompt": "send 10 USDC" }`
+  - Response
+    - `{ response, sageVerification, metadata, logs? }`
+
+- Rules
+  - HPKE requires SAGE to be enabled. If `X-HPKE-Enabled: true` while `X-SAGE-Enabled: false`, the API returns `400 Bad Request` with `{ error: "bad_request" }`.
+  - When HPKE is ON:
+    - First request lazily bootstraps a session if needed; subsequent requests send ciphertext (`Content-Type: application/sage+hpke`).
+  - When HPKE is OFF:
+    - Plaintext JSON is sent, still signed if SAGE is ON.
+
+- Examples
+
+```bash
+# SAGE ON + HPKE ON (single request)
+curl -sS POST http://localhost:8086/api/request \
+  -H 'Content-Type: application/json' \
+  -H 'X-SAGE-Enabled: true' \
+  -H 'X-HPKE-Enabled: true' \
+  -d '{"prompt":"send 10 USDC"}' | jq
+
+# SAGE OFF + HPKE OFF (plaintext, unsigned)
+curl -sS POST http://localhost:8086/api/request \
+  -H 'Content-Type: application/json' \
+  -H 'X-SAGE-Enabled: false' \
+  -H 'X-HPKE-Enabled: false' \
+  -d '{"prompt":"send 10 USDC"}' | jq
+
+# Invalid: HPKE ON while SAGE OFF → 400
+curl -sS -i POST http://localhost:8086/api/request \
+  -H 'Content-Type: application/json' \
+  -H 'X-SAGE-Enabled: false' \
+  -H 'X-HPKE-Enabled: true' \
+  -d '{"prompt":"send 10 USDC"}'
+```
+
+- fetch example
+
+```ts
+await fetch('http://localhost:8086/api/request', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'X-SAGE-Enabled': 'true',
+    'X-HPKE-Enabled': 'true',
+  },
+  body: JSON.stringify({ prompt: 'send 10 USDC' }),
+});
+```
 
 ## What to Expect (Demo)
 

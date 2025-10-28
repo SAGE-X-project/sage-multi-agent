@@ -73,7 +73,9 @@ func (r *RootAgent) mountRoutes() {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// toggle SAGE on/off at sub-agents (affects ONLY outbound signing of each sub)
+    // toggle SAGE on/off at sub-agents (affects ONLY outbound signing of each sub)
+    // Frontend alternative: prefer per-request headers/metadata via Client API; this endpoint
+    // exists for observability/back-compat (global switch).
 	r.mux.HandleFunc("/toggle-sage", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -98,8 +100,63 @@ func (r *RootAgent) mountRoutes() {
 		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": in.Enabled})
 	})
 
-	// main in-proc processing
-	r.mux.HandleFunc("/process", func(w http.ResponseWriter, req *http.Request) {
+	// SAGE status for sub-agents
+	r.mux.HandleFunc("/sage/status", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"planning": r.planning != nil && r.planning.SAGEEnabled,
+			"ordering": r.ordering != nil && r.ordering.SAGEEnabled,
+			"payment":  r.payment != nil && r.payment.SAGEEnabled,
+		})
+	})
+
+	// HPKE runtime toggle for Payment sub-agent
+	r.mux.HandleFunc("/hpke/config", func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.payment == nil {
+			http.Error(w, "payment agent not available", http.StatusBadGateway)
+			return
+		}
+		var in struct {
+			Enabled  bool   `json:"enabled"`
+			KeysFile string `json:"keysFile,omitempty"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		if !in.Enabled {
+			r.payment.DisableHPKE()
+		} else {
+			if err := r.payment.EnableHPKE(req.Context(), payment.HPKEConfig{Enable: true, KeysFile: strings.TrimSpace(in.KeysFile)}); err != nil {
+				http.Error(w, "hpke init failed: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": in.Enabled})
+	})
+
+	// HPKE status (Payment sub-agent)
+	r.mux.HandleFunc("/hpke/status", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		enabled := false
+		kid := ""
+		if r.payment != nil {
+			enabled = r.payment.IsHPKEEnabled()
+			kid = r.payment.CurrentHPKEKID()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"enabled": enabled,
+			"kid":     kid,
+		})
+	})
+
+    // main in-proc processing (Client API -> Root)
+    r.mux.HandleFunc("/process", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return

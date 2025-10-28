@@ -16,8 +16,9 @@ import (
 	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
-// Gateway is a simple reverse proxy that can tamper with signed HTTP bodies.
-// It demonstrates that when SAGE is ON, any body tampering will break the RFC9421 signature.
+// Gateway is a simple reverse proxy between Payment (agent) and External.
+// It logs exact HTTP packets (inbound/outbound) for debugging frontend flows and can optionally
+// tamper with plaintext bodies to demonstrate signature/HPKE protections.
 type Gateway struct {
 	destServerURL *url.URL
 	proxy         *httputil.ReverseProxy
@@ -79,8 +80,9 @@ func NewGateway(destServerURL string, attackMessage string) (*Gateway, error) {
 	}, nil
 }
 
-// ServeHTTP intercepts POST /process JSON bodies and optionally tampers with them.
-// With SAGE ON, downstream middleware should reject due to signature mismatch.
+// ServeHTTP intercepts POST /process bodies and optionally tampers with them.
+// With SAGE ON, downstream DID middleware should reject mutated plaintext; with HPKE ON, ciphertext
+// is unreadable and tamper causes decrypt failure at External.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only consider POSTs to /process (our agents use this as the work endpoint)
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/process") {
@@ -163,11 +165,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func isHPKEHandshake(r *http.Request) bool {
-    // HPKE handshake: X-SAGE-HPKE: v1 && no X-KID && TaskID == "hpke/complete@v1"
+    // HPKE handshake detection is tolerant to header casing variations.
+    // Handshake if: X-SAGE-HPKE: v1 AND no X-KID AND TaskID equals "hpke/complete@v1" (when present)
     hpke := strings.EqualFold(r.Header.Get("X-SAGE-HPKE"), "v1")
     kid := strings.TrimSpace(r.Header.Get("X-KID"))
-    task := strings.TrimSpace(r.Header.Get("X-SAGE-Task-Id"))
-    return hpke && kid == "" && (task == "hpke/complete@v1" || task == "hpke/complete@v1")
+    // Accept both X-SAGE-Task-ID and X-SAGE-Task-Id
+    task := strings.TrimSpace(r.Header.Get("X-SAGE-Task-ID"))
+    if task == "" {
+        task = strings.TrimSpace(r.Header.Get("X-SAGE-Task-Id"))
+    }
+    if !hpke || kid != "" {
+        return false
+    }
+    // When task header exists, ensure it matches; otherwise treat as handshake by headers alone
+    if task != "" && !strings.EqualFold(task, "hpke/complete@v1") {
+        return false
+    }
+    return true
 }
 
 func isHPKEData(r *http.Request) bool {

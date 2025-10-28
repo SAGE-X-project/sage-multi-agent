@@ -111,6 +111,27 @@ func (p *PaymentAgent) EnableHPKE(ctx context.Context, cfg HPKEConfig) error {
 	return nil
 }
 
+// DisableHPKE clears active HPKE session state for this agent.
+func (p *PaymentAgent) DisableHPKE() {
+    hpkeStates.Delete(p)
+}
+
+// IsHPKEEnabled reports whether HPKE session state exists for this agent.
+func (p *PaymentAgent) IsHPKEEnabled() bool {
+    _, ok := hpkeStates.Load(p)
+    return ok
+}
+
+// CurrentHPKEKID returns the current HPKE session KID if present.
+func (p *PaymentAgent) CurrentHPKEKID() string {
+    if v, ok := hpkeStates.Load(p); ok {
+        if st, ok2 := v.(*hpkeState); ok2 {
+            return st.kid
+        }
+    }
+    return ""
+}
+
 func (p *PaymentAgent) encryptIfHPKE(plaintext []byte) ([]byte, string, bool, error) {
 	v, ok := hpkeStates.Load(p)
 	if !ok {

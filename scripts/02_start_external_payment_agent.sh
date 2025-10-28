@@ -12,7 +12,13 @@ set -Eeuo pipefail
 # ---------- Resolve repo root ----------
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-[[ -f .env ]] && source .env
+# Export .env variables so child process (external-payment) can read them
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
 
 # ---------- Config (env overridable) ----------
 HOST="${HOST:-localhost}"
