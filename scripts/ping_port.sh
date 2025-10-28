@@ -14,7 +14,7 @@ ORDERING_PORT="${ORDERING_PORT:-${ORDERING_AGENT_PORT:-8083}}"
 GATEWAY_PORT="${GATEWAY_PORT:-5500}"
 EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
 
-EXTERNAL_IMPL_PRINT="${EXTERNAL_IMPL:-echo}"
+:
 
 http_ok() { curl -sSf -m 1 "$1" >/dev/null 2>&1; }
 port_open() {
@@ -27,7 +27,7 @@ echo "=================================================="
 echo " SAGE Demo: Port & Endpoint Quick Check"
 echo " Host: $HOST"
 echo " .env: $ENV_FILE"
-echo " External Impl: $EXTERNAL_IMPL_PRINT"
+:
 echo "=================================================="
 
 check_http() {
@@ -52,9 +52,9 @@ check_http "Client API"        "http://${HOST}:${CLIENT_PORT}/api/sage/config"
 check_http "Root Agent"        "http://${HOST}:${ROOT_PORT}/status"
 check_http "Planning Agent"    "http://${HOST}:${PLANNING_PORT}/status"
 check_http "Ordering Agent"    "http://${HOST}:${ORDERING_PORT}/status"
-check_http "External Payment"  "http://${HOST}:${EXT_PAYMENT_PORT}/status"
+check_http "Payment Service"   "http://${HOST}:${EXT_PAYMENT_PORT}/status"
 echo "--------------------------------------------------"
 check_tcp  "Gateway (TCP)"     "$HOST" "$GATEWAY_PORT"
-check_tcp  "External Payment"  "$HOST" "$EXT_PAYMENT_PORT"
+check_tcp  "Payment Service"   "$HOST" "$EXT_PAYMENT_PORT"
 echo "--------------------------------------------------"
 echo "[DONE] Health check finished."

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# One-click launcher (minimal, IN-PROC sub-agents):
-# external payment (agent|echo) -> gateway (tamper|pass) -> root (in-proc planning/ordering/payment) -> client
+# One-click launcher (minimal, IN-PROC planning/ordering):
+# payment (verifier) -> gateway (tamper|pass) -> root (routes out) -> client
 #
 # Options:
 #   --tamper                  start gateway with tamper ON  (default)
 #   --pass | --passthrough    start gateway pass-through
 #   --attack-msg "<text>"     override tamper message
-#   --external agent|echo     choose external payment impl (default: agent)
-#   --hpke on|off             enable HPKE for PaymentAgent→External (default: off)
-#   --hpke-keys <path>        keys json for DID mapping (default: generated_agent_keys.json)
+#   --sage on|off             set SAGE mode for Root/Payment (default: env SAGE_MODE or off)
+#   --hpke on|off             enable HPKE at Root for outbound (default: off)
+#   --hpke-keys <path>        DID mapping for Root HPKE (default: generated_agent_keys.json)
 #   --force-kill              kill occupied ports automatically
 #
 # Notes:
@@ -21,7 +21,9 @@ cd "$ROOT_DIR"
 mkdir -p logs
 
 # load .env if present
+_PASSED_SAGE_MODE="${SAGE_MODE-}"
 [[ -f .env ]] && source .env
+[[ -n "${_PASSED_SAGE_MODE}" ]] && SAGE_MODE="${_PASSED_SAGE_MODE}"
 
 # ---------- Defaults ----------
 HOST="${HOST:-localhost}"
@@ -41,15 +43,22 @@ PAYMENT_HPKE_ENABLE="0"                                    # 0=off, 1=on
 PAYMENT_HPKE_KEYS="${PAYMENT_HPKE_KEYS:-generated_agent_keys.json}"
 
 GATEWAY_MODE="tamper"                         # tamper|pass
-EXTERNAL_IMPL="${EXTERNAL_IMPL:-agent}"       # agent|echo
+SAGE_MODE_CLI=""                              # on|off (optional CLI override)
 ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gateway'}}"
 FORCE_KILL=0
 
 usage() {
   cat <<EOF
-Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--external agent|echo] [--hpke on|off] [--hpke-keys <path>] [--force-kill]
+Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--sage on|off] [--hpke on|off] [--hpke-keys <path>] [--force-kill]
 EOF
 }
+
+# ---------- Args ----------
+PAYMENT_HPKE_ENABLE="0"
+PAYMENT_HPKE_KEYS="${PAYMENT_HPKE_KEYS:-generated_agent_keys.json}"
+
+SAGE_MODE="${SAGE_MODE:-off}"      # env 기본값
+HPKE_CLI="off"                     # CLI로 받은 hpke 값(기본 off)
 
 # ---------- Args ----------
 while [[ $# -gt 0 ]]; do
@@ -57,23 +66,39 @@ while [[ $# -gt 0 ]]; do
     --tamper)                 GATEWAY_MODE="tamper"; shift ;;
     --pass|--passthrough)     GATEWAY_MODE="pass"; shift ;;
     --attack-msg)             ATTACK_MESSAGE="${2:-}"; shift 2 ;;
-    --external)               EXTERNAL_IMPL="${2:-agent}"; shift 2 ;;
+
+    # === NEW: --sage 지원 (공백/=/대소문자 모두) ===
+    --sage=*)
+      SAGE_MODE="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')"; shift ;;
+    --sage)
+      SAGE_MODE="$(printf '%s' "${2:-on}" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+
+    # hpke도 공백/=/대소문자 모두 지원
+    --hpke=*)
+      HPKE_CLI="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')"; shift ;;
     --hpke)
-      v="${2:-on}"; shift 2
-      v="$(printf '%s' "$v" | tr '[:upper:]' '[:lower:]')"
-      case "$v" in
-        on|true|1|yes)  PAYMENT_HPKE_ENABLE="1" ;;
-        off|false|0|no) PAYMENT_HPKE_ENABLE="0" ;;
-        *) echo "[ERR] --hpke expects on|off (got: $v)"; exit 1 ;;
-      esac
-      ;;
+      HPKE_CLI="$(printf '%s' "${2:-off}" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+
     --hpke-keys)
       PAYMENT_HPKE_KEYS="${2:-generated_agent_keys.json}"; shift 2 ;;
+
     --force-kill)             FORCE_KILL=1; shift ;;
     -h|--help)                usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
   esac
 done
+
+# SAGE 모드 해석
+case "$SAGE_MODE" in
+  on|true|1|yes)  EXT_VERIFY="on";  ROOT_SAGE="true"  ;;
+  *)              EXT_VERIFY="off"; ROOT_SAGE="false" ;;
+esac
+
+# HPKE 모드 해석
+case "$HPKE_CLI" in
+  on|true|1|yes)  PAYMENT_HPKE_ENABLE="1" ;;
+  *)              PAYMENT_HPKE_ENABLE="0" ;;
+esac
 
 require() { command -v "$1" >/dev/null 2>&1 || { echo "[ERR] '$1' not found"; exit 1; }; }
 require go
@@ -116,7 +141,7 @@ start_bg() {
 
 # ---------- 0) optional kill ----------
 if [[ $FORCE_KILL -eq 1 ]]; then
-  "$ROOT_DIR/scripts/kill_ports.sh" --force || true
+  "$ROOT_DIR/scripts/01_kill_ports.sh" --force || true
 fi
 
 # ---------- preflight: payment JWK ----------
@@ -126,21 +151,34 @@ if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
   exit 1
 fi
 
-# ---------- 1) External payment (agent|echo) ----------
+# ---------- 1) Payment service (verifier) ----------
+# Resolve final SAGE mode: CLI > env > default(off)
 SMODE="$(printf '%s' "${SAGE_MODE:-off}" | tr '[:upper:]' '[:lower:]')"
 case "$SMODE" in
-  off|false|0|no) EXT_VERIFY="off" ;;
-  *)              EXT_VERIFY="on"  ;;
+  off|false|0|no) EXT_VERIFY="off"; ROOT_SAGE="false" ;;
+  *)              EXT_VERIFY="on";  ROOT_SAGE="true"  ;;
 esac
-EXTERNAL_REQUIRE_SIG=0; [ "$EXT_VERIFY" = "on" ] && EXTERNAL_REQUIRE_SIG=1
 
-echo "[cfg] EXTERNAL_IMPL=${EXTERNAL_IMPL}"
-echo "[cfg] EXTERNAL_REQUIRE_SIG=${EXTERNAL_REQUIRE_SIG} -> -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)"
 
-EXTERNAL_IMPL="$EXTERNAL_IMPL" EXT_PAYMENT_PORT="$EXT_PAYMENT_PORT" EXTERNAL_REQUIRE_SIG="$EXTERNAL_REQUIRE_SIG" \
-  "$ROOT_DIR/scripts/02_start_external_payment_agent.sh"
+# Optional HPKE server keys for payment (auto-enable if both exist)
+SIGN_JWK=""; KEM_JWK=""; KEYS_FILE="$PAYMENT_HPKE_KEYS"
+if [[ "$PAYMENT_HPKE_ENABLE" = "1" ]]; then
+  SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
+  KEM_JWK="${EXTERNAL_KEM_JWK_FILE:-}"
+fi
 
-# ---------- 2) Gateway (relay to external payment) ----------
+PAYMENT_ARGS=(
+  go run ./cmd/payment/main.go
+    -port "$EXT_PAYMENT_PORT"
+    -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)
+    -keys "$KEYS_FILE"
+)
+[[ -n "$SIGN_JWK" ]] && PAYMENT_ARGS+=( -sign-jwk "$SIGN_JWK" )
+[[ -n "$KEM_JWK" ]] && PAYMENT_ARGS+=( -kem-jwk "$KEM_JWK" )
+
+start_bg "payment" "$EXT_PAYMENT_PORT" "${PAYMENT_ARGS[@]}"
+
+# ---------- 2) Gateway (relay to payment) ----------
 if [[ -f cmd/gateway/main.go ]]; then
   GW_MAIN="cmd/gateway/main.go"
   if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$GATEWAY_PORT"; fi
@@ -164,19 +202,25 @@ else
   echo "[SKIP] gateway main not found"
 fi
 
-# ---------- 3) Root (IN-PROC sub agents). Env for outward call + HPKE flags ----------
-ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}" )
-[[ -n "${PAYMENT_DID:-}" ]] && ROOT_ENV+=( "PAYMENT_DID=${PAYMENT_DID}" )
+# ---------- 3) Root ----------
+HPKE_FLAG=$([ "${PAYMENT_HPKE_ENABLE}" = "1" ] && echo true || echo false)
+ROOT_ARGS=( -port "$ROOT_PORT" "-sage=${ROOT_SAGE}" "-hpke=${HPKE_FLAG}" -hpke-keys "${PAYMENT_HPKE_KEYS}" )
+
+ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "ROOT_SAGE_ENABLED=${ROOT_SAGE}" "ROOT_HPKE=${HPKE_FLAG}" )
+[[ -n "${PAYMENT_JWK_FILE:-}" ]] && ROOT_ENV+=( "ROOT_JWK_FILE=${PAYMENT_JWK_FILE}" )
+[[ -n "${PAYMENT_DID:-}"      ]] && ROOT_ENV+=( "ROOT_DID=${PAYMENT_DID}" )
+
+start_bg "root" "$ROOT_PORT" env "${ROOT_ENV[@]}" go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
 
 # Build root CLI flags (pass -hpke/-hpke-keys here)
-ROOT_ARGS=( -port "$ROOT_PORT" )
+ROOT_ARGS=( -port "$ROOT_PORT" -sage "$ROOT_SAGE" )
 if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
   ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )
 fi
 
 echo "[ENV]  PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
-echo "[ENV]  PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
-[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV]  PAYMENT_DID=${PAYMENT_DID}"
+[[ -n "${PAYMENT_JWK_FILE:-}" ]] && echo "[ENV]  ROOT_JWK_FILE=${PAYMENT_JWK_FILE}"
+[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV]  ROOT_DID=${PAYMENT_DID}"
 echo "[HPKE] enable=${PAYMENT_HPKE_ENABLE} keys=${PAYMENT_HPKE_KEYS}"
 echo "[ROOT_ARGS] ${ROOT_ARGS[*]}"
 
@@ -192,7 +236,7 @@ start_bg "client" "$CLIENT_PORT" \
 
 # ---------- Summary ----------
 echo "--------------------------------------------------"
-printf "[CHK] %-22s %s\n" "External Payment" "http://${HOST}:${EXT_PAYMENT_PORT}/status"
+printf "[CHK] %-22s %s\n" "Payment Service"  "http://${HOST}:${EXT_PAYMENT_PORT}/status"
 printf "[CHK] %-22s %s\n" "Gateway (TCP)"     "tcp://${HOST}:${GATEWAY_PORT}"
 printf "[CHK] %-22s %s\n" "Root"              "http://${HOST}:${ROOT_PORT}/status"
 printf "[CHK] %-22s %s\n" "Client API"        "http://${HOST}:${CLIENT_PORT}/api/sage/config"
@@ -209,4 +253,4 @@ for url in \
   fi
 done
 
-echo "[DONE] Startup (minimal, in-proc sub-agents) initiated. Use: tail -f logs/*.log"
+echo "[DONE] Startup initiated. Use: tail -f logs/*.log"

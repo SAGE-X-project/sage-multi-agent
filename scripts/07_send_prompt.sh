@@ -84,11 +84,11 @@ fi
 
 GW_LOG="logs/gateway.log"
 ROOT_LOG="logs/root.log"
-EXT_LOG="logs/external-payment.log"
-PRE_GW=0; PRE_ROOT=0; PRE_EXT=0
+PAY_LOG="logs/payment.log"
+PRE_GW=0; PRE_ROOT=0; PRE_PAY=0
 [[ -f "$GW_LOG" ]] && PRE_GW=$(wc -l < "$GW_LOG" || echo 0)
 [[ -f "$ROOT_LOG" ]] && PRE_ROOT=$(wc -l < "$ROOT_LOG" || echo 0)
-[[ -f "$EXT_LOG" ]] && PRE_EXT=$(wc -l < "$EXT_LOG" || echo 0)
+[[ -f "$PAY_LOG" ]] && PRE_PAY=$(wc -l < "$PAY_LOG" || echo 0)
 
 echo "[REQ] POST /api/request  X-SAGE-Enabled: $SAGE_HDR  X-HPKE-Enabled: $HPKE_HDR"
 HTTP_CODE=$(curl -sS -o "$RESP_PAYLOAD" -w "%{http_code}" \
@@ -125,12 +125,12 @@ else
   echo "(root log not found: $ROOT_LOG)"
 fi
 
-if [[ -f "$EXT_LOG" ]]; then
-  echo "\n----- External-payment new logs (since request) -----"
-  START=$((PRE_EXT+1))
-  tail -n +"$START" "$EXT_LOG" || true
+if [[ -f "$PAY_LOG" ]]; then
+  echo "\n----- Payment service new logs (since request) -----"
+  START=$((PRE_PAY+1))
+  tail -n +"$START" "$PAY_LOG" || true
 else
-  echo "(external log not found: $EXT_LOG)"
+  echo "(payment log not found: $PAY_LOG)"
 fi
 
-echo "\n[HINT] Check logs/root.log and logs/external-payment.log for full trace."
+echo "\n[HINT] Check logs/root.log and logs/payment.log for full trace."

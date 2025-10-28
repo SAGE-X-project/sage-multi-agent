@@ -25,7 +25,7 @@ kill_port() {
 
 kill_port "$GATEWAY_PORT"
 
-echo "[start] Gateway (PASS-THROUGH) :${GATEWAY_PORT} -> external :${EXT_PAYMENT_PORT}"
+echo "[start] Gateway (PASS-THROUGH) :${GATEWAY_PORT} -> payment :${EXT_PAYMENT_PORT}"
 
 nohup go run ./cmd/gateway/main.go \
   -listen ":${GATEWAY_PORT}" \

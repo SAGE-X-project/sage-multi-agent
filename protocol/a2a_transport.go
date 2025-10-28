@@ -25,13 +25,14 @@ type A2ADoer interface {
 //     - HPKE data: when msg.Metadata["hpke_kid"] exists, send payload as-is with (Content-Type: application/sage+hpke, X-SAGE-HPKE, X-KID)
 //     - Plain data: send payload as-is with (Content-Type: application/json)
 type A2ATransport struct {
-	doer          A2ADoer
-	baseURL       string
-	hpkeHandshake bool
+    doer            A2ADoer
+    baseURL         string
+    hpkeHandshake   bool
+    emitA2AHeaders  bool // when false, do NOT emit X-SAGE-* id/context/task DID headers
 }
 
-func NewA2ATransport(doer A2ADoer, baseURL string, hpkeHandshake bool) *A2ATransport {
-	return &A2ATransport{doer: doer, baseURL: strings.TrimRight(baseURL, "/"), hpkeHandshake: hpkeHandshake}
+func NewA2ATransport(doer A2ADoer, baseURL string, hpkeHandshake bool, emitHeaders bool) *A2ATransport {
+    return &A2ATransport{doer: doer, baseURL: strings.TrimRight(baseURL, "/"), hpkeHandshake: hpkeHandshake, emitA2AHeaders: emitHeaders}
 }
 
 func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
@@ -85,14 +86,20 @@ func (t *A2ATransport) Send(ctx context.Context, msg *transport.SecureMessage) (
 		}
 	}
 
-	req.Header.Set("X-SAGE-DID", msg.DID)
-	req.Header.Set("X-SAGE-Message-ID", msg.ID)
-	if msg.ContextID != "" {
-		req.Header.Set("X-SAGE-Context-ID", msg.ContextID)
-	}
-	if msg.TaskID != "" {
-		req.Header.Set("X-SAGE-Task-ID", msg.TaskID)
-	}
+    if t.emitA2AHeaders {
+        if msg.DID != "" {
+            req.Header.Set("X-SAGE-DID", msg.DID)
+        }
+        if msg.ID != "" {
+            req.Header.Set("X-SAGE-Message-ID", msg.ID)
+        }
+        if msg.ContextID != "" {
+            req.Header.Set("X-SAGE-Context-ID", msg.ContextID)
+        }
+        if msg.TaskID != "" {
+            req.Header.Set("X-SAGE-Task-ID", msg.TaskID)
+        }
+    }
 	req.ContentLength = int64(len(body))
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 

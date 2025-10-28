@@ -1,19 +1,22 @@
 // cmd/payment/main.go
+// Boot a payment HTTP server module (was cmd/payment). It exposes /status and /process.
+// HPKE enables automatically if EXTERNAL_JWK_FILE and EXTERNAL_KEM_JWK_FILE are set.
+//
+// 한국어 설명:
+// - 기존 payment 메인을 대체하는 실행 파일입니다.
+// - 환경변수 또는 플래그로 서명키/HPKE KEM 키 경로를 지정하면 HPKE가 자동 활성화됩니다.
+// - Root는 이 서버의 /process 로 A2A 전송(서명/HPKE 포함)을 수행합니다.
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/payment"
-	"github.com/sage-x-project/sage-multi-agent/types"
 )
 
 func getenvInt(key string, def int) int {
@@ -43,92 +46,45 @@ func getenvBool(key string, def bool) bool {
 }
 
 func main() {
-	// Existing flags (unchanged)
-	port := flag.Int("port", getenvInt("PAYMENT_AGENT_PORT", 18083), "HTTP port")
-	external := flag.String("external", getenvStr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "External payment base (gateway)")
-	jwk := flag.String("jwk", getenvStr("PAYMENT_JWK_FILE", ""), "Private JWK for outbound signing (required if SAGE enabled)")
-	did := flag.String("did", getenvStr("PAYMENT_DID", ""), "DID override (optional)")
-	sage := flag.Bool("sage", getenvBool("PAYMENT_SAGE_ENABLED", true), "Enable outbound signing (SAGE)")
+    // Distinct process prefix for clearer logs
+    log.SetFlags(log.LstdFlags)
+    log.SetPrefix("[payment] ")
+	// Server port & signature requirement
+	port := flag.Int("port", getenvInt("EXTERNAL_PAYMENT_PORT", 19083), "HTTP port for payment server")
+	requireSig := flag.Bool("require", getenvBool("PAYMENT_REQUIRE_SIGNATURE", true), "require RFC9421 signature")
 
-	// HPKE: ONLY two flags
-	hpkeEnable := flag.Bool("hpke", false, "Enable HPKE payload encryption to external")
-	hpkeKeys := flag.String("hpke-keys", "generated_agent_keys.json", "Path to generated agent keys (for DID mapping)")
+	// Convenience flags for key paths (also set envs so the module can pick them up)
+	signJWK := flag.String("sign-jwk", getenvStr("EXTERNAL_JWK_FILE", ""), "Ed25519 signing JWK path (enables HPKE server)")
+	kemJWK := flag.String("kem-jwk", getenvStr("EXTERNAL_KEM_JWK_FILE", ""), "X25519 KEM JWK path (enables HPKE server)")
+	keysFile := flag.String("keys", getenvStr("HPKE_KEYS_FILE", "merged_agent_keys.json"), "DID mapping file (merged_agent_keys.json)")
 
 	flag.Parse()
 
-	// Export to env so agent picks them via envOr() for A2A signing path
-	_ = os.Setenv("PAYMENT_EXTERNAL_URL", *external)
-	if *jwk != "" {
-		_ = os.Setenv("PAYMENT_JWK_FILE", *jwk)
+	// Export envs so payment module picks them up
+	if *signJWK != "" {
+		_ = os.Setenv("EXTERNAL_JWK_FILE", *signJWK)
 	}
-	if *did != "" {
-		_ = os.Setenv("PAYMENT_DID", *did)
+	if *kemJWK != "" {
+		_ = os.Setenv("EXTERNAL_KEM_JWK_FILE", *kemJWK)
+	}
+	if *keysFile != "" {
+		// The module uses a fixed filename "merged_agent_keys.json"; set env for tooling/scripts.
+		_ = os.Setenv("HPKE_KEYS_FILE", *keysFile)
 	}
 
-	agent := payment.NewPaymentAgent("payment") // MUST match keys name for client
-	agent.SAGEEnabled = *sage
-
-	// HPKE on? initialize once (uses envs for resolver; keys file for DIDs).
-	if *hpkeEnable {
-		cfg := payment.HPKEConfig{
-			Enable:   true,
-			KeysFile: *hpkeKeys,
-		}
-		if err := agent.EnableHPKE(context.Background(), cfg); err != nil {
-			log.Fatalf("HPKE init failed: %v", err)
-		}
-
+	agent, err := payment.NewPaymentAgent(*requireSig)
+	if err != nil {
+		log.Fatalf("payment agent init: %v", err)
 	}
-	log.Printf("[root] HPKE init OK (keys=%s)", *hpkeKeys)
-	mux := http.NewServeMux()
-	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name":         "PaymentAgent",
-			"type":         "payment-debug",
-			"external_url": agent.ExternalURL,
-			"sage_enabled": agent.SAGEEnabled,
-			"hpke_enabled": *hpkeEnable,
-			"hpke_keys":    *hpkeKeys,
-			"time":         time.Now().Format(time.RFC3339),
-		})
-	})
-	mux.HandleFunc("/toggle-sage", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var in struct {
-			Enabled bool `json:"enabled"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		agent.SAGEEnabled = in.Enabled
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"enabled": in.Enabled})
-	})
-	mux.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		var msg types.AgentMessage
-		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-			http.Error(w, "bad json", http.StatusBadRequest)
-			return
-		}
-		out, err := agent.Process(r.Context(), msg)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
-	})
 
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("[payment-debug] listening on %s (SAGE=%v, HPKE=%v, external=%s)", addr, agent.SAGEEnabled, *hpkeEnable, agent.ExternalURL)
-	log.Fatal(http.ListenAndServe(addr, mux))
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: agent.Handler(),
+	}
+	log.Printf("[payment] listening on %s (requireSig=%v, HPKE auto by env EXTERNAL_JWK_FILE/EXTERNAL_KEM_JWK_FILE)", addr, *requireSig)
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("listen: %v", err)
+	}
 }

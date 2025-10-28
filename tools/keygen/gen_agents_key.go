@@ -50,7 +50,7 @@ type AgentKeyData struct {
 	Address    string `json:"address"`    // 0x...
 }
 
-// all_keys.json shape expected by inbound verifier (external-payment, etc.)
+// all_keys.json shape expected by inbound verifier (payment, etc.)
 type AllKeys struct {
 	Agents []AllKeysAgent `json:"agents"`
 }

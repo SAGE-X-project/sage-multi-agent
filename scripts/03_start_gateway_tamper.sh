@@ -26,7 +26,7 @@ kill_port() {
 
 kill_port "$GATEWAY_PORT"
 
-echo "[start] Gateway (TAMPER) :${GATEWAY_PORT} -> external :${EXT_PAYMENT_PORT}"
+echo "[start] Gateway (TAMPER) :${GATEWAY_PORT} -> payment :${EXT_PAYMENT_PORT}"
 echo "        attack-msg length: ${#ATTACK_MESSAGE}"
 
 nohup go run ./cmd/gateway/main.go \
