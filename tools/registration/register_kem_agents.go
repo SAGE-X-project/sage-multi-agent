@@ -53,18 +53,18 @@ import (
 /********** input & meta types **********/
 
 type signingRow struct {
-    Name       string `json:"name"`
-    DID        string `json:"did"`
-    PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... recommended; 33B compressed allowed)
-    PrivateKey string `json:"privateKey"` // agent EOA (self-signed tx sender)
-    Address    string `json:"address"`
+	Name       string `json:"name"`
+	DID        string `json:"did"`
+	PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... recommended; 33B compressed allowed)
+	PrivateKey string `json:"privateKey"` // agent EOA (self-signed tx sender)
+	Address    string `json:"address"`
 }
 
 type kemAgentRow struct {
-    Name          string `json:"name"`
-    DID           string `json:"did,omitempty"` // used (DID for Register/AddKey)
-    X25519Public  string `json:"x25519Public"`  // 32B (hex)
-    X25519Private string `json:"x25519Private,omitempty"`
+	Name          string `json:"name"`
+	DID           string `json:"did,omitempty"` // used (DID for Register/AddKey)
+	X25519Public  string `json:"x25519Public"`  // 32B (hex)
+	X25519Private string `json:"x25519Private,omitempty"`
 }
 
 type kemFile struct {
@@ -88,8 +88,8 @@ type DemoAgent struct {
 /********** main **********/
 
 func main() {
-    // Flags (similar style to register_agents.go)
-    contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
+	// Flags (similar style to register_agents.go)
+	contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
 	rpcURL := flag.String("rpc", "", "RPC URL (env ETH_RPC_URL or default)")
 
 	signingPath := flag.String("signing-keys", "generated_agent_keys.json", "Signing summary JSON (array)")
@@ -136,8 +136,8 @@ func main() {
 		selected = parseAgentsFilter(os.Getenv("SAGE_AGENTS"))
 	}
 
-    // Build agent metas (fill metadata from env)
-    agents := buildAgentsFromSigning(signingRows, selected)
+	// Build agent metas (fill metadata from env)
+	agents := buildAgentsFromSigning(signingRows, selected)
 
 	fmt.Println("======================================")
 	fmt.Println(" SAGE V4 Agent Registration (ECDSA + X25519 via Register/AddKey, KEM DID)")
@@ -231,8 +231,8 @@ func main() {
 
 		// 6) pre-check: DID already registered?
 		if _, err := viewClient.Resolve(context.Background(), did.AgentDID(targetDID)); err == nil {
-            // Already registered → addKey(X25519)
-            agentID, err := computeAgentID(targetDID, pubBytes)
+			// Already registered → addKey(X25519)
+			agentID, err := computeAgentID(targetDID, pubBytes)
 			if err != nil {
 				fmt.Printf("   compute agentId failed for %s: %v\n", a.Name, err)
 				continue
@@ -249,14 +249,14 @@ func main() {
 				fmt.Printf("   addKey(X25519) failed for %s: %v\n", a.Name, err)
 				continue
 			}
-			fmt.Printf(" - %s: DID already existed; X25519 key added via addKey\n", a.Name)
-            // Small delay for UI/log readability
-            time.Sleep(900 * time.Millisecond)
-            continue
-        }
+			fmt.Printf(" - %s: DID found; performed addKey(X25519) ✅\n", a.Name)
+			// Small delay for UI/log readability
+			time.Sleep(900 * time.Millisecond)
+			continue
+		}
 
-        // 7) New registration: self-signed signature (ECDSA first key)
-        sig, err := signSelfRegistrationMessage(agentPriv, targetDID, pubBytes)
+		// 7) New registration: self-signed signature (ECDSA first key)
+		sig, err := signSelfRegistrationMessage(agentPriv, targetDID, pubBytes)
 		if err != nil {
 			fmt.Printf("   Failed to sign message for %s: %v\n", a.Name, err)
 			continue
@@ -363,8 +363,8 @@ func parseAgentsFilter(csv string) []string {
 }
 
 func findSigning(all []signingRow, name string) *signingRow {
-    for i := range all {
-        if all[i].Name == name { // same as register_agents.go (case-sensitive)
+	for i := range all {
+		if all[i].Name == name { // same as register_agents.go (case-sensitive)
 			return &all[i]
 		}
 	}
@@ -526,10 +526,10 @@ func addKEMKey(ctx context.Context, rpcURL, contractAddr, privHex string, gasPri
 	addr := common.HexToAddress(contractAddr)
 	contract := bind.NewBoundContract(addr, parsed, cli, cli, cli)
 
-    // enum KeyType.X25519 == 2 (assume contract and SDK agree). If using SDK types, cast accordingly.
-    keyType := uint8(did.KeyTypeX25519) // usually 2
+	// enum KeyType.X25519 == 2 (assume contract and SDK agree). If using SDK types, cast accordingly.
+	keyType := uint8(did.KeyTypeX25519) // usually 2
 
-    // signature must be empty bytes
+	// signature must be empty bytes
 	tx, err := contract.Transact(auth, "addKey", agentID, keyType, x25519Pub, []byte{})
 	if err != nil {
 		return fmt.Errorf("addKey tx: %w", err)
@@ -593,7 +593,7 @@ func buildAgentsFromSigning(keys []signingRow, filter []string) []DemoAgent {
 		}
 		var a DemoAgent
 		a.Name = k.Name
-            a.DID = k.DID // populate metadata (actual Register/add uses DID from KEM JSON)
+		a.DID = k.DID // populate metadata (actual Register/add uses DID from KEM JSON)
 		a.Metadata.Name = k.Name
 		a.Metadata.Description = getEnvPerAgent(k.Name, "DESC", "SAGE Agent "+k.Name)
 		a.Metadata.Version = getEnvPerAgent(k.Name, "VERSION", "0.1.0")

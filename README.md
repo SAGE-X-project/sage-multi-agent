@@ -55,7 +55,7 @@ Demo keys are provided under `keys/` and `generated_agent_keys.json` for conveni
 
 ```bash
 # Writes/uses generated_agent_keys.json and registers to SageRegistryV4
-./scripts/00_register_agents.sh --both   # or --kem / --kem-only / signing only
+sh ./scripts/00_register_agents.sh --kem --agents "ordering,planing,payment,external" --funding-key {private key}  # or --kem / --kem-only / signing only
 ```
 
 If you don't have keys yet:
@@ -70,19 +70,19 @@ If you don't have keys yet:
 
 - SAGE on/off (request‑time):
 
-  - SAGE ON: send requests with `-H 'X-SAGE-Enabled: true'` to sign agent→external (default)
+  - SAGE ON: send requests with `-H 'X-SAGE-Enabled: true'` to sign agent→external (**default**)
   - SAGE OFF: use `-H 'X-SAGE-Enabled: false'` (no signing)
   - Optional global switch: `scripts/toggle_sage.sh on|off`
 
 - Gateway tamper/pass (process‑start):
 
-  - `./demo_SAGE.sh --tamper` (mutate bodies; demo attack) — default
+  - `./demo_SAGE.sh --tamper` (mutate bodies; demo attack) — **default**
   - `./demo_SAGE.sh --pass` (pass‑through)
 
 - HPKE on/off (process‑start):
 
   - `./demo_SAGE.sh --hpke on --hpke-keys generated_agent_keys.json`
-  - `./demo_SAGE.sh --hpke off` (default)
+  - `./demo_SAGE.sh --hpke off` (**default**)
   - Requires KEM keys (see above). HPKE is only available when SAGE mode is ON (`X-SAGE-Enabled: true`).
 
 - Prompt (request content):
@@ -106,7 +106,7 @@ sh ./demo_SAGE.sh --tamper --hpke off
 sh ./demo_SAGE.sh --tamper --hpke on --hpke-keys generated_agent_keys.json
 
 # Pass‑through + HPKE ON (no manipulation; encrypted hop to External)
-sh ./demo_SAGE.sh --pass --hpke on
+sh ./demo_SAGE.sh --sage on --pass --hpke on --prompt "send me 100 USDC"
 ```
 
 Send a request (SAGE ON/OFF is per request):
