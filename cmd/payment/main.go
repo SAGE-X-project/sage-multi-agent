@@ -2,10 +2,7 @@
 // Boot a payment HTTP server module (was cmd/payment). It exposes /status and /process.
 // HPKE enables automatically if EXTERNAL_JWK_FILE and EXTERNAL_KEM_JWK_FILE are set.
 //
-// 한국어 설명:
-// - 기존 payment 메인을 대체하는 실행 파일입니다.
-// - 환경변수 또는 플래그로 서명키/HPKE KEM 키 경로를 지정하면 HPKE가 자동 활성화됩니다.
-// - Root는 이 서버의 /process 로 A2A 전송(서명/HPKE 포함)을 수행합니다.
+
 package main
 
 import (
@@ -75,6 +72,15 @@ func main() {
 	signJWK := flag.String("sign-jwk", getenvStr("EXTERNAL_JWK_FILE", ""), "Ed25519 signing JWK path (enables HPKE server)")
 	kemJWK := flag.String("kem-jwk", getenvStr("EXTERNAL_KEM_JWK_FILE", ""), "X25519 KEM JWK path (enables HPKE server)")
 	keysFile := flag.String("keys", getenvStr("HPKE_KEYS_FILE", ""), "DID mapping file (merged_agent_keys.json/generated_agent_keys.json)")
+
+	// === LLM config (added) ===
+	llmEnable := flag.Bool("llm", getenvBool("LLM_ENABLED", true), "enable LLM prompts")
+	llmURL := flag.String("llm-url", getenvStr("LLM_BASE_URL", "http://localhost:11434"), "LLM base URL (Zamiai/Ollama/etc.)")
+	llmKey := flag.String("llm-key", getenvStr("LLM_API_KEY", ""), "LLM API key (if required)")
+	llmModel := flag.String("llm-model", getenvStr("LLM_MODEL", "gemma2:2b"), "LLM model name/id")
+	llmLang := flag.String("llm-lang", getenvStr("LLM_LANG_DEFAULT", "auto"), "default language (auto|ko|en)")
+	llmTimeout := flag.Int("llm-timeout", getenvInt("LLM_TIMEOUT_MS", 8000), "LLM timeout in milliseconds")
+
 	flag.Parse()
 
 	// ---- Auto-detect defaults if flags/env are empty ----
@@ -99,8 +105,25 @@ func main() {
 		_ = os.Setenv("HPKE_KEYS_FILE", *keysFile)
 	}
 
-	log.Printf("[boot] requireSig=%v  sign-jwk=%q  kem-jwk=%q  keys=%q",
-		*requireSig, os.Getenv("EXTERNAL_JWK_FILE"), os.Getenv("EXTERNAL_KEM_JWK_FILE"), os.Getenv("HPKE_KEYS_FILE"))
+	// === Export LLM env for agent (added) ===
+	_ = os.Setenv("LLM_ENABLED", fmt.Sprintf("%v", *llmEnable))
+	if *llmURL != "" {
+		_ = os.Setenv("LLM_BASE_URL", *llmURL)
+	}
+	if *llmKey != "" {
+		_ = os.Setenv("LLM_API_KEY", *llmKey)
+	}
+	if *llmModel != "" {
+		_ = os.Setenv("LLM_MODEL", *llmModel)
+	}
+	if *llmLang != "" {
+		_ = os.Setenv("LLM_LANG_DEFAULT", *llmLang)
+	}
+	_ = os.Setenv("LLM_TIMEOUT_MS", strconv.Itoa(*llmTimeout))
+
+	log.Printf("[boot] requireSig=%v  sign-jwk=%q  kem-jwk=%q  keys=%q  llm={enable:%v url:%q model:%q lang:%q timeout:%dms}",
+		*requireSig, os.Getenv("EXTERNAL_JWK_FILE"), os.Getenv("EXTERNAL_KEM_JWK_FILE"), os.Getenv("HPKE_KEYS_FILE"),
+		*llmEnable, os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout)
 
 	agent, err := payment.NewPaymentAgent(*requireSig)
 	if err != nil {

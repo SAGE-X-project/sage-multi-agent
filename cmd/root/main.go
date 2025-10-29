@@ -62,6 +62,14 @@ func main() {
 	hpkeKeys := flag.String("hpke-keys", getenvStr("ROOT_HPKE_KEYS", "merged_agent_keys.json"), "path to DID mapping JSON")
 	hpkeTargets := flag.String("hpke-targets", getenvStr("ROOT_HPKE_TARGETS", "payment"), "comma-separated targets: payment,ordering,planning")
 
+	// === LLM config for Root pre-ask (added) ===
+	llmEnable := flag.Bool("llm", getenvBool("LLM_ENABLED", true), "enable LLM prompts (root pre-ask)")
+	llmURL := flag.String("llm-url", getenvStr("LLM_BASE_URL", "http://localhost:11434"), "LLM base URL (Zamiai/Ollama/etc.)")
+	llmKey := flag.String("llm-key", getenvStr("LLM_API_KEY", ""), "LLM API key (if required)")
+	llmModel := flag.String("llm-model", getenvStr("LLM_MODEL", "gemma2:2b"), "LLM model name/id")
+	llmLang := flag.String("llm-lang", getenvStr("LLM_LANG_DEFAULT", "auto"), "default language (auto|ko|en)")
+	llmTimeout := flag.Int("llm-timeout", getenvInt("LLM_TIMEOUT_MS", 8000), "LLM timeout in milliseconds")
+
 	flag.Parse()
 
 	// ---- Export env BEFORE constructing Root (Root reads env on NewRootAgent) ----
@@ -81,6 +89,22 @@ func main() {
 	if *rootDID != "" {
 		_ = os.Setenv("ROOT_DID", *rootDID)
 	}
+
+	// === Export LLM env for Root pre-ask (added) ===
+	_ = os.Setenv("LLM_ENABLED", fmt.Sprintf("%v", *llmEnable))
+	if *llmURL != "" {
+		_ = os.Setenv("LLM_BASE_URL", *llmURL)
+	}
+	if *llmKey != "" {
+		_ = os.Setenv("LLM_API_KEY", *llmKey)
+	}
+	if *llmModel != "" {
+		_ = os.Setenv("LLM_MODEL", *llmModel)
+	}
+	if *llmLang != "" {
+		_ = os.Setenv("LLM_LANG_DEFAULT", *llmLang)
+	}
+	_ = os.Setenv("LLM_TIMEOUT_MS", strconv.Itoa(*llmTimeout))
 
 	// ---- Root ----
 	r := root.NewRootAgent(*rootName, *rootPort)
@@ -105,12 +129,13 @@ func main() {
 	}
 
 	log.Printf(
-		"[boot] root:%d  ext{planning=%s ordering=%s payment=%s}  SAGE=%v",
+		"[boot] root:%d  ext{planning=%s ordering=%s payment=%s}  SAGE=%v  llm={enable:%v url:%q model:%q lang:%q timeout:%dms}",
 		*rootPort,
 		os.Getenv("PLANNING_EXTERNAL_URL"),
 		os.Getenv("ORDERING_EXTERNAL_URL"),
 		os.Getenv("PAYMENT_EXTERNAL_URL"),
 		*sage,
+		*llmEnable, os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout,
 	)
 	if err := r.Start(); err != nil {
 		log.Fatal(err)

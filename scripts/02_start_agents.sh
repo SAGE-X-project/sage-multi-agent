@@ -65,12 +65,21 @@ SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
 KEM_JWK="${EXTERNAL_KEM_JWK_FILE:-}"
 HPKE_KEYS_PATH="${HPKE_KEYS_FILE:-merged_agent_keys.json}"
 
+# ---------- LLM (NEW: minimal addition) ----------
+LLM_ENABLED="$(to_bool "${LLM_ENABLED:-true}" true)"
+LLM_BASE_URL="${LLM_BASE_URL:-http://localhost:11434}"
+LLM_API_KEY="${LLM_API_KEY:-}"
+LLM_MODEL="${LLM_MODEL:-gemma2:2b}"
+LLM_LANG_DEFAULT="${LLM_LANG_DEFAULT:-auto}"   # auto|ko|en
+LLM_TIMEOUT_MS="${LLM_TIMEOUT_MS:-8000}"
+
 # ---------- Show effective config ----------
 echo "[cfg] PAYMENT_PORT=${PORT}"
 echo "[cfg] PAYMENT_REQUIRE_SIGNATURE=${PAYMENT_REQUIRE_SIGNATURE}"
 echo "[cfg] EXTERNAL_JWK_FILE=${SIGN_JWK:-<empty>}"
 echo "[cfg] EXTERNAL_KEM_JWK_FILE=${KEM_JWK:-<empty>}"
 echo "[cfg] HPKE_KEYS_PATH=${HPKE_KEYS_PATH}"
+echo "[cfg] LLM_ENABLED=${LLM_ENABLED}  LLM_BASE_URL=${LLM_BASE_URL}  LLM_MODEL=${LLM_MODEL}  LLM_LANG_DEFAULT=${LLM_LANG_DEFAULT}  LLM_TIMEOUT_MS=${LLM_TIMEOUT_MS}"
 
 # ---------- Kill previous ----------
 kill_port "${PORT}"
@@ -81,8 +90,14 @@ ARGS=(
   -require "${PAYMENT_REQUIRE_SIGNATURE}"
   -keys "${HPKE_KEYS_PATH}"
 )
+
+# HPKE flags (unchanged)
 [[ -n "${SIGN_JWK}" ]] && ARGS+=( -sign-jwk "${SIGN_JWK}" )
 [[ -n "${KEM_JWK}" ]] && ARGS+=( -kem-jwk "${KEM_JWK}" )
+
+# LLM flags (minimal addition)
+ARGS+=( -llm "${LLM_ENABLED}" -llm-url "${LLM_BASE_URL}" -llm-model "${LLM_MODEL}" -llm-lang "${LLM_LANG_DEFAULT}" -llm-timeout "${LLM_TIMEOUT_MS}" )
+[[ -n "${LLM_API_KEY}" ]] && ARGS+=( -llm-key "${LLM_API_KEY}" )
 
 # ---------- Start ----------
 if [[ -f cmd/payment/main.go ]]; then

@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,8 +24,6 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
-
-	// Sub agents (in-proc fallback for planning/ordering only)
 
 	// A2A & transport
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
@@ -39,6 +38,9 @@ import (
 	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 	"github.com/sage-x-project/sage/pkg/agent/hpke"
 	"github.com/sage-x-project/sage/pkg/agent/session"
+
+	// [LLM] light shim client
+	"github.com/sage-x-project/sage-multi-agent/llm"
 )
 
 // ---- RootAgent ----
@@ -73,6 +75,9 @@ type RootAgent struct {
 	// HPKE per-target state
 	hpkeStates sync.Map // key: target string -> *hpkeState
 	resolver   sagedid.Resolver
+
+	// [LLM] lazy-initialized NLG client
+	llmClient llm.Client
 }
 
 // hpkeState holds per-target HPKE session context.
@@ -117,10 +122,21 @@ func (r *RootAgent) Start() error {
 	return r.server.ListenAndServe()
 }
 
+// ---- [LLM] ensure ----
+
+func (r *RootAgent) ensureLLM() {
+	if r.llmClient != nil {
+		return
+	}
+	if c, err := llm.NewFromEnv(); err == nil {
+		r.llmClient = c
+	} else {
+		r.logger.Printf("[root] LLM disabled: %v", err)
+	}
+}
+
 // ---- Signing & HTTP (A2A) ----
 
-// Do implements the http Doer used by transports. When SAGE (signing) is enabled,
-// requests are signed via A2A client (RFC 9421). Otherwise plain http.Client is used.
 func (r *RootAgent) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	// Per-request override via context (defaults to global)
 	useSign := r.sageEnabled
@@ -201,13 +217,11 @@ func (r *RootAgent) ensureResolver() error {
 
 // ---- HPKE per-target management ----
 
-// IsHPKEEnabled reports whether HPKE session exists for the target agent.
 func (r *RootAgent) IsHPKEEnabled(target string) bool {
 	_, ok := r.hpkeStates.Load(strings.ToLower(strings.TrimSpace(target)))
 	return ok
 }
 
-// CurrentHPKEKID returns the current KID for target if present.
 func (r *RootAgent) CurrentHPKEKID(target string) string {
 	key := strings.ToLower(strings.TrimSpace(target))
 	if v, ok := r.hpkeStates.Load(key); ok {
@@ -218,15 +232,11 @@ func (r *RootAgent) CurrentHPKEKID(target string) string {
 	return ""
 }
 
-// DisableHPKE clears HPKE state for target.
 func (r *RootAgent) DisableHPKE(target string) {
 	key := strings.ToLower(strings.TrimSpace(target))
 	r.hpkeStates.Delete(key)
 }
 
-// EnableHPKE performs handshake to the target external service.
-// keysFile contains DID mapping JSON (e.g., merged_agent_keys.json).
-// Client DID alias defaults to "root", server alias defaults to "external" or "external-<target>".
 func (r *RootAgent) EnableHPKE(ctx context.Context, target, keysFile string) error {
 	target = strings.ToLower(strings.TrimSpace(target))
 	if target == "" {
@@ -349,14 +359,14 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 		}
 	}
 
-	// 2) heuristic by content
+	// 2) heuristic by content (Korean + English)
 	c := strings.ToLower(strings.TrimSpace(msg.Content))
 	switch {
-	case containsAny(c, "pay", "payment", "send", "wallet", "transfer", "crypto", "usdc", "송금", "결제"):
+	case containsAny(c, "pay", "payment", "send", "wallet", "transfer", "crypto", "usdc", "송금", "결제", "구매", "카드", "카카오페이", "토스", "이체"):
 		if r.externalURLFor("payment") != "" {
 			return "payment"
 		}
-	case containsAny(c, "order", "주문", "buy", "purchase", "product", "catalog"):
+	case containsAny(c, "order", "주문", "buy", "purchase", "product", "catalog", "장바구니", "배송", "수량"):
 		if r.externalURLFor("ordering") != "" {
 			return "ordering"
 		}
@@ -391,11 +401,150 @@ func containsAny(s string, needles ...string) bool {
 	return false
 }
 
+// pickLang chooses language by header -> metadata -> content detection.
+func pickLang(r *http.Request, msg *types.AgentMessage) string {
+	// 1) Header
+	if hv := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Lang"))); hv == "ko" || hv == "en" {
+		return hv
+	}
+	// 2) Metadata
+	if msg != nil && msg.Metadata != nil {
+		if v, ok := msg.Metadata["lang"]; ok {
+			if s, ok2 := v.(string); ok2 {
+				s = strings.ToLower(strings.TrimSpace(s))
+				if s == "ko" || s == "en" {
+					return s
+				}
+				// common aliases
+				if s == "kr" || s == "kor" || s == "korean" {
+					return "ko"
+				}
+				if s == "english" || s == "us" || s == "en-us" || s == "en-gb" {
+					return "en"
+				}
+			}
+		}
+	}
+	// 3) Detect by content
+	return llm.DetectLang(msg.Content)
+}
+
+// ---- [LLM] payment slot extraction ----
+
+type paySlots struct {
+	To        string // recipient wallet/name
+	AmountKRW int64
+	Method    string // card/bank/wallet/etc
+	Item      string // optional (e.g., "iPhone 15 Pro")
+	Memo      string // optional
+}
+
+func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string) {
+	// Prefer metadata keys
+	getS := func(keys ...string) string {
+		if msg.Metadata == nil {
+			return ""
+		}
+		for _, k := range keys {
+			if v, ok := msg.Metadata[k]; ok {
+				if s, ok2 := v.(string); ok2 && strings.TrimSpace(s) != "" {
+					return strings.TrimSpace(s)
+				}
+			}
+		}
+		return ""
+	}
+	getI := func(keys ...string) int64 {
+		if msg.Metadata == nil {
+			return 0
+		}
+		for _, k := range keys {
+			if v, ok := msg.Metadata[k]; ok {
+				switch t := v.(type) {
+				case float64:
+					return int64(t)
+				case int:
+					return int64(t)
+				case int64:
+					return t
+				case string:
+					if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+						return n
+					}
+				}
+			}
+		}
+		return 0
+	}
+
+	s.To = getS("payment.to", "to", "recipient")
+	s.Method = getS("payment.method", "method")
+	s.Item = getS("item", "product", "payment.item")
+	s.Memo = getS("memo", "payment.memo")
+	s.AmountKRW = getI("payment.amountKRW", "amountKRW", "amount")
+
+	// Try naive JSON parse from content if still empty
+	if (s.To == "" || s.Method == "" || s.AmountKRW == 0) && strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
+		var m map[string]any
+		if json.Unmarshal([]byte(msg.Content), &m) == nil {
+			if s.To == "" {
+				if v, ok := m["to"].(string); ok {
+					s.To = strings.TrimSpace(v)
+				}
+			}
+			if s.Method == "" {
+				if v, ok := m["method"].(string); ok {
+					s.Method = strings.TrimSpace(v)
+				}
+			}
+			if s.AmountKRW == 0 {
+				switch v := m["amountKRW"].(type) {
+				case float64:
+					s.AmountKRW = int64(v)
+				case string:
+					if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+						s.AmountKRW = n
+					}
+				}
+			}
+			if s.Item == "" {
+				if v, ok := m["item"].(string); ok {
+					s.Item = strings.TrimSpace(v)
+				}
+			}
+			if s.Memo == "" {
+				if v, ok := m["memo"].(string); ok {
+					s.Memo = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+
+	// Naive KRW extraction from free text like "150만원", "1,500,000원"
+	if s.AmountKRW == 0 {
+		re := regexp.MustCompile(`([0-9][0-9,\.]*)\s*원`)
+		if m := re.FindStringSubmatch(msg.Content); len(m) == 2 {
+			raw := strings.ReplaceAll(strings.ReplaceAll(m[1], ",", ""), ".", "")
+			if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
+				s.AmountKRW = n
+			}
+		}
+	}
+
+	if s.To == "" {
+		missing = append(missing, "수신자(to)")
+	}
+	if s.AmountKRW == 0 {
+		missing = append(missing, "금액(amountKRW)")
+	}
+	if s.Method == "" {
+		missing = append(missing, "결제수단(method)")
+	}
+	return
+}
+
 // ---- Outbound send (Root owns external I/O) ----
 
-// sendExternal signs (optionally HPKE-encrypts) and sends the message to the external
-// agent endpoint chosen by agent name. Falls back to in-proc agent for planning/ordering
-// if URL not configured. Payment has NO in-proc fallback.
 func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.AgentMessage) (*types.AgentMessage, error) {
 	base := r.externalURLFor(agent)
 	if base == "" {
@@ -497,6 +646,130 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 		}
 	}
 	return &out, nil
+}
+
+// ---- [LLM] ordering / planning slot extraction (minimal) ----
+
+// Ordering: require at least "item"; optionally "quantity", "address"
+type orderingSlots struct {
+	Item     string
+	Quantity int
+	Address  string
+}
+
+func extractOrderingSlots(msg *types.AgentMessage) (s orderingSlots, missing []string) {
+	getS := func(keys ...string) string {
+		if msg.Metadata == nil {
+			return ""
+		}
+		for _, k := range keys {
+			if v, ok := msg.Metadata[k]; ok {
+				if str, ok2 := v.(string); ok2 && strings.TrimSpace(str) != "" {
+					return strings.TrimSpace(str)
+				}
+			}
+		}
+		return ""
+	}
+	getI := func(keys ...string) int {
+		if msg.Metadata == nil {
+			return 0
+		}
+		for _, k := range keys {
+			if v, ok := msg.Metadata[k]; ok {
+				switch t := v.(type) {
+				case float64:
+					return int(t)
+				case int:
+					return t
+				case int64:
+					return int(t)
+				case string:
+					if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+						return n
+					}
+				}
+			}
+		}
+		return 0
+	}
+
+	// Prefer metadata
+	s.Item = getS("ordering.item", "item", "product", "상품", "아이템")
+	s.Quantity = getI("ordering.quantity", "quantity", "qty", "수량")
+	s.Address = getS("ordering.address", "address", "배송지", "주소")
+
+	// Lightweight JSON body fallback (optional)
+	if s.Item == "" && strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
+		var m map[string]any
+		if json.Unmarshal([]byte(msg.Content), &m) == nil {
+			if v, ok := m["item"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Item = strings.TrimSpace(v)
+			}
+			switch v := m["quantity"].(type) {
+			case float64:
+				s.Quantity = int(v)
+			case string:
+				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					s.Quantity = n
+				}
+			}
+			if v, ok := m["address"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Address = strings.TrimSpace(v)
+			}
+		}
+	}
+	if s.Item == "" {
+		missing = append(missing, "item(상품)")
+	}
+	// quantity/address는 없어도 주문 자체는 가능(디폴트 처리 가정)
+	return
+}
+
+// Planning: require at least "task"/"goal"
+type planningSlots struct {
+	Task      string // what to plan
+	Timeframe string // optional: when
+	Context   string // optional: notes
+}
+
+func extractPlanningSlots(msg *types.AgentMessage) (s planningSlots, missing []string) {
+	getS := func(keys ...string) string {
+		if msg.Metadata == nil {
+			return ""
+		}
+		for _, k := range keys {
+			if v, ok := msg.Metadata[k]; ok {
+				if str, ok2 := v.(string); ok2 && strings.TrimSpace(str) != "" {
+					return strings.TrimSpace(str)
+				}
+			}
+		}
+		return ""
+	}
+	s.Task = getS("planning.task", "task", "goal", "계획", "할일")
+	s.Timeframe = getS("planning.timeframe", "timeframe", "when", "기간", "언제")
+	s.Context = getS("planning.context", "context", "note", "메모")
+
+	// Lightweight JSON fallback
+	if s.Task == "" && strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
+		var m map[string]any
+		if json.Unmarshal([]byte(msg.Content), &m) == nil {
+			if v, ok := m["task"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Task = strings.TrimSpace(v)
+			}
+			if v, ok := m["timeframe"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Timeframe = strings.TrimSpace(v)
+			}
+			if v, ok := m["context"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Context = strings.TrimSpace(v)
+			}
+		}
+	}
+	if s.Task == "" {
+		missing = append(missing, "task/goal(계획 대상)")
+	}
+	return
 }
 
 // ---- HTTP handlers ----
@@ -630,19 +903,188 @@ func (r *RootAgent) mountRoutes() {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
+
 		agent := r.pickAgent(&msg)
 		if agent == "" {
 			http.Error(w, "no agent available", http.StatusBadGateway)
 			return
 		}
 
+		// [LLM] If payment intent, check required slots; if missing, ask a single clarifying question.
+		if agent == "payment" {
+			slots, missing := extractPaymentSlots(&msg)
+			lang := pickLang(req, &msg) // "ko" or "en"
+
+			if len(missing) > 0 {
+				r.ensureLLM()
+				// Default fallbacks per language
+				question := map[string]string{
+					"en": "Please provide the missing payment details (recipient, amount in KRW, method).",
+					"ko": "결제에 필요한 정보를 알려주세요(수신자, 금액, 결제수단).",
+				}[lang]
+
+				if r.llmClient != nil {
+					sys, usr := llm.BuildPaymentAskPromptWithLang(lang, missing, msg.Content)
+					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
+						question = strings.TrimSpace(out)
+					}
+				}
+				clar := types.AgentMessage{
+					ID:        msg.ID + "-needinfo",
+					From:      "root",
+					To:        msg.From,
+					Type:      "clarify",
+					Content:   question,
+					Timestamp: time.Now(),
+					Metadata: map[string]any{
+						"await":   "payment.slots",
+						"missing": strings.Join(missing, ", "),
+						"hint": map[string]string{
+							"ko": "예: {\"to\":\"Hacker Wallet\",\"amountKRW\":1500000,\"method\":\"card\",\"item\":\"iPhone 15 Pro\"}",
+							"en": "Ex: {\"to\":\"Hacker Wallet\",\"amountKRW\":1500000,\"method\":\"card\",\"item\":\"iPhone 15 Pro\"}",
+						}[lang],
+						"lang": lang,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(clar)
+				return
+			}
+
+			// ensure backfill into metadata so downstream payment can rely on it
+			if msg.Metadata == nil {
+				msg.Metadata = map[string]any{}
+			}
+			msg.Metadata["payment.to"] = slots.To
+			msg.Metadata["payment.amountKRW"] = slots.AmountKRW
+			msg.Metadata["payment.method"] = slots.Method
+			if slots.Item != "" {
+				msg.Metadata["item"] = slots.Item
+			}
+			if slots.Memo != "" {
+				msg.Metadata["memo"] = slots.Memo
+			}
+			// pass language downstream so Payment can render in the same language
+			msg.Metadata["lang"] = lang
+		} else if agent == "ordering" {
+			// --- NEW: ORDERING flow (ask missing info, else dispatch)
+			slots, missing := extractOrderingSlots(&msg)
+			lang := pickLang(req, &msg) // "ko" or "en"
+
+			if len(missing) > 0 {
+				r.ensureLLM()
+				// Default question by language
+				question := map[string]string{
+					"en": "To place the order, please provide the missing info (e.g., item).",
+					"ko": "주문을 진행하려면 필요한 정보(예: 상품명)를 알려주세요.",
+				}[lang]
+
+				// Try to refine with LLM (if available)
+				if r.llmClient != nil {
+					sys := "You are an assistant collecting missing information to place an order. Ask ONE concise question in the user's language."
+					usr := fmt.Sprintf("Language=%s\nMissing=%s\nUser said: %s", lang, strings.Join(missing, ", "), msg.Content)
+					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
+						question = strings.TrimSpace(out)
+					}
+				}
+				clar := types.AgentMessage{
+					ID:        msg.ID + "-needinfo",
+					From:      "root",
+					To:        msg.From,
+					Type:      "clarify",
+					Content:   question,
+					Timestamp: time.Now(),
+					Metadata: map[string]any{
+						"await":   "ordering.slots",
+						"missing": strings.Join(missing, ", "),
+						"hint": map[string]string{
+							"ko": `예: {"item":"iPhone 15 Pro","quantity":1,"address":"서울시 ..."}`,
+							"en": `Ex: {"item":"iPhone 15 Pro","quantity":1,"address":"..."} `,
+						}[lang],
+						"lang": lang,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(clar)
+				return
+			}
+
+			if msg.Metadata == nil {
+				msg.Metadata = map[string]any{}
+			}
+			msg.Metadata["ordering.item"] = slots.Item
+			if slots.Quantity > 0 {
+				msg.Metadata["ordering.quantity"] = slots.Quantity
+			}
+			if slots.Address != "" {
+				msg.Metadata["ordering.address"] = slots.Address
+			}
+			msg.Metadata["lang"] = lang // keep same language downstream
+
+		} else if agent == "planning" {
+			// --- NEW: PLANNING flow (ask missing info, else dispatch)
+			slots, missing := extractPlanningSlots(&msg)
+			lang := pickLang(req, &msg) // "ko" or "en"
+
+			if len(missing) > 0 {
+				r.ensureLLM()
+				// Default question by language
+				question := map[string]string{
+					"en": "To plan properly, please tell me what you want to plan (task/goal).",
+					"ko": "계획을 세우기 위해 무엇을 계획할지(task/goal)를 알려주세요.",
+				}[lang]
+
+				// Try to refine with LLM
+				if r.llmClient != nil {
+					sys := "You are an assistant collecting missing information to create a plan. Ask ONE concise question in the user's language."
+					usr := fmt.Sprintf("Language=%s\nMissing=%s\nUser said: %s", lang, strings.Join(missing, ", "), msg.Content)
+					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
+						question = strings.TrimSpace(out)
+					}
+				}
+				clar := types.AgentMessage{
+					ID:        msg.ID + "-needinfo",
+					From:      "root",
+					To:        msg.From,
+					Type:      "clarify",
+					Content:   question,
+					Timestamp: time.Now(),
+					Metadata: map[string]any{
+						"await":   "planning.slots",
+						"missing": strings.Join(missing, ", "),
+						"hint": map[string]string{
+							"ko": `예: {"task":"출장 일정 수립","timeframe":"다음 주","context":"회의 장소는 판교"}`,
+							"en": `Ex: {"task":"Plan a business trip","timeframe":"next week","context":"meeting in Pangyo"}`,
+						}[lang],
+						"lang": lang,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(clar)
+				return
+			}
+
+			if msg.Metadata == nil {
+				msg.Metadata = map[string]any{}
+			}
+			msg.Metadata["planning.task"] = slots.Task
+			if slots.Timeframe != "" {
+				msg.Metadata["planning.timeframe"] = slots.Timeframe
+			}
+			if slots.Context != "" {
+				msg.Metadata["planning.context"] = slots.Context
+			}
+			msg.Metadata["lang"] = lang
+		}
+
 		// Per-request toggles from headers
-		// - HPKE requires SAGE=true; if explicitly conflicting, return 400
 		sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
 		hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
 
 		if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
-			// HPKE를 명시적으로 켠 요청인데 SAGE가 명시적으로 꺼져 있다면 400
 			if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -659,7 +1101,7 @@ func (r *RootAgent) mountRoutes() {
 			ctx = context.WithValue(ctx, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
 		}
 		if hpkeRaw != "" {
-			ctx = context.WithValue(ctx, ctxHPKERawKey, hpkeRaw) // "true"/"false" 그대로 넘김
+			ctx = context.WithValue(ctx, ctxHPKERawKey, hpkeRaw) // "true"/"false"
 		}
 
 		outPtr, err := r.sendExternal(ctx, agent, &msg)

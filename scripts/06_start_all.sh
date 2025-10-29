@@ -12,7 +12,7 @@
 #   --force-kill              kill occupied ports automatically
 #
 # Notes:
-# - PaymentAgent runs IN-PROC inside the root process. Its logs go to logs/root.log.
+# - PaymentAgent runs EXTERNAL via gateway here. Planning/Ordering are in-proc (fallback).
 
 set -Eeuo pipefail
 
@@ -151,6 +151,20 @@ if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
   exit 1
 fi
 
+# ---------- LLM defaults (NEW, minimal) ----------
+LLM_ENABLED="${LLM_ENABLED:-true}"
+case "$(echo "$LLM_ENABLED" | tr '[:upper:]' '[:lower:]')" in
+  1|true|on|yes) LLM_ENABLED=true ;;
+  *)             LLM_ENABLED=false ;;
+esac
+LLM_BASE_URL="${LLM_BASE_URL:-http://localhost:11434}"
+LLM_API_KEY="${LLM_API_KEY:-}"                     # empty if not needed
+LLM_MODEL="${LLM_MODEL:-gemma2:2b}"
+LLM_LANG_DEFAULT="${LLM_LANG_DEFAULT:-auto}"       # auto|ko|en
+LLM_TIMEOUT_MS="${LLM_TIMEOUT_MS:-8000}"
+
+echo "[LLM] enabled=${LLM_ENABLED} base_url=${LLM_BASE_URL} model=${LLM_MODEL} lang=${LLM_LANG_DEFAULT} timeout=${LLM_TIMEOUT_MS}ms"
+
 # ---------- 1) Payment service (verifier) ----------
 # Resolve final SAGE mode: CLI > env > default(off)
 SMODE="$(printf '%s' "${SAGE_MODE:-off}" | tr '[:upper:]' '[:lower:]')"
@@ -158,7 +172,6 @@ case "$SMODE" in
   off|false|0|no) EXT_VERIFY="off"; ROOT_SAGE="false" ;;
   *)              EXT_VERIFY="on";  ROOT_SAGE="true"  ;;
 esac
-
 
 # HPKE server keys for payment (enable whenever keys are present)
 SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
@@ -181,6 +194,16 @@ if [[ -n "$SIGN_JWK" && -n "$KEM_JWK" ]]; then
 else
   echo "[HPKE:payment] HPKE disabled (missing EXTERNAL_JWK_FILE/EXTERNAL_KEM_JWK_FILE or default keys)"
 fi
+
+# >>> NEW: pass LLM flags to payment cmd <<<
+PAYMENT_ARGS+=(
+  -llm "$LLM_ENABLED"
+  -llm-url "$LLM_BASE_URL"
+  -llm-model "$LLM_MODEL"
+  -llm-lang "$LLM_LANG_DEFAULT"
+  -llm-timeout "$LLM_TIMEOUT_MS"
+)
+[[ -n "$LLM_API_KEY" ]] && PAYMENT_ARGS+=( -llm-key "$LLM_API_KEY" )
 
 start_bg "payment" "$EXT_PAYMENT_PORT" "${PAYMENT_ARGS[@]}"
 
@@ -220,6 +243,16 @@ ROOT_ARGS=( -port "$ROOT_PORT" -sage "$ROOT_SAGE" )
 if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
   ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )
 fi
+
+# >>> NEW: pass LLM flags to root cmd <<<
+ROOT_ARGS+=(
+  -llm "$LLM_ENABLED"
+  -llm-url "$LLM_BASE_URL"
+  -llm-model "$LLM_MODEL"
+  -llm-lang "$LLM_LANG_DEFAULT"
+  -llm-timeout "$LLM_TIMEOUT_MS"
+)
+[[ -n "$LLM_API_KEY" ]] && ROOT_ARGS+=( -llm-key "$LLM_API_KEY" )
 
 echo "[ENV]  PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
 [[ -n "${PAYMENT_JWK_FILE:-}" ]] && echo "[ENV]  ROOT_JWK_FILE=${PAYMENT_JWK_FILE}"

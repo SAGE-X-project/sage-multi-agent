@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,12 +39,15 @@ import (
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
+
+	// [LLM] shim
+	"github.com/sage-x-project/sage-multi-agent/llm"
 )
 
 // -------- Public API --------
 
 type PaymentAgent struct {
-	RequireSignature bool // true = RFC9421 서명 필수, false = 서명 없어도 통과(검증은 시도 안 함)
+	RequireSignature bool // true = RFC9421 required, false = allow plaintext (no verify)
 
 	// internals
 	logger *log.Logger
@@ -52,17 +56,19 @@ type PaymentAgent struct {
 	hpkeMgr *session.Manager
 	hpkeSrv *hpke.Server
 	hsrv    *sagehttp.HTTPServer // handshake adapter
-	hpkeMu  sync.Mutex           // lazy enable 락
+	hpkeMu  sync.Mutex           // lazy enable lock
 
-	mw      *server.DIDAuthMiddleware // a2autil.BuildDIDMiddleware 반환 타입
+	mw      *server.DIDAuthMiddleware // from a2autil.BuildDIDMiddleware
 	openMux *http.ServeMux            // /status
-	protMux *http.ServeMux            // /process (보호 경로)
-	handler http.Handler              // 최종 핸들러 (미들웨어 포함)
+	protMux *http.ServeMux            // /process
+	handler http.Handler              // final handler
 	httpSrv *http.Server
+
+	// [LLM] lazy client
+	llmClient llm.Client
 }
 
 // NewPaymentAgent builds the agent.
-// HPKE는 부팅 시 env가 존재하면 즉시 켜고, 없어도 구동하며, 첫 HPKE 요청에서 lazy enable 한다.
 func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	agent := &PaymentAgent{
 		RequireSignature: requireSignature,
@@ -70,7 +76,6 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	}
 
 	// ===== DID middleware =====
-	// RequireSignature=false(SAGE OFF)면 미들웨어 자체를 비활성화해서 평문 완전 허용
 	if agent.RequireSignature {
 		mw, err := a2autil.BuildDIDMiddleware(true)
 		if err != nil {
@@ -113,7 +118,6 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 
 		// HPKE path?
 		if isHPKE(r) {
-			// ⇩ lazy enable 시도 (env에 키가 있으면 즉시 켬)
 			if err := agent.ensureHPKE(); err != nil {
 				http.Error(w, "hpke disabled", http.StatusBadRequest)
 				return
@@ -135,7 +139,6 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			// --- Data mode (has KID) ---
 			sess, ok := agent.hpkeMgr.GetByKeyID(kid)
 			if !ok {
-				// 혹시 핸드셰이크 JSON이 온 경우 어댑터로 재시도
 				if agent.hsrv != nil {
 					r.Body = io.NopCloser(bytes.NewReader(body))
 					agent.hsrv.MessagesHandler().ServeHTTP(w, r)
@@ -218,8 +221,15 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	}
 	agent.handler = h
 
-	// ===== Optional eager HPKE boot (env가 이미 준비돼있다면) =====
-	_ = agent.ensureHPKE() // 실패해도 그냥 평문 모드로 동작 계속
+	// ===== Optional eager HPKE boot =====
+	_ = agent.ensureHPKE()
+
+	// [LLM] lazy: only init when used
+	if c, err := llm.NewFromEnv(); err == nil {
+		agent.llmClient = c
+	} else {
+		agent.logger.Printf("[payment] LLM disabled: %v", err)
+	}
 
 	return agent, nil
 }
@@ -247,17 +257,14 @@ func (e *PaymentAgent) Shutdown(ctx context.Context) error {
 
 // -------- Lazy HPKE enable --------
 
-// ensureHPKE: hpkeSrv/hsrv가 없으면 env에서 키/리졸버를 읽어 즉시 켠다.
 func (e *PaymentAgent) ensureHPKE() error {
 	e.hpkeMu.Lock()
 	defer e.hpkeMu.Unlock()
 
-	// 이미 준비됨
 	if e.hpkeSrv != nil && e.hpkeMgr != nil && e.hsrv != nil {
 		return nil
 	}
 
-	// env 키 경로 확인
 	sigPath := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
 	kemPath := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
 	if sigPath == "" || kemPath == "" {
@@ -265,7 +272,6 @@ func (e *PaymentAgent) ensureHPKE() error {
 		return fmt.Errorf("missing EXTERNAL_JWK_FILE or EXTERNAL_KEM_JWK_FILE")
 	}
 
-	// 키/리졸버 로드
 	hpkeMgr := session.NewManager()
 	signKP, err := loadServerSigningKeyFromEnv()
 	if err != nil {
@@ -290,7 +296,6 @@ func (e *PaymentAgent) ensureHPKE() error {
 		return fmt.Errorf("HPKE: server DID not found for name 'external' in %s", keysPath)
 	}
 
-	// 서버/핸드셰이크 어댑터 구성
 	e.hpkeMgr = hpkeMgr
 	e.hpkeSrv = hpke.NewServer(
 		signKP,
@@ -307,7 +312,7 @@ func (e *PaymentAgent) ensureHPKE() error {
 	return nil
 }
 
-// -------- Application handler (echo) --------
+// -------- Application handler (extended with LLM) --------
 
 func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
 	var in types.AgentMessage
@@ -319,13 +324,72 @@ func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 			Error:     fmt.Errorf("bad json: %w", err),
 		}, nil
 	}
+
+	// Extract slots passed by Root (fallback to naive parsing).
+	to := getMetaString(in.Metadata, "payment.to", "to", "recipient")
+	method := getMetaString(in.Metadata, "payment.method", "method")
+	item := getMetaString(in.Metadata, "item", "payment.item")
+	memo := getMetaString(in.Metadata, "memo", "payment.memo")
+	amount := getMetaInt64(in.Metadata, "payment.amountKRW", "amountKRW", "amount")
+
+	// If essential fields are missing, just echo (keep legacy behavior).
+	// If essential fields are missing, just echo (keep legacy behavior).
+	useEcho := (to == "" || amount <= 0 || method == "")
+	lang := getMetaString(in.Metadata, "lang")
+	if lang == "" {
+		lang = llm.DetectLang(in.Content) // fallback
+	}
+	if lang != "ko" && lang != "en" {
+		lang = "ko"
+	}
+
+	if e.llmClient == nil || useEcho {
+		out := types.AgentMessage{
+			ID:        in.ID + "-ok",
+			From:      "payment",
+			To:        in.From,
+			Type:      "response",
+			Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
+			Timestamp: time.Now(),
+		}
+		b, _ := json.Marshal(out)
+		return &transport.Response{Success: true, MessageID: msg.ID, TaskID: msg.TaskID, Data: b}, nil
+	}
+
+	sys, usr := llm.BuildPaymentReceiptPromptWithLang(lang, to, amount, method, item, memo)
+
+	// LLM try; fall back to templated string if fails.
+	text := ""
+	if out, err := e.llmClient.Chat(ctx, sys, usr); err == nil && strings.TrimSpace(out) != "" {
+		text = strings.TrimSpace(out)
+	} else {
+		if lang == "en" {
+			text = fmt.Sprintf("✅ Payment complete: KRW %s / Recipient: %s (%s) / Order ID: ORD-%04d",
+				withComma(amount), to, method, time.Now().Unix()%10000)
+		} else {
+			text = fmt.Sprintf("✅ 결제 완료: %s원 / 수신자: %s (%s) / 주문번호: ORD-%04d",
+				withComma(amount), to, method, time.Now().Unix()%10000)
+		}
+	}
+
 	out := types.AgentMessage{
-		ID:        in.ID + "-ok",
+		ID:        in.ID + "-receipt",
 		From:      "payment",
 		To:        in.From,
 		Type:      "response",
-		Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
+		Content:   text,
 		Timestamp: time.Now(),
+		Metadata: map[string]any{
+			"receipt": map[string]any{
+				"to":          to,
+				"amountKRW":   amount,
+				"method":      method,
+				"item":        item,
+				"memo":        memo,
+				"orderId":     fmt.Sprintf("ORD-%04d", time.Now().Unix()%10000),
+				"generatedAt": time.Now().Format(time.RFC3339),
+			},
+		},
 	}
 	b, _ := json.Marshal(out)
 	return &transport.Response{
@@ -354,7 +418,6 @@ func isHPKE(r *http.Request) bool {
 	return false
 }
 
-// Load Ed25519 signing key from EXTERNAL_JWK_FILE (JWK).
 func loadServerSigningKeyFromEnv() (sagecrypto.KeyPair, error) {
 	path := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
 	if path == "" {
@@ -371,7 +434,6 @@ func loadServerSigningKeyFromEnv() (sagecrypto.KeyPair, error) {
 	return kp, nil
 }
 
-// Load X25519 KEM key from EXTERNAL_KEM_JWK_FILE (JWK).
 func loadServerKEMFromEnv() (sagecrypto.KeyPair, error) {
 	path := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
 	if path == "" {
@@ -388,7 +450,6 @@ func loadServerKEMFromEnv() (sagecrypto.KeyPair, error) {
 	return kp, nil
 }
 
-// Create a MultiChain resolver from env (ETH_RPC_URL / SAGE_REGISTRY_V4_ADDRESS / SAGE_EXTERNAL_KEY).
 func buildResolver() (sagedid.Resolver, error) {
 	rpc := firstNonEmpty(os.Getenv("ETH_RPC_URL"), "http://127.0.0.1:8545")
 	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_V4_ADDRESS"), "0x5FbDB2315678afecb367f032d93F642f64180aa3")
@@ -427,7 +488,6 @@ func loadDIDsFromKeys(path string) (map[string]string, error) {
 	return m, nil
 }
 
-// DID middleware compact error shape (unchanged)
 func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *http.Request, err error) {
 	return func(w http.ResponseWriter, r *http.Request, err error) {
 		re := rootError(err)
@@ -461,4 +521,59 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+func getMetaString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s, ok2 := v.(string); ok2 && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func getMetaInt64(m map[string]any, keys ...string) int64 {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch t := v.(type) {
+			case float64:
+				return int64(t)
+			case int:
+				return int64(t)
+			case int64:
+				return t
+			case string:
+				if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func withComma(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	neg := ""
+	if n < 0 {
+		neg = "-"
+		s = s[1:]
+	}
+	out := ""
+	for i, c := range reverse(s) {
+		if i > 0 && i%3 == 0 {
+			out = "," + out
+		}
+		out = string(c) + out
+	}
+	return neg + out
+}
+func reverse(s string) []rune {
+	r := []rune(s)
+	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
+		r[i], r[j] = r[j], r[i]
+	}
+	return r
 }
