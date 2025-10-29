@@ -198,33 +198,25 @@ do
   fi
 done
 
-# ---------- 3) fire a request (per-request toggles in body.metadata) ----------
+# ---------- 3) fire a request (per-request toggles via headers only) ----------
 REQ_PAYLOAD="$(mktemp -t req.XXXX.json)"
 RESP_PAYLOAD="$(mktemp -t resp.XXXX.json)"
 
-mkjson() {
-  # Build JSON safely with/without jq
-  local prompt="$1" sage="$2" hpke="$3"
-  if command -v jq >/dev/null 2>&1; then
-    jq -n --arg p "$prompt" --argjson s "$sage" --argjson h "$hpke" \
-      '{prompt:$p, metadata:{sageEnabled:$s, hpkeEnabled:$h}}'
-  else
-    # naive escape
-    local esc=${prompt//\\/\\\\}; esc=${esc//\"/\\\"}
-    printf '{"prompt":"%s","metadata":{"sageEnabled":%s,"hpkeEnabled":%s}}\n' "$esc" "$sage" "$hpke"
-  fi
-}
-
-mkjson "$PROMPT" \
-  "$( [[ "$SAGE_MODE" == "on" ]] && echo true || echo false )" \
-  "$( [[ "$HPKE_MODE" == "on" ]] && echo true || echo false )" \
-  > "$REQ_PAYLOAD"
+if command -v jq >/dev/null 2>&1; then
+  jq -n --arg p "$PROMPT" '{prompt:$p}' > "$REQ_PAYLOAD"
+else
+  # naive escape
+  esc=${PROMPT//\\/\\\\}; esc=${esc//\"/\\\"}
+  printf '{"prompt":"%s"}\n' "$esc" > "$REQ_PAYLOAD"
+fi
 
 HTTP_CODE=$(curl -sS -o "$RESP_PAYLOAD" -w "%{http_code}" \
   -H "Content-Type: application/json" \
+  -H "X-SAGE-Enabled: $( [[ "$SAGE_MODE" == "on" ]] && echo true || echo false )" \
+  -H "X-HPKE-Enabled: $( [[ "$HPKE_MODE" == "on" ]] && echo true || echo false )" \
   -X POST "http://${HOST}:${CLIENT_PORT}/api/request" \
   --data-binary @"$REQ_PAYLOAD" || true)
-
+  
 echo "[HTTP] client-api status: $HTTP_CODE"
 if command -v jq >/dev/null 2>&1; then
   jq '{response:.response, verification:(.SAGEVerification // .sageVerification // null), metadata:.metadata, logs:(.logs // null)}' "$RESP_PAYLOAD" 2>/dev/null || cat "$RESP_PAYLOAD"
@@ -241,3 +233,11 @@ echo "----- root.log (tail) -----"
 tail -n 60 "$ROOT_DIR/logs/root.log" 2>/dev/null || echo "(no log yet)"
 echo "----- client.log (tail) -----"
 tail -n 60 "$ROOT_DIR/logs/client.log" 2>/dev/null || echo "(no log yet)"
+
+echo
+echo "[CLEANUP] ensuring clean state via scripts/01_kill_ports.sh"
+if [[ -f "$ROOT_DIR/scripts/01_kill_ports.sh" ]]; then
+  ( bash "$ROOT_DIR/scripts/01_kill_ports.sh" --force || bash "$ROOT_DIR/scripts/01_kill_ports.sh" || true )
+else
+  echo "[WARN] cleanup script not found: $ROOT_DIR/scripts/01_kill_ports.sh"
+fi

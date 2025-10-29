@@ -160,12 +160,14 @@ case "$SMODE" in
 esac
 
 
-# Optional HPKE server keys for payment (auto-enable if both exist)
-SIGN_JWK=""; KEM_JWK=""; KEYS_FILE="$PAYMENT_HPKE_KEYS"
-if [[ "$PAYMENT_HPKE_ENABLE" = "1" ]]; then
-  SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
-  KEM_JWK="${EXTERNAL_KEM_JWK_FILE:-}"
-fi
+# HPKE server keys for payment (enable whenever keys are present)
+SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
+KEM_JWK="${EXTERNAL_KEM_JWK_FILE:-}"
+KEYS_FILE="$PAYMENT_HPKE_KEYS"
+
+# Resolve default key paths if not provided
+[[ -z "$SIGN_JWK" ]] && [[ -f "keys/external.jwk" ]] && SIGN_JWK="keys/external.jwk"
+[[ -z "$KEM_JWK"  ]] && [[ -f "keys/kem/external.x25519.jwk" ]] && KEM_JWK="keys/kem/external.x25519.jwk"
 
 PAYMENT_ARGS=(
   go run ./cmd/payment/main.go
@@ -173,8 +175,12 @@ PAYMENT_ARGS=(
     -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)
     -keys "$KEYS_FILE"
 )
-[[ -n "$SIGN_JWK" ]] && PAYMENT_ARGS+=( -sign-jwk "$SIGN_JWK" )
-[[ -n "$KEM_JWK" ]] && PAYMENT_ARGS+=( -kem-jwk "$KEM_JWK" )
+if [[ -n "$SIGN_JWK" && -n "$KEM_JWK" ]]; then
+  echo "[HPKE:payment] enabling server HPKE (sign=$SIGN_JWK, kem=$KEM_JWK)"
+  PAYMENT_ARGS+=( -sign-jwk "$SIGN_JWK" -kem-jwk "$KEM_JWK" )
+else
+  echo "[HPKE:payment] HPKE disabled (missing EXTERNAL_JWK_FILE/EXTERNAL_KEM_JWK_FILE or default keys)"
+fi
 
 start_bg "payment" "$EXT_PAYMENT_PORT" "${PAYMENT_ARGS[@]}"
 
@@ -203,16 +209,13 @@ else
 fi
 
 # ---------- 3) Root ----------
+# Build root CLI/environment once and start a single instance
 HPKE_FLAG=$([ "${PAYMENT_HPKE_ENABLE}" = "1" ] && echo true || echo false)
-ROOT_ARGS=( -port "$ROOT_PORT" "-sage=${ROOT_SAGE}" "-hpke=${HPKE_FLAG}" -hpke-keys "${PAYMENT_HPKE_KEYS}" )
-
 ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "ROOT_SAGE_ENABLED=${ROOT_SAGE}" "ROOT_HPKE=${HPKE_FLAG}" )
 [[ -n "${PAYMENT_JWK_FILE:-}" ]] && ROOT_ENV+=( "ROOT_JWK_FILE=${PAYMENT_JWK_FILE}" )
 [[ -n "${PAYMENT_DID:-}"      ]] && ROOT_ENV+=( "ROOT_DID=${PAYMENT_DID}" )
 
-start_bg "root" "$ROOT_PORT" env "${ROOT_ENV[@]}" go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
-
-# Build root CLI flags (pass -hpke/-hpke-keys here)
+# Compose args
 ROOT_ARGS=( -port "$ROOT_PORT" -sage "$ROOT_SAGE" )
 if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
   ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )
@@ -224,9 +227,7 @@ echo "[ENV]  PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
 echo "[HPKE] enable=${PAYMENT_HPKE_ENABLE} keys=${PAYMENT_HPKE_KEYS}"
 echo "[ROOT_ARGS] ${ROOT_ARGS[*]}"
 
-start_bg "root" "$ROOT_PORT" \
-  env "${ROOT_ENV[@]}" \
-  go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
+start_bg "root" "$ROOT_PORT" env "${ROOT_ENV[@]}" go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
 
 # ---------- 4) Client API ----------
 start_bg "client" "$CLIENT_PORT" \

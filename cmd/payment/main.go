@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/payment"
@@ -45,22 +46,49 @@ func getenvBool(key string, def bool) bool {
 	return def
 }
 
+func firstExisting(paths ...string) string {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		// also try relative to repo root if running from subdir
+		if abs, err := filepath.Abs(p); err == nil {
+			if _, err2 := os.Stat(abs); err2 == nil {
+				return abs
+			}
+		}
+	}
+	return ""
+}
+
 func main() {
-    // Distinct process prefix for clearer logs
-    log.SetFlags(log.LstdFlags)
-    log.SetPrefix("[payment] ")
-	// Server port & signature requirement
+	// clearer logs
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("[payment] ")
+
+	// flags (ENV as defaults)
 	port := flag.Int("port", getenvInt("EXTERNAL_PAYMENT_PORT", 19083), "HTTP port for payment server")
 	requireSig := flag.Bool("require", getenvBool("PAYMENT_REQUIRE_SIGNATURE", true), "require RFC9421 signature")
-
-	// Convenience flags for key paths (also set envs so the module can pick them up)
 	signJWK := flag.String("sign-jwk", getenvStr("EXTERNAL_JWK_FILE", ""), "Ed25519 signing JWK path (enables HPKE server)")
 	kemJWK := flag.String("kem-jwk", getenvStr("EXTERNAL_KEM_JWK_FILE", ""), "X25519 KEM JWK path (enables HPKE server)")
-	keysFile := flag.String("keys", getenvStr("HPKE_KEYS_FILE", "merged_agent_keys.json"), "DID mapping file (merged_agent_keys.json)")
-
+	keysFile := flag.String("keys", getenvStr("HPKE_KEYS_FILE", ""), "DID mapping file (merged_agent_keys.json/generated_agent_keys.json)")
 	flag.Parse()
 
-	// Export envs so payment module picks them up
+	// ---- Auto-detect defaults if flags/env are empty ----
+	if *signJWK == "" {
+		*signJWK = firstExisting("keys/external.jwk")
+	}
+	if *kemJWK == "" {
+		*kemJWK = firstExisting("keys/kem/external.x25519.jwk")
+	}
+	if *keysFile == "" {
+		*keysFile = firstExisting("merged_agent_keys.json", "generated_agent_keys.json", "keys/merged_agent_keys.json")
+	}
+
+	// ---- Export envs so the agent (lazy enable) can always find them ----
 	if *signJWK != "" {
 		_ = os.Setenv("EXTERNAL_JWK_FILE", *signJWK)
 	}
@@ -68,9 +96,11 @@ func main() {
 		_ = os.Setenv("EXTERNAL_KEM_JWK_FILE", *kemJWK)
 	}
 	if *keysFile != "" {
-		// The module uses a fixed filename "merged_agent_keys.json"; set env for tooling/scripts.
 		_ = os.Setenv("HPKE_KEYS_FILE", *keysFile)
 	}
+
+	log.Printf("[boot] requireSig=%v  sign-jwk=%q  kem-jwk=%q  keys=%q",
+		*requireSig, os.Getenv("EXTERNAL_JWK_FILE"), os.Getenv("EXTERNAL_KEM_JWK_FILE"), os.Getenv("HPKE_KEYS_FILE"))
 
 	agent, err := payment.NewPaymentAgent(*requireSig)
 	if err != nil {
@@ -78,11 +108,8 @@ func main() {
 	}
 
 	addr := fmt.Sprintf(":%d", *port)
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: agent.Handler(),
-	}
-	log.Printf("[payment] listening on %s (requireSig=%v, HPKE auto by env EXTERNAL_JWK_FILE/EXTERNAL_KEM_JWK_FILE)", addr, *requireSig)
+	srv := &http.Server{Addr: addr, Handler: agent.Handler()}
+	log.Printf("listening on %s (HPKE auto by env; lazy-enable supported)", addr)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("listen: %v", err)

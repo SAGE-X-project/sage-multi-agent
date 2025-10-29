@@ -21,20 +21,26 @@ SAGE="off"
 HPKE="off"
 PROMPT=""
 PROMPT_FILE=""
+SCENARIO="user"
 
 usage() {
   cat <<EOF
-Usage: $0 [--sage on|off] [--hpke on|off] [--prompt "<text>"] [--prompt-file <path>]
+Usage: $0 [--sage on|off] [--hpke on|off] [--prompt "<text>"] [--prompt-file <path>] [--scenario <name>] [--payment]
 If no --prompt/--prompt-file given, reads stdin.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --sage=*)      SAGE="${1#*=}"; shift ;;
     --sage)        SAGE="${2:-off}"; shift 2 ;;
+    --hpke=*)      HPKE="${1#*=}"; shift ;;
     --hpke)        HPKE="${2:-off}"; shift 2 ;;
     --prompt)      PROMPT="${2:-}"; shift 2 ;;
     --prompt-file) PROMPT_FILE="${2:-}"; shift 2 ;;
+    --scenario=*)  SCENARIO="${1#*=}"; shift ;;
+    --scenario)    SCENARIO="${2:-user}"; shift 2 ;;
+    --payment)     PROMPT="send 10 USDC to merchant"; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
   esac
@@ -48,8 +54,9 @@ if [[ -z "$PROMPT" ]]; then
   fi
 fi
 
+# If still empty, choose a default that routes to payment (so HPKE/SAGE effects are visible)
 if [[ -z "$PROMPT" ]]; then
-  read -r -p "Enter prompt: " PROMPT
+  PROMPT="send 10 USDC to merchant"
 fi
 
 SAGE_HDR="false"
@@ -90,12 +97,12 @@ PRE_GW=0; PRE_ROOT=0; PRE_PAY=0
 [[ -f "$ROOT_LOG" ]] && PRE_ROOT=$(wc -l < "$ROOT_LOG" || echo 0)
 [[ -f "$PAY_LOG" ]] && PRE_PAY=$(wc -l < "$PAY_LOG" || echo 0)
 
-echo "[REQ] POST /api/request  X-SAGE-Enabled: $SAGE_HDR  X-HPKE-Enabled: $HPKE_HDR"
+echo "[REQ] POST /api/request  X-SAGE-Enabled: $SAGE_HDR  X-HPKE-Enabled: $HPKE_HDR  X-Scenario: $SCENARIO"
 HTTP_CODE=$(curl -sS -o "$RESP_PAYLOAD" -w "%{http_code}" \
   -H "Content-Type: application/json" \
   -H "X-SAGE-Enabled: $SAGE_HDR" \
   -H "X-HPKE-Enabled: $HPKE_HDR" \
-  -H "X-Scenario: user" \
+  -H "X-Scenario: $SCENARIO" \
   -X POST "http://${HOST}:${CLIENT_PORT}/api/request" \
   --data-binary @"$REQ_PAYLOAD" || true)
 

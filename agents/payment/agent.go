@@ -3,7 +3,7 @@
 // Features:
 // - DID signature verification (RFC 9421) via internal middleware
 // - HPKE handshake (SecureMessage JSON) + data-mode HPKE decrypt/encrypt
-// - Plain JSON fallback when HPKE is off
+// - Plain JSON fallback when HPKE is off (and can be enabled lazily on first HPKE request)
 // - /status, /process endpoints identical to the cmd version
 package payment
 
@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
@@ -41,20 +42,18 @@ import (
 
 // -------- Public API --------
 
-// PaymentAgent hosts the same behavior that lived in cmd/payment/main.go.
-// Use Handler() to mount on a custom mux, or Start(addr) to run a standalone server.
-//
-// 한국어 설명:
-// - 기존 main.go의 외부 결제 서버를 모듈화한 구조체.
-// - HPKE 핸드셰이크/데이터 처리, DID 서명 검증, /status·/process 라우트 모두 동일.
-// - Start/Shutdown 제공. 직접 mux에 붙이고 싶으면 Handler() 사용.
 type PaymentAgent struct {
-	RequireSignature bool // true = RFC9421 서명 필수, false = 서명 없어도 통과(검증은 시도)
+	RequireSignature bool // true = RFC9421 서명 필수, false = 서명 없어도 통과(검증은 시도 안 함)
 
 	// internals
-	logger  *log.Logger
+	logger *log.Logger
+
+	// HPKE (lazy enabled)
 	hpkeMgr *session.Manager
 	hpkeSrv *hpke.Server
+	hsrv    *sagehttp.HTTPServer // handshake adapter
+	hpkeMu  sync.Mutex           // lazy enable 락
+
 	mw      *server.DIDAuthMiddleware // a2autil.BuildDIDMiddleware 반환 타입
 	openMux *http.ServeMux            // /status
 	protMux *http.ServeMux            // /process (보호 경로)
@@ -62,101 +61,18 @@ type PaymentAgent struct {
 	httpSrv *http.Server
 }
 
-// NewPaymentAgent builds the agent. HPKE is enabled automatically if both
-// EXTERNAL_JWK_FILE and EXTERNAL_KEM_JWK_FILE are present in the environment.
-// Resolver is constructed from ETH_RPC_URL / SAGE_REGISTRY_V4_ADDRESS / SAGE_EXTERNAL_KEY.
-//
-// 한국어: HPKE는 관련 키 env가 모두 있으면 자동 활성화됨. 에러 없이 동작 불가 시 HPKE 비활성화로 구동.
+// NewPaymentAgent builds the agent.
+// HPKE는 부팅 시 env가 존재하면 즉시 켜고, 없어도 구동하며, 첫 HPKE 요청에서 lazy enable 한다.
 func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
-    agent := &PaymentAgent{
-        RequireSignature: requireSignature,
-        logger:           log.New(os.Stdout, "[payment] ", log.LstdFlags),
-    }
-
-	// HPKE bootstrap (optional). If env not ready, run without HPKE.
-	sigPath := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
-	kemPath := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
-	hpkeEnabled := sigPath != "" && kemPath != ""
-
-	if hpkeEnabled {
-		hpkeMgr := session.NewManager()
-		signKP, err := loadServerSigningKeyFromEnv()
-		if err != nil {
-			return nil, fmt.Errorf("hpke signing key: %w", err)
-		}
-		resolver, err := buildResolver()
-		if err != nil {
-			return nil, fmt.Errorf("hpke resolver: %w", err)
-		}
-		kemKP, err := loadServerKEMFromEnv()
-		if err != nil {
-			return nil, fmt.Errorf("hpke kem key: %w", err)
-		}
-
-		nameToDID, err := loadDIDsFromKeys("merged_agent_keys.json")
-		if err != nil {
-			return nil, fmt.Errorf("HPKE: load keys: %w", err)
-		}
-		serverDID := strings.TrimSpace(nameToDID["external"])
-		if serverDID == "" {
-			return nil, fmt.Errorf("HPKE: server DID not found for name 'external' in merged_agent_keys.json")
-		}
-
-		agent.hpkeMgr = hpkeMgr
-		agent.hpkeSrv = hpke.NewServer(
-			signKP,
-			hpkeMgr,
-			serverDID,
-			resolver,
-			&hpke.ServerOpts{KEM: kemKP},
-		)
-		agent.logger.Printf("[boot] payment HPKE enabled")
-	} else {
-		agent.logger.Printf("[boot] payment HPKE disabled (missing EXTERNAL_JWK_FILE or EXTERNAL_KEM_JWK_FILE)")
+	agent := &PaymentAgent{
+		RequireSignature: requireSignature,
+		logger:           log.New(os.Stdout, "[payment] ", log.LstdFlags),
 	}
 
-	// Handshake adapter: transport/http
-	var hsrv *sagehttp.HTTPServer
-	if agent.hpkeSrv != nil {
-		hsrv = sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
-			return agent.hpkeSrv.HandleMessage(ctx, msg)
-		})
-	}
-
-	// Application (data-mode) handler: identical echo behavior
-	appHandler := func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
-		var in types.AgentMessage
-		if err := json.Unmarshal(msg.Payload, &in); err != nil {
-			return &transport.Response{
-				Success:   false,
-				MessageID: msg.ID,
-				TaskID:    msg.TaskID,
-				Error:     fmt.Errorf("bad json: %w", err),
-			}, nil
-		}
-		out := types.AgentMessage{
-			ID:        in.ID + "-ok",
-			From:      "payment",
-			To:        in.From,
-			Type:      "response",
-			Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
-			Timestamp: time.Now(),
-		}
-		b, _ := json.Marshal(out)
-		return &transport.Response{
-			Success:   true,
-			MessageID: msg.ID,
-			TaskID:    msg.TaskID,
-			Data:      b,
-		}, nil
-	}
-
-	// DID middleware
-	// 정책 변경: RequireSignature=false(SAGE OFF)인 경우 미들웨어 자체를 사용하지 않음
-	//  - 과거에는 optional=true 로 통과시키되 검증 시도 → 'missing signature' 로그/401 가능성 존재
-	//  - 이제는 require=false면 완전히 우회하여 /process 가 항상 평문으로 통과
+	// ===== DID middleware =====
+	// RequireSignature=false(SAGE OFF)면 미들웨어 자체를 비활성화해서 평문 완전 허용
 	if agent.RequireSignature {
-		mw, err := a2autil.BuildDIDMiddleware(false) // optional=false → 서명 필수
+		mw, err := a2autil.BuildDIDMiddleware(true)
 		if err != nil {
 			agent.logger.Printf("[payment] DID middleware init failed: %v (running without verify)", err)
 			agent.mw = nil
@@ -169,7 +85,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 		agent.mw = nil
 	}
 
-	// Open mux: /status
+	// ===== Open mux: /status =====
 	open := http.NewServeMux()
 	open.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -177,12 +93,13 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			"name":         "payment",
 			"type":         "payment",
 			"sage_enabled": agent.RequireSignature,
+			"hpke_ready":   agent.hpkeSrv != nil,
 			"time":         time.Now().Format(time.RFC3339),
 		})
 	})
 	agent.openMux = open
 
-	// Protected mux: /process
+	// ===== Protected mux: /process =====
 	protected := http.NewServeMux()
 	protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -196,30 +113,32 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 
 		// HPKE path?
 		if isHPKE(r) {
-			if agent.hpkeSrv == nil || agent.hpkeMgr == nil {
+			// ⇩ lazy enable 시도 (env에 키가 있으면 즉시 켬)
+			if err := agent.ensureHPKE(); err != nil {
 				http.Error(w, "hpke disabled", http.StatusBadRequest)
 				return
 			}
+
 			kid := strings.TrimSpace(r.Header.Get("X-KID"))
 
-			// Handshake: no KID → pass to handshake adapter (expects SecureMessage JSON)
+			// --- Handshake (no KID) ---
 			if kid == "" {
-				if hsrv == nil {
+				if agent.hsrv == nil {
 					http.Error(w, "hpke handshake disabled", http.StatusBadRequest)
 					return
 				}
 				r.Body = io.NopCloser(bytes.NewReader(body))
-				hsrv.MessagesHandler().ServeHTTP(w, r)
+				agent.hsrv.MessagesHandler().ServeHTTP(w, r)
 				return
 			}
 
-			// Data-mode: decrypt, appHandler, re-encrypt
+			// --- Data mode (has KID) ---
 			sess, ok := agent.hpkeMgr.GetByKeyID(kid)
 			if !ok {
-				// unknown KID → maybe handshake payload; try adapter as fallback
-				if hsrv != nil {
+				// 혹시 핸드셰이크 JSON이 온 경우 어댑터로 재시도
+				if agent.hsrv != nil {
 					r.Body = io.NopCloser(bytes.NewReader(body))
-					hsrv.MessagesHandler().ServeHTTP(w, r)
+					agent.hsrv.MessagesHandler().ServeHTTP(w, r)
 					return
 				}
 				http.Error(w, "hpke session not found", http.StatusBadRequest)
@@ -239,7 +158,8 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 				Metadata:  map[string]string{"hpke": "true"},
 				Role:      "agent",
 			}
-			resp, _ := appHandler(r.Context(), sm)
+
+			resp, _ := agent.appHandler(r.Context(), sm)
 			if !resp.Success {
 				http.Error(w, "application error", http.StatusBadRequest)
 				return
@@ -258,7 +178,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			return
 		}
 
-		// Plain data-mode
+		// --- Plain data-mode ---
 		sm := &transport.SecureMessage{
 			ID:        mid,
 			ContextID: ctxID,
@@ -268,7 +188,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			Metadata:  map[string]string{"hpke": "false"},
 			Role:      "agent",
 		}
-		resp, _ := appHandler(r.Context(), sm)
+		resp, _ := agent.appHandler(r.Context(), sm)
 		if !resp.Success {
 			http.Error(w, "application error", http.StatusBadRequest)
 			return
@@ -279,7 +199,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	})
 	agent.protMux = protected
 
-	// Compose final handler: /status is open, others are wrapped by DID middleware
+	// ===== Compose final handler =====
 	var h http.Handler = open
 	if agent.mw != nil {
 		wrapped := agent.mw.Wrap(protected)
@@ -291,7 +211,6 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			wrapped.ServeHTTP(w, r)
 		})
 	} else {
-		// no middleware → expose both
 		root := http.NewServeMux()
 		root.Handle("/status", open)
 		root.Handle("/process", protected)
@@ -299,34 +218,26 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	}
 	agent.handler = h
 
+	// ===== Optional eager HPKE boot (env가 이미 준비돼있다면) =====
+	_ = agent.ensureHPKE() // 실패해도 그냥 평문 모드로 동작 계속
+
 	return agent, nil
 }
 
-// Handler returns the HTTP handler exposing /status and /process.
-//
-// 한국어: 사용자 정의 서버/라우터에 붙이고 싶다면 이 핸들러를 사용.
-func (e *PaymentAgent) Handler() http.Handler {
-	return e.handler
-}
+// 핸들러 반환
+func (e *PaymentAgent) Handler() http.Handler { return e.handler }
 
-// Start launches an http.Server at addr (e.g. ":19083").
-//
-// 한국어: 바로 서버 띄우고 싶을 때 사용. Shutdown으로 종료 가능.
+// 서버 실행
 func (e *PaymentAgent) Start(addr string) error {
 	if e.handler == nil {
 		return fmt.Errorf("handler not initialized")
 	}
-	e.httpSrv = &http.Server{
-		Addr:    addr,
-		Handler: e.handler,
-	}
-	e.logger.Printf("[boot] payment on %s (requireSig=%v)", addr, e.RequireSignature)
+	e.httpSrv = &http.Server{Addr: addr, Handler: e.handler}
+	e.logger.Printf("[boot] payment on %s (requireSig=%v, hpke_ready=%v)", addr, e.RequireSignature, e.hpkeSrv != nil)
 	return e.httpSrv.ListenAndServe()
 }
 
-// Shutdown gracefully stops the server.
-//
-// 한국어: Start로 실행한 서버를 종료.
+// 서버 종료
 func (e *PaymentAgent) Shutdown(ctx context.Context) error {
 	if e.httpSrv == nil {
 		return nil
@@ -334,7 +245,98 @@ func (e *PaymentAgent) Shutdown(ctx context.Context) error {
 	return e.httpSrv.Shutdown(ctx)
 }
 
-// -------- Internals (ported from cmd) --------
+// -------- Lazy HPKE enable --------
+
+// ensureHPKE: hpkeSrv/hsrv가 없으면 env에서 키/리졸버를 읽어 즉시 켠다.
+func (e *PaymentAgent) ensureHPKE() error {
+	e.hpkeMu.Lock()
+	defer e.hpkeMu.Unlock()
+
+	// 이미 준비됨
+	if e.hpkeSrv != nil && e.hpkeMgr != nil && e.hsrv != nil {
+		return nil
+	}
+
+	// env 키 경로 확인
+	sigPath := strings.TrimSpace(os.Getenv("EXTERNAL_JWK_FILE"))
+	kemPath := strings.TrimSpace(os.Getenv("EXTERNAL_KEM_JWK_FILE"))
+	if sigPath == "" || kemPath == "" {
+		e.logger.Printf("[boot] payment HPKE disabled (missing EXTERNAL_JWK_FILE or EXTERNAL_KEM_JWK_FILE)")
+		return fmt.Errorf("missing EXTERNAL_JWK_FILE or EXTERNAL_KEM_JWK_FILE")
+	}
+
+	// 키/리졸버 로드
+	hpkeMgr := session.NewManager()
+	signKP, err := loadServerSigningKeyFromEnv()
+	if err != nil {
+		return fmt.Errorf("hpke signing key: %w", err)
+	}
+	resolver, err := buildResolver()
+	if err != nil {
+		return fmt.Errorf("hpke resolver: %w", err)
+	}
+	kemKP, err := loadServerKEMFromEnv()
+	if err != nil {
+		return fmt.Errorf("hpke kem key: %w", err)
+	}
+
+	keysPath := firstNonEmpty(os.Getenv("HPKE_KEYS_FILE"), "merged_agent_keys.json")
+	nameToDID, err := loadDIDsFromKeys(keysPath)
+	if err != nil {
+		return fmt.Errorf("HPKE: load keys (%s): %w", keysPath, err)
+	}
+	serverDID := strings.TrimSpace(nameToDID["external"])
+	if serverDID == "" {
+		return fmt.Errorf("HPKE: server DID not found for name 'external' in %s", keysPath)
+	}
+
+	// 서버/핸드셰이크 어댑터 구성
+	e.hpkeMgr = hpkeMgr
+	e.hpkeSrv = hpke.NewServer(
+		signKP,
+		hpkeMgr,
+		serverDID,
+		resolver,
+		&hpke.ServerOpts{KEM: kemKP},
+	)
+	e.hsrv = sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
+		return e.hpkeSrv.HandleMessage(ctx, msg)
+	})
+
+	e.logger.Printf("[boot] payment HPKE enabled (lazy)")
+	return nil
+}
+
+// -------- Application handler (echo) --------
+
+func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
+	var in types.AgentMessage
+	if err := json.Unmarshal(msg.Payload, &in); err != nil {
+		return &transport.Response{
+			Success:   false,
+			MessageID: msg.ID,
+			TaskID:    msg.TaskID,
+			Error:     fmt.Errorf("bad json: %w", err),
+		}, nil
+	}
+	out := types.AgentMessage{
+		ID:        in.ID + "-ok",
+		From:      "payment",
+		To:        in.From,
+		Type:      "response",
+		Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
+		Timestamp: time.Now(),
+	}
+	b, _ := json.Marshal(out)
+	return &transport.Response{
+		Success:   true,
+		MessageID: msg.ID,
+		TaskID:    msg.TaskID,
+		Data:      b,
+	}, nil
+}
+
+// -------- Internals (ported & helpers) --------
 
 type agentKeyRow struct {
 	Name string `json:"name"`

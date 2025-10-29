@@ -45,6 +45,14 @@ import (
 
 // ---- RootAgent ----
 
+// ctx keys for per-request toggles
+type ctxKey string
+
+const (
+	ctxUseSAGEKey ctxKey = "useSAGE"
+	ctxHPKERawKey ctxKey = "hpkeRaw"
+)
+
 type RootAgent struct {
 	name string
 	port int
@@ -92,18 +100,18 @@ func NewRootAgent(name string, port int, p *planning.PlanningAgent, o *ordering.
 		"payment":  strings.TrimRight(envOr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "/"),
 	}
 
-    ra := &RootAgent{
-        name:        name,
-        port:        port,
-        mux:         mux,
-        planning:    p,
-        ordering:    o,
-        logger:      log.New(os.Stdout, "[root] ", log.LstdFlags),
-        httpClient:  http.DefaultClient,
-        a2a:         nil,
-        sageEnabled: envBool("ROOT_SAGE_ENABLED", true),
-        extBase:     ext,
-    }
+	ra := &RootAgent{
+		name:        name,
+		port:        port,
+		mux:         mux,
+		planning:    p,
+		ordering:    o,
+		logger:      log.New(os.Stdout, "[root] ", log.LstdFlags),
+		httpClient:  http.DefaultClient,
+		a2a:         nil,
+		sageEnabled: envBool("ROOT_SAGE_ENABLED", true),
+		extBase:     ext,
+	}
 	// Lazy init: signing & resolver will be initialized on first use
 
 	ra.mountRoutes()
@@ -122,7 +130,13 @@ func (r *RootAgent) Start() error {
 // Do implements the http Doer used by transports. When SAGE (signing) is enabled,
 // requests are signed via A2A client (RFC 9421). Otherwise plain http.Client is used.
 func (r *RootAgent) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	// Per-request override via context (defaults to global)
 	useSign := r.sageEnabled
+	if v := ctx.Value(ctxUseSAGEKey); v != nil {
+		if b, ok := v.(bool); ok {
+			useSign = b
+		}
+	}
 	if useSign {
 		if r.a2a == nil {
 			if err := r.initSigning(); err != nil {
@@ -258,8 +272,8 @@ func (r *RootAgent) EnableHPKE(ctx context.Context, target, keysFile string) err
 	if base == "" {
 		return fmt.Errorf("HPKE: external URL not configured for %q", target)
 	}
-    // Handshake uses HPKE; emit A2A headers not strictly required, keep minimal
-    t := prototx.NewA2ATransport(r, base, true, true)
+	// Handshake uses HPKE; emit A2A headers not strictly required, keep minimal
+	t := prototx.NewA2ATransport(r, base, true, true)
 
 	sMgr := session.NewManager()
 	cli := hpke.NewClient(t, r.resolver, r.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr)
@@ -418,15 +432,18 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 
 	body, _ := json.Marshal(msg)
 
-	// Per-request overrides from metadata
+	// Per-request overrides from HTTP headers (propagated via context)
 	useSAGE := r.sageEnabled
-	wantHPKE := r.IsHPKEEnabled(agent) // default to current session state
-	if msg.Metadata != nil {
-		if v, ok := msg.Metadata["sageEnabled"]; ok {
-			useSAGE = parseBoolLike(v, useSAGE)
+	if v := ctx.Value(ctxUseSAGEKey); v != nil {
+		if b, ok := v.(bool); ok {
+			useSAGE = b
 		}
-		if v, ok := msg.Metadata["hpkeEnabled"]; ok {
-			wantHPKE = parseBoolLike(v, false)
+	}
+	// Default HPKE to current session; override only if header explicitly present
+	wantHPKE := r.IsHPKEEnabled(agent)
+	if v := ctx.Value(ctxHPKERawKey); v != nil {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			wantHPKE = strings.EqualFold(strings.TrimSpace(s), "true")
 		}
 	}
 	// Policy: HPKE requires signing
@@ -466,10 +483,10 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 		r.logger.Printf("[root] HPKE disabled by request (plaintext) bytes=%d", len(body))
 	}
 
-    // Build transport (data mode) for the chosen agent
-    // When SAGE is OFF and HPKE is OFF, avoid emitting X-SAGE-* headers to keep plaintext truly unsigned.
-    emitHeaders := useSAGE || wantHPKE
-    tx := prototx.NewA2ATransport(r, base, false, emitHeaders)
+	// Build transport (data mode) for the chosen agent
+	// When SAGE is OFF and HPKE is OFF, avoid emitting X-SAGE-* headers to keep plaintext truly unsigned.
+	emitHeaders := useSAGE || wantHPKE
+	tx := prototx.NewA2ATransport(r, base, false, emitHeaders)
 	sm := &transport.SecureMessage{
 		ID:      uuid.NewString(),
 		Payload: body,
@@ -655,7 +672,33 @@ func (r *RootAgent) mountRoutes() {
 			return
 		}
 
-		outPtr, err := r.sendExternal(req.Context(), agent, &msg)
+		// Per-request toggles from headers
+		// - HPKE requires SAGE=true; if explicitly conflicting, return 400
+		sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
+		hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
+
+		if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
+			// HPKE를 명시적으로 켠 요청인데 SAGE가 명시적으로 꺼져 있다면 400
+			if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error":   "bad_request",
+					"message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
+				})
+				return
+			}
+		}
+
+		ctx := req.Context()
+		if sageRaw != "" {
+			ctx = context.WithValue(ctx, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
+		}
+		if hpkeRaw != "" {
+			ctx = context.WithValue(ctx, ctxHPKERawKey, hpkeRaw) // "true"/"false" 그대로 넘김
+		}
+
+		outPtr, err := r.sendExternal(ctx, agent, &msg)
 		if err != nil {
 			http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
 			return

@@ -17,13 +17,15 @@ import (
 // Frontend sends a single request per user action:
 //   - POST /api/request
 //   - Headers:
-//       X-SAGE-Enabled: true|false  (per-request A2A signature toggle)
-//       X-HPKE-Enabled: true|false  (per-request HPKE toggle; SAGE=false forces HPKE=false)
+//     X-SAGE-Enabled: true|false  (per-request A2A signature toggle)
+//     X-HPKE-Enabled: true|false  (per-request HPKE toggle; SAGE=false forces HPKE=false)
 //   - Body: {"prompt": "..."}
-// ClientAPI forwards the prompt to Root and passes SAGE/HPKE flags in message metadata.
+//
+// ClientAPI forwards the prompt to Root and passes SAGE/HPKE flags via headers only (no body metadata).
 // Root does in‑proc routing to sub‑agents (planning/ordering/payment).
 // NOTE: For backward compatibility, this API also hits Root /toggle-sage to reflect the header
-//       into the legacy global toggle; per‑request behavior is still driven by message metadata.
+//
+//	into the legacy global toggle; per‑request behavior is still driven by message metadata.
 type ClientAPI struct {
 	rootBase    string
 	paymentBase string // legacy; unused
@@ -58,65 +60,83 @@ func (g *ClientAPI) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-    // Per-request security toggles from frontend
-    sageEnabled := strings.EqualFold(r.Header.Get("X-SAGE-Enabled"), "true")
-    hpkeRaw := r.Header.Get("X-HPKE-Enabled")
-    hpkeEnabled := strings.EqualFold(hpkeRaw, "true")
-    scenario := r.Header.Get("X-Scenario")
+	// Per-request security toggles from frontend
+	sageEnabled := strings.EqualFold(r.Header.Get("X-SAGE-Enabled"), "true")
+	hpkeRaw := r.Header.Get("X-HPKE-Enabled")
+	hpkeEnabled := strings.EqualFold(hpkeRaw, "true")
+	scenario := r.Header.Get("X-Scenario")
 
-    // Read raw body once; we may need it for tolerant parsing and for replays.
-    rawIn, _ := io.ReadAll(r.Body)
-    _ = r.Body.Close()
+	// Read raw body once
+	rawIn, _ := io.ReadAll(r.Body)
+	_ = r.Body.Close()
 
 	var prompt string
 	if len(rawIn) > 0 {
-		// Try JSON first
 		var reqIn types.PromptRequest
-		if err := json.Unmarshal(rawIn, &reqIn); err == nil && reqIn.Prompt != "" {
+		if err := json.Unmarshal(rawIn, &reqIn); err == nil && strings.TrimSpace(reqIn.Prompt) != "" {
 			prompt = reqIn.Prompt
 		} else {
-			// Fallback: accept plain text payload as prompt
 			prompt = strings.TrimSpace(string(rawIn))
 		}
 	}
 
-    // Reject invalid combination early: HPKE requires SAGE=true (only when HPKE header is explicitly set)
-    if hpkeRaw != "" && hpkeEnabled && !sageEnabled {
-        w.Header().Set("Content-Type", "application/json")
-        w.WriteHeader(http.StatusBadRequest)
-        _ = json.NewEncoder(w).Encode(map[string]any{
-            "error":   "bad_request",
-            "message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
-        })
-        return
-    }
+	// Reject invalid combo only if HPKE header explicitly set
+	if hpkeRaw != "" && hpkeEnabled && !sageEnabled {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":   "bad_request",
+			"message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
+		})
+		return
+	}
 
-    // Legacy global switch for visibility/back-compat (per-request behavior is metadata-driven)
-    _ = g.toggleSAGE(r.Context(), g.rootBase+"/toggle-sage", sageEnabled)
+	// Legacy global switch (optional)
+	_ = g.toggleSAGE(r.Context(), g.rootBase+"/toggle-sage", sageEnabled)
 
-    // Build AgentMessage for Root. No domain -> Root routes.
-    meta := map[string]any{
-        "scenario":    scenario,
-        "sageEnabled": sageEnabled, // consumed by sub-agents for per-request signing
-    }
-    if hpkeRaw != "" { // only propagate if header explicitly present; otherwise allow server defaults
-        meta["hpkeEnabled"] = hpkeEnabled // consumed by payment for per-request HPKE
-    }
+	// Build AgentMessage → Root
+	meta := map[string]any{
+		"scenario":    scenario,
+		"sageEnabled": sageEnabled,
+	}
+	if hpkeRaw != "" {
+		meta["hpkeEnabled"] = hpkeEnabled
+	}
 
-    msg := types.AgentMessage{
-        ID:        "api-" + time.Now().Format("20060102T150405.000000000"),
-        From:      "client-api",
-        To:        "root",
-        Content:   prompt,
-        Timestamp: time.Now(),
-        Type:      "request",
-        Metadata:  meta,
-    }
+	msg := types.AgentMessage{
+		ID:        "api-" + time.Now().Format("20060102T150405.000000000"),
+		From:      "client-api",
+		To:        "root",
+		Content:   prompt,
+		Timestamp: time.Now(),
+		Type:      "request",
+		Metadata:  meta,
+	}
 	body, _ := json.Marshal(msg)
 
-	// Provide GetBody so any signer/middleware can safely re-read the payload.
+	// Proxy request to Root (/process)
 	reqOut, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, g.rootBase+"/process", bytes.NewReader(body))
 	reqOut.Header.Set("Content-Type", "application/json")
+
+	// **중요: per-request 토글 헤더를 Root로 그대로 전달**
+	if sageEnabled {
+		reqOut.Header.Set("X-SAGE-Enabled", "true")
+	} else {
+		reqOut.Header.Set("X-SAGE-Enabled", "false")
+	}
+	if hpkeRaw != "" {
+		// 명시된 경우에만 전달 (미명시 시 서버 기본/세션 유지)
+		if hpkeEnabled {
+			reqOut.Header.Set("X-HPKE-Enabled", "true")
+		} else {
+			reqOut.Header.Set("X-HPKE-Enabled", "false")
+		}
+	}
+	if scenario != "" {
+		reqOut.Header.Set("X-Scenario", scenario)
+	}
+
+	// Rewindable body (사인/미들웨어 대비)
 	reqOut.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
