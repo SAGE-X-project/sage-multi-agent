@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sage-x-project/sage-multi-agent/agents/ordering"
-	"github.com/sage-x-project/sage-multi-agent/agents/planning"
 	"github.com/sage-x-project/sage-multi-agent/agents/root"
 )
 
@@ -42,9 +40,9 @@ func getenvBool(key string, def bool) bool {
 }
 
 func main() {
-    // Distinct process prefix for clearer logs
-    log.SetFlags(log.LstdFlags)
-    log.SetPrefix("[root] ")
+	// Distinct process prefix for clearer logs
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("[root] ")
 	// ---- Root flags (env-backed defaults) ----
 	rootName := flag.String("name", getenvStr("ROOT_AGENT_NAME", "root"), "root agent name")
 	rootPort := flag.Int("port", getenvInt("ROOT_AGENT_PORT", 18080), "root agent port")
@@ -84,12 +82,8 @@ func main() {
 		_ = os.Setenv("ROOT_DID", *rootDID)
 	}
 
-	// ---- In-proc agents (fallback only; Root owns network crypto) ----
-	pl := planning.NewPlanningAgent("planning")
-	or := ordering.NewOrderingAgent("ordering")
-
 	// ---- Root ----
-	r := root.NewRootAgent(*rootName, *rootPort, pl, or)
+	r := root.NewRootAgent(*rootName, *rootPort)
 
 	// Optional: initialize HPKE sessions for targets at startup
 	if *hpke {

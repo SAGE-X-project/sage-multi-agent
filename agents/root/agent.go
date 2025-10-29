@@ -25,8 +25,6 @@ import (
 	"github.com/google/uuid"
 
 	// Sub agents (in-proc fallback for planning/ordering only)
-	"github.com/sage-x-project/sage-multi-agent/agents/ordering"
-	"github.com/sage-x-project/sage-multi-agent/agents/planning"
 
 	// A2A & transport
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
@@ -60,10 +58,6 @@ type RootAgent struct {
 	mux    *http.ServeMux
 	server *http.Server
 
-	// IN-PROC agents (fallback only; Root owns network crypto)
-	planning *planning.PlanningAgent
-	ordering *ordering.OrderingAgent
-
 	logger *log.Logger
 
 	// Outbound signing & HTTP
@@ -90,7 +84,7 @@ type hpkeState struct {
 
 // ---- Construction ----
 
-func NewRootAgent(name string, port int, p *planning.PlanningAgent, o *ordering.OrderingAgent) *RootAgent {
+func NewRootAgent(name string, port int) *RootAgent {
 	mux := http.NewServeMux()
 
 	// Resolve external URLs from env (defaults allow per-agent separation)
@@ -104,8 +98,6 @@ func NewRootAgent(name string, port int, p *planning.PlanningAgent, o *ordering.
 		name:        name,
 		port:        port,
 		mux:         mux,
-		planning:    p,
-		ordering:    o,
 		logger:      log.New(os.Stdout, "[root] ", log.LstdFlags),
 		httpClient:  http.DefaultClient,
 		a2a:         nil,
@@ -365,19 +357,19 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 			return "payment"
 		}
 	case containsAny(c, "order", "주문", "buy", "purchase", "product", "catalog"):
-		if r.ordering != nil || r.externalURLFor("ordering") != "" {
+		if r.externalURLFor("ordering") != "" {
 			return "ordering"
 		}
 	default:
-		if r.planning != nil || r.externalURLFor("planning") != "" {
+		if r.externalURLFor("planning") != "" {
 			return "planning"
 		}
 	}
 
-	if r.planning != nil || r.externalURLFor("planning") != "" {
+	if r.externalURLFor("planning") != "" {
 		return "planning"
 	}
-	if r.ordering != nil || r.externalURLFor("ordering") != "" {
+	if r.externalURLFor("ordering") != "" {
 		return "ordering"
 	}
 	if r.externalURLFor("payment") != "" {
@@ -404,69 +396,41 @@ func containsAny(s string, needles ...string) bool {
 // sendExternal signs (optionally HPKE-encrypts) and sends the message to the external
 // agent endpoint chosen by agent name. Falls back to in-proc agent for planning/ordering
 // if URL not configured. Payment has NO in-proc fallback.
-//
-// 한국어: 외부 URL이 없으면 planning/ordering만 로컬 fallback, payment는 반드시 외부로만 전송.
 func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.AgentMessage) (*types.AgentMessage, error) {
 	base := r.externalURLFor(agent)
 	if base == "" {
-		// Fallback to in-proc processing (planning/ordering only)
-		switch agent {
-		case "planning":
-			if r.planning == nil {
-				return nil, fmt.Errorf("no planning agent and no external URL")
-			}
-			out, err := r.planning.Process(ctx, *msg)
-			return &out, err
-		case "ordering":
-			if r.ordering == nil {
-				return nil, fmt.Errorf("no ordering agent and no external URL")
-			}
-			out, err := r.ordering.Process(ctx, *msg)
-			return &out, err
-		case "payment":
-			return nil, fmt.Errorf("payment requires external URL (no in-proc fallback)")
-		default:
-			return nil, fmt.Errorf("unknown agent: %s", agent)
-		}
+		return nil, fmt.Errorf("no external URL configured for agent=%s", agent)
 	}
 
 	body, _ := json.Marshal(msg)
 
-	// Per-request overrides from HTTP headers (propagated via context)
 	useSAGE := r.sageEnabled
 	if v := ctx.Value(ctxUseSAGEKey); v != nil {
 		if b, ok := v.(bool); ok {
 			useSAGE = b
 		}
 	}
-	// Default HPKE to current session; override only if header explicitly present
 	wantHPKE := r.IsHPKEEnabled(agent)
 	if v := ctx.Value(ctxHPKERawKey); v != nil {
 		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 			wantHPKE = strings.EqualFold(strings.TrimSpace(s), "true")
 		}
 	}
-	// Policy: HPKE requires signing
 	if !useSAGE {
 		wantHPKE = false
 	}
 
-	// Prepare A2A signing (lazy)
 	if useSAGE && r.a2a == nil {
 		if err := r.initSigning(); err != nil {
 			return nil, err
 		}
 	}
-
-	// Lazy HPKE init if requested
 	if wantHPKE && !r.IsHPKEEnabled(agent) {
-		keys := hpkeKeysPath()
-		if err := r.EnableHPKE(ctx, agent, keys); err != nil {
-			r.logger.Printf("[root] HPKE init failed (lazy) target=%s: %v", agent, err)
+		if err := r.EnableHPKE(ctx, agent, hpkeKeysPath()); err != nil {
+			r.logger.Printf("[root] HPKE init failed target=%s: %v", agent, err)
 		}
 	}
 
-	// Encrypt if HPKE session is active
 	var kid string
 	if wantHPKE {
 		if ct, k, used, err := r.encryptIfHPKE(agent, body); used {
@@ -483,18 +447,14 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 		r.logger.Printf("[root] HPKE disabled by request (plaintext) bytes=%d", len(body))
 	}
 
-	// Build transport (data mode) for the chosen agent
-	// When SAGE is OFF and HPKE is OFF, avoid emitting X-SAGE-* headers to keep plaintext truly unsigned.
 	emitHeaders := useSAGE || wantHPKE
 	tx := prototx.NewA2ATransport(r, base, false, emitHeaders)
 	sm := &transport.SecureMessage{
-		ID:      uuid.NewString(),
-		Payload: body,
-		DID:     string(r.myDID),
-		Metadata: map[string]string{
-			"ctype": "application/json",
-		},
-		Role: "agent",
+		ID:       uuid.NewString(),
+		Payload:  body,
+		DID:      string(r.myDID),
+		Metadata: map[string]string{"ctype": "application/json"},
+		Role:     "agent",
 	}
 	if kid != "" {
 		sm.Metadata["hpke_kid"] = kid
@@ -513,25 +473,16 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 			reason = "unknown upstream error"
 		}
 		return &types.AgentMessage{
-			ID:        msg.ID + "-exterr",
-			From:      "external-" + agent,
-			To:        msg.From,
-			Type:      "error",
-			Content:   "external error: " + reason,
-			Timestamp: time.Now(),
+			ID: msg.ID + "-exterr", From: "external-" + agent, To: msg.From,
+			Type: "error", Content: "external error: " + reason, Timestamp: time.Now(),
 		}, nil
 	}
 
-	// Decrypt HPKE response if used
 	if kid != "" {
 		if pt, _, derr := r.decryptIfHPKEResponse(agent, kid, resp.Data); derr != nil {
 			return &types.AgentMessage{
-				ID:        msg.ID + "-exterr",
-				From:      "external-" + agent,
-				To:        msg.From,
-				Type:      "error",
-				Content:   "external error: " + derr.Error(),
-				Timestamp: time.Now(),
+				ID: msg.ID + "-exterr", From: "external-" + agent, To: msg.From,
+				Type: "error", Content: "external error: " + derr.Error(), Timestamp: time.Now(),
 			}, nil
 		} else {
 			resp.Data = pt
@@ -541,12 +492,8 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 	var out types.AgentMessage
 	if err := json.Unmarshal(resp.Data, &out); err != nil {
 		out = types.AgentMessage{
-			ID:        msg.ID + "-ext",
-			From:      "external-" + agent,
-			To:        msg.From,
-			Type:      "response",
-			Content:   strings.TrimSpace(string(resp.Data)),
-			Timestamp: time.Now(),
+			ID: msg.ID + "-ext", From: "external-" + agent, To: msg.From,
+			Type: "response", Content: strings.TrimSpace(string(resp.Data)), Timestamp: time.Now(),
 		}
 	}
 	return &out, nil
@@ -562,10 +509,6 @@ func (r *RootAgent) mountRoutes() {
 			"name": r.name,
 			"type": "root",
 			"port": r.port,
-			"agents": map[string]any{
-				"planning": r.planning != nil,
-				"ordering": r.ordering != nil,
-			},
 			"ext": map[string]any{
 				"planning": r.externalURLFor("planning") != "",
 				"ordering": r.externalURLFor("ordering") != "",
@@ -598,11 +541,32 @@ func (r *RootAgent) mountRoutes() {
 	// SAGE status
 	r.mux.HandleFunc("/sage/status", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"root":     r.sageEnabled,
-			"planning": r.planning != nil,
-			"ordering": r.ordering != nil,
-		})
+
+		resp := map[string]any{
+			"root": r.sageEnabled, // global SAGE on/off at Root
+			"ext": map[string]bool{
+				"planning": r.externalURLFor("planning") != "",
+				"ordering": r.externalURLFor("ordering") != "",
+				"payment":  r.externalURLFor("payment") != "",
+			},
+			"hpke": map[string]any{
+				"planning": map[string]any{
+					"enabled": r.IsHPKEEnabled("planning"),
+					"kid":     r.CurrentHPKEKID("planning"),
+				},
+				"ordering": map[string]any{
+					"enabled": r.IsHPKEEnabled("ordering"),
+					"kid":     r.CurrentHPKEKID("ordering"),
+				},
+				"payment": map[string]any{
+					"enabled": r.IsHPKEEnabled("payment"),
+					"kid":     r.CurrentHPKEKID("payment"),
+				},
+			},
+			"time": time.Now().Format(time.RFC3339),
+		}
+
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	// HPKE runtime toggle at Root (per target)
