@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +77,41 @@ func delPayCtx(id string) {
 	payContextStore.mu.Lock()
 	defer payContextStore.mu.Unlock()
 	delete(payContextStore.m, id)
+}
+
+// 현재 결제 슬롯이 비어있는지 여부
+func payCtxNotEmpty(s paySlots) bool {
+	return strings.TrimSpace(s.Method) != "" ||
+		strings.TrimSpace(s.Shipping) != "" ||
+		strings.TrimSpace(s.Merchant) != "" ||
+		strings.TrimSpace(s.Item) != "" ||
+		strings.TrimSpace(s.Model) != "" ||
+		strings.TrimSpace(s.To) != "" ||
+		strings.TrimSpace(s.Recipient) != "" ||
+		s.AmountKRW > 0 || s.BudgetKRW > 0
+}
+
+// stage 이름만 추출 (getStageToken이 (stage, token) 반환하므로 보조로 둠)
+func getStageName(id string) string {
+	stage, _ := getStageToken(id)
+	return stage
+}
+
+// sticky payment: (1) 슬롯이 일부라도 채워졌거나 (2) stage가 collect/await_confirm 이면
+// 사용자가 "의료/플래닝"을 강하게 말하지 않는 한 payment로 고정
+func shouldForcePayment(cid, userText string) bool {
+	s := getPayCtx(cid)
+	stage, _ := getStageToken(cid)
+
+	if payCtxNotEmpty(s) || stage == "collect" || stage == "await_confirm" {
+		low := strings.ToLower(strings.TrimSpace(userText))
+		// 아래 두 함수는 이미 프로젝트에 있을 가능성이 큼.
+		// 없다면 간단한 휴리스틱으로 만들어도 됨.
+		if !isMedicalActionIntent(low) && !isPlanningActionIntent(low) {
+			return true
+		}
+	}
+	return false
 }
 
 // ==== Medical minimal context (per conversation) ====
@@ -267,4 +303,70 @@ func (r *RootAgent) askForCondAndSymptomsLLM(ctx context.Context, lang, userText
 		o = strings.TrimSpace(o[:i])
 	}
 	return o
+}
+
+var amountRe = regexp.MustCompile(`(?i)(\d[\d,\.]*)\s*(원|krw|만원|usd|usdc|eth|btc)`)
+
+func isPaymentActionIntent(c string) bool {
+	// 질문투면 라우팅 보류(강한 지시어 있으면 허용)
+	if isQuestionLike(c) && !isOrderish(c) && !containsAny(c, "보내", "송금", "이체", "지불해", "pay", "send", "transfer") {
+		return false
+	}
+	if isOrderish(c) || containsAny(c, "보내", "송금", "이체", "결제해", "지불해", "pay", "send", "transfer") {
+		return true
+	}
+	// 슬롯 힌트 2개 이상이면 결제 의도
+	hits := 0
+	if amountRe.FindStringIndex(c) != nil {
+		hits++
+	}
+	if hasMethodCue(c) {
+		hits++
+	}
+	if hasRecipientCue(c) {
+		hits++
+	}
+	return hits >= 2
+}
+
+func isMedicalActionIntent(c string) bool {
+	c = strings.ToLower(strings.TrimSpace(c))
+
+	// 대표 질환/영역
+	if containsAny(c,
+		"당뇨", "혈당", "고혈당", "저혈당", "당화혈색소", "insulin", "metformin",
+		"정신", "우울", "불안", "조현", "bipolar", "adhd", "치매", "수면",
+		"우울증", "공황", "강박", "ptsd",
+		"hypertension", "고혈압", "고지혈", "cholesterol",
+	) {
+		return true
+	}
+
+	// 의료정보 톤
+	if containsAny(c,
+		"증상", "원인", "치료", "약", "복용", "부작용", "관리", "생활습관",
+		"가이드라인", "권고안", "주의사항", "금기", "진단", "검사",
+		"symptom", "treatment", "side effect", "guideline", "diagnosis",
+	) && containsAny(c, "알려줘", "설명", "정보", "방법", "how", "what", "guide") {
+		return true
+	}
+	if containsAny(c, "증상", "지속", "어지럽", "두통", "통증", "메스꺼움", "구토", "발열", "기침", "호흡곤란", "피곤",
+		"dizzy", "headache", "pain", "nausea", "vomit", "fever", "cough", "shortness of breath", "fatigue") {
+		return true
+	}
+	// "~~ 먹어도 돼?" 같은 질문
+	if containsAny(c, "먹어도 돼", "괜찮아", "해도 돼", "해도돼", "임신", "모유", "술", "운동") &&
+		containsAny(c, "약", "복용", "병", "질환", "증상") {
+		return true
+	}
+
+	return false
+}
+
+func isPlanningActionIntent(c string) bool {
+	if containsAny(c, "계획해", "플랜 짜줘", "일정 짜줘", "plan", "schedule", "스케줄 만들어", "할일 정리") {
+		return true
+	}
+	// '계획/일정' 키워드가 있고 질문투가 아니면 라우팅
+	return containsAny(c, "계획", "일정", "플랜", "todo") && !isQuestionLike(c)
 }

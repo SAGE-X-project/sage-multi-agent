@@ -16,7 +16,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,7 +369,7 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 	if isPaymentActionIntent(c) {
 		return "payment"
 	}
-	if isMedicalInfoIntent(c) {
+	if isMedicalActionIntent(c) {
 		return "medical"
 	}
 	if isPlanningActionIntent(c) {
@@ -722,14 +721,12 @@ func (r *RootAgent) mountRoutes() {
 		defer req.Body.Close()
 		lang := pickLang(req, &msg)
 		cid := convIDFrom(req, &msg)
-		forcePayment := false
-		if stage, _ := getStageToken(cid); stage == "await_confirm" {
-			forcePayment = true
-		}
+
+		forcePayment := shouldForcePayment(cid, msg.Content)
+
 		forceMedical := false
 		if hasMedCtx(cid) {
 			st := getMedCtx(cid)
-			// 증상/질환 대기 중이거나, 이미 하나라도 채워졌으면 medical 우선
 			if strings.TrimSpace(st.Await) != "" ||
 				strings.TrimSpace(st.Slots.Condition) != "" ||
 				strings.TrimSpace(st.Symptoms) != "" {
@@ -739,8 +736,6 @@ func (r *RootAgent) mountRoutes() {
 				}
 			}
 		}
-		// -------- Router: rules -> (optional) LLM router (controlled by ROOT_INTENT_MODE) --------
-		// ROOT_INTENT_MODE: "rules" | "hybrid"(default) | "llm"
 		agent := ""
 		if forcePayment {
 			agent = "payment"
@@ -764,7 +759,6 @@ func (r *RootAgent) mountRoutes() {
 				}
 			}
 		}
-
 		// -------- CHAT MODE: no routing; answer with LLM directly --------
 		if agent == "" && !forcePayment {
 			r.ensureLLM()
@@ -1632,72 +1626,6 @@ func (r *RootAgent) llmPlanningAnswer(ctx context.Context, lang string, userText
 }
 
 // ---- intent & cues ----
-
-var amountRe = regexp.MustCompile(`(?i)(\d[\d,\.]*)\s*(원|krw|만원|usd|usdc|eth|btc)`)
-
-func isPaymentActionIntent(c string) bool {
-	// 질문투면 라우팅 보류(강한 지시어 있으면 허용)
-	if isQuestionLike(c) && !isOrderish(c) && !containsAny(c, "보내", "송금", "이체", "지불해", "pay", "send", "transfer") {
-		return false
-	}
-	if isOrderish(c) || containsAny(c, "보내", "송금", "이체", "결제해", "지불해", "pay", "send", "transfer") {
-		return true
-	}
-	// 슬롯 힌트 2개 이상이면 결제 의도
-	hits := 0
-	if amountRe.FindStringIndex(c) != nil {
-		hits++
-	}
-	if hasMethodCue(c) {
-		hits++
-	}
-	if hasRecipientCue(c) {
-		hits++
-	}
-	return hits >= 2
-}
-
-func isMedicalInfoIntent(c string) bool {
-	c = strings.ToLower(strings.TrimSpace(c))
-
-	// 대표 질환/영역
-	if containsAny(c,
-		"당뇨", "혈당", "고혈당", "저혈당", "당화혈색소", "insulin", "metformin",
-		"정신", "우울", "불안", "조현", "bipolar", "adhd", "치매", "수면",
-		"우울증", "공황", "강박", "ptsd",
-		"hypertension", "고혈압", "고지혈", "cholesterol",
-	) {
-		return true
-	}
-
-	// 의료정보 톤
-	if containsAny(c,
-		"증상", "원인", "치료", "약", "복용", "부작용", "관리", "생활습관",
-		"가이드라인", "권고안", "주의사항", "금기", "진단", "검사",
-		"symptom", "treatment", "side effect", "guideline", "diagnosis",
-	) && containsAny(c, "알려줘", "설명", "정보", "방법", "how", "what", "guide") {
-		return true
-	}
-	if containsAny(c, "증상", "지속", "어지럽", "두통", "통증", "메스꺼움", "구토", "발열", "기침", "호흡곤란", "피곤",
-		"dizzy", "headache", "pain", "nausea", "vomit", "fever", "cough", "shortness of breath", "fatigue") {
-		return true
-	}
-	// "~~ 먹어도 돼?" 같은 질문
-	if containsAny(c, "먹어도 돼", "괜찮아", "해도 돼", "해도돼", "임신", "모유", "술", "운동") &&
-		containsAny(c, "약", "복용", "병", "질환", "증상") {
-		return true
-	}
-
-	return false
-}
-
-func isPlanningActionIntent(c string) bool {
-	if containsAny(c, "계획해", "플랜 짜줘", "일정 짜줘", "plan", "schedule", "스케줄 만들어", "할일 정리") {
-		return true
-	}
-	// '계획/일정' 키워드가 있고 질문투가 아니면 라우팅
-	return containsAny(c, "계획", "일정", "플랜", "todo") && !isQuestionLike(c)
-}
 
 // helper cues
 

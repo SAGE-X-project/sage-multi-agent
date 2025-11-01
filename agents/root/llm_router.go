@@ -25,7 +25,7 @@ func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) 
 	if isPaymentActionIntent(low) {
 		return routeOut{Domain: "payment", Lang: llm.DetectLang(text)}, true
 	}
-	if isMedicalInfoIntent(low) {
+	if isMedicalActionIntent(low) {
 		return routeOut{Domain: "medical", Lang: llm.DetectLang(text)}, true
 	}
 	if isPlanningActionIntent(low) {
