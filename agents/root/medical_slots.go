@@ -11,25 +11,14 @@ import (
 
 // Unified medical slots (single source of truth).
 type medicalSlots struct {
-	// 필수 축(의도)
-	Condition string `json:"condition"`       // 예: "당뇨병", "고혈압", "우울증"
-	Topic     string `json:"topic,omitempty"` // 예: "관리", "식단", "운동", "증상", "검사/진단", "약물/복용", "부작용", "예방"
-
-	// 증상 관련 (인테이크 경로)
-	Symptoms string `json:"symptoms,omitempty"` // 사용자가 겪는 증상(자유 기술)
-	Severity string `json:"severity,omitempty"` // 예: "경미함/보통/심함", NRS 0-10 등 자유 표기
-	Duration string `json:"duration,omitempty"` // 예: "2주", "한 달째", "어제부터"
-
-	// 인구통계/상황
-	Age string `json:"age,omitempty"` // 자유 형식(숫자/문자 모두 허용: "34", "만 5세")
-	Sex string `json:"sex,omitempty"` // 예: "남", "여", "male", "female", "기타"
-	// Audience는 "본인/가족/임산부/아동/노인" 같은 대상 기술(의도 분류용)
-	Audience string `json:"audience,omitempty"`
-
-	// 복용/과거력
-	Medications string `json:"medications,omitempty"` // 복용 약물(자유 기술)
-	Allergies   string `json:"allergies,omitempty"`   // 알레르기(자유 기술)
-	Conditions  string `json:"conditions,omitempty"`  // 과거/기저질환(자유 기술)
+	Condition   string `json:"condition"`          // ex. 당뇨병
+	Topic       string `json:"topic"`              // ex. 증상/관리/식단/운동/검사/치료/예방/약물/부작용/일반지식
+	Audience    string `json:"audience,omitempty"` // ex. 본인/가족/임산부/아동/노인
+	Duration    string `json:"duration,omitempty"` // ex. 2주, 어제부터
+	Age         string `json:"age,omitempty"`
+	Medications string `json:"medications,omitempty"` // 복용 중 약
+	// LLM 추출 전용(컨텍스트에 별도 보관): 아래 Symptoms는 medCtx.Symptoms 로 거울처럼 옮겨담는다.
+	Symptoms string `json:"symptoms,omitempty"`
 }
 
 // 메타데이터 우선 + 가벼운 본문 힌트 + JSON 폴백.
@@ -142,23 +131,4 @@ func fillMsgMetaFromMedical(msg *types.AgentMessage, s medicalSlots, lang string
 		msg.Metadata["medical.meds"] = s.Medications
 	}
 	msg.Metadata["lang"] = lang
-}
-
-func isInfoTopic(s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return false
-	}
-	// 한/영 둘 다 허용
-	lower := strings.ToLower(s)
-	switch lower {
-	// 한국어
-	case "관리", "관리법", "식단", "운동", "약물", "복용", "검사", "진단", "치료", "예방", "생활", "생활습관", "정보", "일반지식":
-		return true
-	// 영어
-	case "management", "diet", "exercise", "medication", "screening", "diagnosis", "treatment", "prevention", "lifestyle", "info", "general":
-		return true
-	default:
-		return false
-	}
 }

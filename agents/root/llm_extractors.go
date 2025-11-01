@@ -145,32 +145,24 @@ func (r *RootAgent) llmExtractMedical(ctx context.Context, lang, text string) (m
 	}
 
 	sys := map[string]string{
-		"ko": `너는 의료 의도 추출기야. 아래 JSON "하나"만 출력해.
+		"ko": `너는 의료 의도/인테이크 추출기야. 아래 JSON "하나"만 출력해.
 {
   "fields": {
     "condition": "",   // 질환명(예: 당뇨병, 우울증 등)
-    "symptoms": "",    // 사용자가 기술한 개인 증상(자유서술)
-    "topic": "",       // 예: 증상, 검사/진단, 약물/복용, 부작용, 식단, 운동, 관리
+    "topic": "",       // 예: 증상, 검사/진단, 약물/복용, 부작용, 식단, 운동, 관리, 예방
     "audience": "",    // 예: 본인, 가족, 임산부, 아동, 노인
     "duration": "",    // 예: 2주, 어제부터
     "age": "",         // 선택
-    "medications": ""  // 선택
+    "medications": "", // 선택
+    "symptoms": ""     // ★ 자유 텍스트 증상(있으면 최대 한두 문장)
   },
-  "missing": [],       // 최소: condition, topic (없으면 포함)
+  "missing": [],       // 최소: condition, topic 또는 symptoms
   "ask": ""            // 누락 항목을 한 번에 물어보는 한국어 한 문장
 }
 설명/코드블록/리스트 금지. JSON만.`,
-		"en": `Extract medical intent. Output ONE JSON only:
-{
-  "fields":{
-    "condition":"","symptoms":"",
-    "topic":"","audience":"",
-    "duration":"","age":"","medications":""
-  },
-  "missing":[],
-  "ask":""
-}
-Minimum required: condition, topic. "ask" is ONE sentence to request all missing items. No code fences, no lists.`,
+		"en": `Extract medical intent/intake. Output ONE JSON only:
+{"fields":{"condition":"","topic":"","audience":"","duration":"","age":"","medications":"","symptoms":""},"missing":[],"ask":""}
+If informational query (diet/exercise/management), "topic" should reflect that. Ask is ONE sentence.`,
 	}[langOrDefault(lang)]
 
 	out, err := r.llmClient.Chat(ctx, sys, strings.TrimSpace(text))
@@ -178,10 +170,9 @@ Minimum required: condition, topic. "ask" is ONE sentence to request all missing
 		return zero, false
 	}
 
-	raw := routerJSONRe.FindString(out)
+	raw := routerJSONRe.FindString(out) // 당신이 쓰던 JSON 추출 정규식
 	if raw == "" {
-		// JSON 탐지 실패 시 전체를 시도 (LLM이 JSON만 돌려준 경우)
-		raw = strings.TrimSpace(out)
+		return zero, false
 	}
 
 	var xo medicalXO
@@ -191,20 +182,21 @@ Minimum required: condition, topic. "ask" is ONE sentence to request all missing
 
 	trim := func(s string) string { return strings.TrimSpace(s) }
 	xo.Fields.Condition = trim(xo.Fields.Condition)
-	xo.Fields.Symptoms = trim(xo.Fields.Symptoms) // ★ 추가
 	xo.Fields.Topic = trim(xo.Fields.Topic)
 	xo.Fields.Audience = trim(xo.Fields.Audience)
 	xo.Fields.Duration = trim(xo.Fields.Duration)
 	xo.Fields.Age = trim(xo.Fields.Age)
 	xo.Fields.Medications = trim(xo.Fields.Medications)
+	xo.Fields.Symptoms = trim(xo.Fields.Symptoms)
 
-	// 최소 요건 보정 + ask 자동 생성
+	// missing 보정(LLM이 비워도 최소 요건 보장)
 	if len(xo.Missing) == 0 {
 		if xo.Fields.Condition == "" {
 			xo.Missing = append(xo.Missing, "condition(질환)")
 		}
-		if xo.Fields.Topic == "" {
-			xo.Missing = append(xo.Missing, "topic(주제)")
+		if xo.Fields.Symptoms == "" && xo.Fields.Topic == "" {
+			// 증상도 토픽도 없으면 증상 요청
+			xo.Missing = append(xo.Missing, "symptoms(개인 증상)")
 		}
 	}
 	if xo.Ask == "" && len(xo.Missing) > 0 {

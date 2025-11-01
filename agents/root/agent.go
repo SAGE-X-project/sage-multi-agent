@@ -727,12 +727,12 @@ func (r *RootAgent) mountRoutes() {
 			forcePayment = true
 		}
 		forceMedical := false
-		if st := getMedCtx(cid); st != (medCtx{}) {
+		if hasMedCtx(cid) {
+			st := getMedCtx(cid)
 			// 증상/질환 대기 중이거나, 이미 하나라도 채워졌으면 medical 우선
 			if strings.TrimSpace(st.Await) != "" ||
-				strings.TrimSpace(st.Condition) != "" ||
+				strings.TrimSpace(st.Slots.Condition) != "" ||
 				strings.TrimSpace(st.Symptoms) != "" {
-				// 단, 결제/플래닝 강한 의도면 예외
 				c := strings.ToLower(strings.TrimSpace(msg.Content))
 				if !isPaymentActionIntent(c) && !isPlanningActionIntent(c) {
 					forceMedical = true
@@ -1090,191 +1090,210 @@ func (r *RootAgent) mountRoutes() {
 		case "medical":
 			lang := pickLang(req, &msg)
 			cid := convIDFrom(req, &msg)
+
 			r.logger.Printf("[root][medical][enter] cid=%s lang=%s text=%q", cid, lang, strings.TrimSpace(msg.Content))
 
-			// 현재 컨텍스트 + 이번 턴의 규칙기반 추출
+			// 컨텍스트 로드 & 히스토리 누적
 			st := getMedCtx(cid)
+			utter := strings.TrimSpace(msg.Content)
+			if utter != "" {
+				st.Transcript = append(st.Transcript, utter)
+			}
+			if st.FirstQ == "" && utter != "" {
+				st.FirstQ = utter
+			}
+
+			// 1) 로컬 키워드 추출 병합
 			cur := extractMedicalCore(&msg)
 
-			// Await 힌트 보정
-			if st.Await == "symptoms" && strings.TrimSpace(cur.Symptoms) == "" && strings.TrimSpace(msg.Content) != "" {
-				cur.Symptoms = strings.TrimSpace(msg.Content)
+			// Await 힌트: 지난 턴에 "증상/질환"을 부탁했다면 이번 입력을 그대로 수용
+			if st.Await == "symptoms" && strings.TrimSpace(cur.Symptoms) == "" && utter != "" {
+				cur.Symptoms = utter
 			}
-			if st.Await == "condition" && strings.TrimSpace(cur.Condition) == "" && strings.TrimSpace(msg.Content) != "" {
-				cur.Condition = strings.TrimSpace(msg.Content)
+			if st.Await == "condition" && strings.TrimSpace(cur.Slots.Condition) == "" && utter != "" {
+				cur.Slots.Condition = utter
 			}
 
 			st = mergeMedCtx(st, cur)
 			putMedCtx(cid, st)
-			r.logger.Printf("[root][medical][merge] cid=%s cond=%q symptoms.len=%d", cid, st.Condition, len(strings.TrimSpace(st.Symptoms)))
+			r.logger.Printf("[root][medical][merge] cid=%s cond=%q symptoms.len=%d",
+				cid, st.Slots.Condition, len(strings.TrimSpace(st.Symptoms)))
 
-			// -------- LLM 추출 보강 --------
-			var ask string
-			if xo, ok := r.llmExtractMedical(req.Context(), lang, strings.TrimSpace(msg.Content)); ok {
-				// 1) 비어있는 칸만 LLM 값으로 채움
-				if strings.TrimSpace(st.Condition) == "" && strings.TrimSpace(xo.Fields.Condition) != "" {
-					st.Condition = strings.TrimSpace(xo.Fields.Condition)
-				}
-				if strings.TrimSpace(st.Symptoms) == "" && strings.TrimSpace(xo.Fields.Symptoms) != "" {
-					st.Symptoms = strings.TrimSpace(xo.Fields.Symptoms)
-				}
-				if strings.TrimSpace(st.Duration) == "" && strings.TrimSpace(xo.Fields.Duration) != "" {
-					st.Duration = strings.TrimSpace(xo.Fields.Duration)
-				}
-				if strings.TrimSpace(st.Age) == "" && strings.TrimSpace(xo.Fields.Age) != "" {
-					st.Age = strings.TrimSpace(xo.Fields.Age)
-				}
-				if strings.TrimSpace(st.Medications) == "" && strings.TrimSpace(xo.Fields.Medications) != "" {
-					st.Medications = strings.TrimSpace(xo.Fields.Medications)
-				}
+			// 2) LLM 추출로 보강
+			var xo medicalXO
+			if got, ok := r.llmExtractMedical(req.Context(), lang, utter); ok {
+				xo = got
+
+				// LLM 결과를 비어있는 칸에만 채움 (symptoms는 별도)
+				st = mergeMedCtx(st, medCtx{
+					Slots: medicalSlots{
+						Condition:   xo.Fields.Condition,
+						Topic:       xo.Fields.Topic,
+						Audience:    xo.Fields.Audience,
+						Duration:    xo.Fields.Duration,
+						Age:         xo.Fields.Age,
+						Medications: xo.Fields.Medications,
+						Symptoms:    xo.Fields.Symptoms, // LLM이 준 증상 텍스트(있다면)
+					},
+				})
 				putMedCtx(cid, st)
 
-				// 2) 정보성 토픽이면 증상 수집 없이 바로 외부 medical 포워딩
-				if strings.TrimSpace(st.Condition) != "" && strings.TrimSpace(st.Symptoms) != "" && isInfoTopic(strings.TrimSpace(xo.Fields.Topic)) {
-					if msg.Metadata == nil {
-						msg.Metadata = map[string]any{}
-					}
-					msg.Metadata["lang"] = lang
-					msg.Metadata["medical.condition"] = strings.TrimSpace(st.Condition)
-					msg.Metadata["medical.topic"] = strings.TrimSpace(xo.Fields.Topic)
-					if st.Symptoms != "" {
-						msg.Metadata["medical.symptoms"] = strings.TrimSpace(st.Symptoms)
-					}
-					if st.Duration != "" {
-						msg.Metadata["medical.duration"] = strings.TrimSpace(st.Duration)
-					}
-					if st.Medications != "" {
-						msg.Metadata["medical.meds"] = strings.TrimSpace(st.Medications)
-					}
-					msg.Metadata["medical.question"] = strings.TrimSpace(msg.Content)
-
-					if r.externalURLFor("medical") == "" {
-						r.logger.Printf("[root][medical][error-no-external] cid=%s: MEDICAL_URL not configured", cid)
-						http.Error(w, "medical external not configured", http.StatusServiceUnavailable)
-						return
-					}
-
-					sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
-					hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
-					r.logger.Printf("[root][medical][send] headers SAGE=%q HPKE=%q (info-topic fast path)", sageRaw, hpkeRaw)
-
-					if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
-						if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
-							w.Header().Set("Content-Type", "application/json")
-							w.WriteHeader(http.StatusBadRequest)
-							_ = json.NewEncoder(w).Encode(map[string]any{
-								"error":   "bad_request",
-								"message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
-							})
-							return
-						}
-					}
-
-					ctx2 := req.Context()
-					if sageRaw != "" {
-						ctx2 = context.WithValue(ctx2, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
-					}
-					if hpkeRaw != "" {
-						ctx2 = context.WithValue(ctx2, ctxHPKERawKey, hpkeRaw)
-					}
-
-					outPtr, err := r.sendExternal(ctx2, "medical", &msg)
-					if err != nil {
-						r.logger.Printf("[root][medical][forward][err] cid=%s: %v", cid, err)
-						http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
-						return
-					}
-					out := *outPtr
-					r.logger.Printf("[root][medical][forward] cid=%s -> external ok (info-topic fast path)", cid)
-
-					st.Await = ""
-					putMedCtx(cid, st)
-
-					status := http.StatusOK
-					if code, ok := httpStatusFromAgent(&out); ok {
-						status = code
-					}
-					w.Header().Set("Content-Type", "application/json")
-					if status/100 == 2 {
-						w.Header().Set("X-SAGE-Verified", "true")
-						w.Header().Set("X-SAGE-Signature-Valid", "true")
-					} else {
-						w.Header().Set("X-SAGE-Verified", "false")
-						w.Header().Set("X-SAGE-Signature-Valid", "false")
-					}
-					w.WriteHeader(status)
-					_ = json.NewEncoder(w).Encode(out)
-					return
-				}
-
-				// 3) 인테이크 경로: LLM이 ask를 줬다면 우선 사용
-				if len(xo.Missing) > 0 && strings.TrimSpace(xo.Ask) != "" {
-					ask = strings.TrimSpace(xo.Ask) // <<< llmAsk가 아니라 ask로!
-				}
+				r.logger.Printf("[root][medical][llm-xo] cid=%s cond=%q topic=%q symptoms.len=%d missing=%v ask=%q",
+					cid, st.Slots.Condition, st.Slots.Topic, len(strings.TrimSpace(st.Symptoms)), xo.Missing, xo.Ask)
 			}
 
-			// 4) 증상과 질환이 모두 있으면 포워딩 (기존 로직)
-			if strings.TrimSpace(st.Condition) != "" && strings.TrimSpace(st.Symptoms) != "" {
+			// 3) 포워딩 조건 (fast-path 금지: 반드시 '질환+증상' 채워진 뒤 진행)
+			if strings.TrimSpace(st.Slots.Condition) != "" && strings.TrimSpace(st.Symptoms) != "" {
+				// 메타데이터 구성 (히스토리 포함)
 				if msg.Metadata == nil {
 					msg.Metadata = map[string]any{}
 				}
 				msg.Metadata["lang"] = lang
-				msg.Metadata["medical.condition"] = strings.TrimSpace(st.Condition)
-				msg.Metadata["medical.symptoms"] = strings.TrimSpace(st.Symptoms)
-				msg.Metadata["medical.question"] = strings.TrimSpace(msg.Content)
-				if st.Duration != "" {
-					msg.Metadata["medical.duration"] = strings.TrimSpace(st.Duration)
+				msg.Metadata["medical.condition"] = strings.TrimSpace(st.Slots.Condition)
+				if v := strings.TrimSpace(st.Slots.Topic); v != "" {
+					msg.Metadata["medical.topic"] = v
 				}
-				if st.Medications != "" {
-					msg.Metadata["medical.meds"] = strings.TrimSpace(st.Medications)
+				if v := strings.TrimSpace(st.Symptoms); v != "" {
+					msg.Metadata["medical.symptoms"] = v
+				}
+				if v := strings.TrimSpace(st.Slots.Duration); v != "" {
+					msg.Metadata["medical.duration"] = v
+				}
+				if v := strings.TrimSpace(st.Slots.Medications); v != "" {
+					msg.Metadata["medical.meds"] = v
+				}
+				if v := strings.TrimSpace(st.Slots.Age); v != "" {
+					msg.Metadata["medical.age"] = v
+				}
+				if v := strings.TrimSpace(st.FirstQ); v != "" {
+					msg.Metadata["medical.initial_question"] = v
+				}
+				msg.Metadata["medical.last_message"] = utter
+				if len(st.Transcript) > 0 {
+					msg.Metadata["medical.history"] = st.Transcript
+					msg.Metadata["medical.history_len"] = len(st.Transcript)
 				}
 
-				// ... (이하 기존 포워딩 코드 동일)
-				// r.sendExternal(...) 후 응답 반환
-				// (여기 내용은 위 fast-path와 동일하므로 생략)
-			}
+				if r.externalURLFor("medical") == "" {
+					r.logger.Printf("[root][medical][error-no-external] cid=%s: MEDICAL_URL not configured", cid)
+					http.Error(w, "medical external not configured", http.StatusServiceUnavailable)
+					return
+				}
 
-			// 5) 부족하면 한 가지만 재질문 (증상 우선)
-			missing := medicalMissing(st)
-			if ask == "" { // LLM이 안 줬으면 폴백 생성
-				switch {
-				case strings.TrimSpace(st.Symptoms) == "" && strings.TrimSpace(st.Condition) == "":
-					ask = r.askForCondAndSymptomsLLM(req.Context(), lang, msg.Content)
-					st.Await = "symptoms"
-				case strings.TrimSpace(st.Symptoms) == "":
-					ask = r.askForSymptomsLLM(req.Context(), lang, st.Condition, msg.Content)
-					st.Await = "symptoms"
-				case strings.TrimSpace(st.Condition) == "":
-					if langOrDefault(lang) == "ko" {
-						ask = "어떤 질병/상태에 대한 상담인지 알려주세요. (예: 당뇨병, 고혈압, 천식 등)"
-					} else {
-						ask = "Which condition is this about? (e.g., diabetes, hypertension, asthma)"
+				// SAGE/HPKE 헤더 처리
+				sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
+				hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
+				r.logger.Printf("[root][medical][send] headers SAGE=%q HPKE=%q (forward)", sageRaw, hpkeRaw)
+
+				if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
+					if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error":   "bad_request",
+							"message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
+						})
+						return
 					}
-					st.Await = "condition"
 				}
-			}
-			putMedCtx(cid, st)
 
-			clar := types.AgentMessage{
-				ID:        msg.ID + "-needinfo",
-				ContextID: cid,
-				From:      "root",
-				To:        msg.From,
-				Type:      "clarify",
-				Content:   ask,
-				Timestamp: time.Now(),
-				Metadata: map[string]any{
-					"await":   "medical." + st.Await,
-					"missing": strings.Join(missing, ", "),
-					"lang":    lang,
-				},
-			}
-			r.logger.Printf("[root][medical][ask] cid=%s await=%s missing=%v q=%q", cid, st.Await, missing, ask)
+				ctx2 := req.Context()
+				if sageRaw != "" {
+					ctx2 = context.WithValue(ctx2, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
+				}
+				if hpkeRaw != "" {
+					ctx2 = context.WithValue(ctx2, ctxHPKERawKey, hpkeRaw)
+				}
 
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(clar)
-			return
+				// 외부 전송
+				outPtr, err := r.sendExternal(ctx2, "medical", &msg)
+				if err != nil {
+					r.logger.Printf("[root][medical][forward][err] cid=%s: %v", cid, err)
+					http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
+					return
+				}
+				out := *outPtr
+				r.logger.Printf("[root][medical][forward] cid=%s -> external ok", cid)
+
+				// 대화 유지 시 초기화 생략 가능. 여기선 질문 대기 해제만.
+				st.Await = ""
+				putMedCtx(cid, st)
+
+				status := http.StatusOK
+				if code, ok := httpStatusFromAgent(&out); ok {
+					status = code
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if status/100 == 2 {
+					w.Header().Set("X-SAGE-Verified", "true")
+					w.Header().Set("X-SAGE-Signature-Valid", "true")
+				} else {
+					w.Header().Set("X-SAGE-Verified", "false")
+					w.Header().Set("X-SAGE-Signature-Valid", "false")
+				}
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(out)
+				return
+			}
+
+			// 4) 부족 → 질문 생성 (LLM ask 우선, 없으면 기본 규칙)
+			{
+				missing := medicalMissing(st)
+
+				ask := strings.TrimSpace(xo.Ask)
+				if ask == "" {
+					switch {
+					case strings.TrimSpace(st.Symptoms) == "" && strings.TrimSpace(st.Slots.Condition) == "":
+						ask = r.askForCondAndSymptomsLLM(req.Context(), lang, msg.Content)
+						st.Await = "symptoms"
+					case strings.TrimSpace(st.Symptoms) == "":
+						ask = r.askForSymptomsLLM(req.Context(), lang, st.Slots.Condition, msg.Content)
+						st.Await = "symptoms"
+					case strings.TrimSpace(st.Slots.Condition) == "":
+						if langOrDefault(lang) == "ko" {
+							ask = "어떤 질병/상태에 대한 상담인지 알려주세요. (예: 당뇨병, 고혈압, 천식 등)"
+						} else {
+							ask = "Which condition is this about? (e.g., diabetes, hypertension, asthma)"
+						}
+						st.Await = "condition"
+					default:
+						// 안전 기본값
+						if langOrDefault(lang) == "ko" {
+							ask = "현재 겪고 있는 주요 증상을 한 문장으로 알려주세요."
+						} else {
+							ask = "Please describe your main symptoms in one short sentence."
+						}
+						st.Await = "symptoms"
+					}
+				} else {
+					// LLM ask가 있으나 await 비어 있으면 증상 우선
+					if st.Await == "" && strings.TrimSpace(st.Symptoms) == "" {
+						st.Await = "symptoms"
+					}
+				}
+
+				putMedCtx(cid, st)
+				r.logger.Printf("[root][medical][ask] cid=%s await=%s missing=%v q=%q", cid, st.Await, missing, ask)
+
+				clar := types.AgentMessage{
+					ID:        msg.ID + "-needinfo",
+					ContextID: cid,
+					From:      "root",
+					To:        msg.From,
+					Type:      "clarify",
+					Content:   ask,
+					Timestamp: time.Now(),
+					Metadata: map[string]any{
+						"await":   "medical." + st.Await,
+						"missing": strings.Join(missing, ", "),
+						"lang":    lang,
+					},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(clar)
+				return
+			}
 
 		// ===== PLANNING =====
 		case "planning":

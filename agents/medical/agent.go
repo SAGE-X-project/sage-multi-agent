@@ -314,7 +314,7 @@ func (e *MedicalAgent) ensureHPKE() error {
 
 // -------- Application handler (LLM-driven medical info) --------
 
-// -------- Application handler (LLM-driven medical info) --------
+// -------- Application handler (LLM-driven medical info with history) --------
 func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
 	var in types.AgentMessage
 	if err := json.Unmarshal(msg.Payload, &in); err != nil {
@@ -326,16 +326,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}, nil
 	}
 
-	// Extract optional slots from metadata (Root가 채워줬다면 사용)
-	symptoms := getMetaString(in.Metadata, "medical.symptoms", "symptoms")
-	age := getMetaInt64(in.Metadata, "medical.age", "age")
-	sex := getMetaString(in.Metadata, "medical.sex", "sex")
-	duration := getMetaString(in.Metadata, "medical.duration", "duration")
-	severity := getMetaString(in.Metadata, "medical.severity", "severity")
-	meds := getMetaString(in.Metadata, "medical.meds", "medications")
-	allergy := getMetaString(in.Metadata, "medical.allergies", "allergies")
-	conds := getMetaString(in.Metadata, "medical.conditions", "conditions")
-
+	// ===== Metadata 수집 (Root가 채워준 필드 우선) =====
 	lang := getMetaString(in.Metadata, "lang")
 	if lang == "" {
 		lang = llm.DetectLang(in.Content)
@@ -344,21 +335,51 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		lang = "ko"
 	}
 
-	// 사용자 질문/컨텍스트 정리
-	query := strings.TrimSpace(in.Content)
-	if query == "" && symptoms != "" {
-		query = fmt.Sprintf("증상: %s", symptoms)
+	condition := getMetaString(in.Metadata, "medical.condition", "condition")
+	topic := getMetaString(in.Metadata, "medical.topic", "topic")
+	symptoms := getMetaString(in.Metadata, "medical.symptoms", "symptoms")
+	duration := getMetaString(in.Metadata, "medical.duration", "duration")
+	meds := getMetaString(in.Metadata, "medical.meds", "medications")
+	age := getMetaInt64(in.Metadata, "medical.age", "age")
+	sex := getMetaString(in.Metadata, "medical.sex", "sex")
+	severity := getMetaString(in.Metadata, "medical.severity", "severity")
+	allergy := getMetaString(in.Metadata, "medical.allergies", "allergies")
+	conds := getMetaString(in.Metadata, "medical.conditions", "conditions")
+
+	initialQ := getMetaString(in.Metadata, "medical.initial_question", "initial_question")
+	lastMsg := getMetaString(in.Metadata, "medical.last_message", "last_message")
+	history := getMetaStringSlice(in.Metadata, "medical.history", "history", "medical.transcript", "transcript")
+	histN := getMetaInt64(in.Metadata, "medical.history_len", "history_len")
+	if histN > 0 && len(history) > int(histN) {
+		history = history[len(history)-int(histN):]
 	}
 
-	// LLM 프롬프트 (안전/정보용, 한 문장)
+	// 사용자 질문 본문(없으면 lastMsg/symptoms로 보강)
+	query := strings.TrimSpace(in.Content)
+	if query == "" {
+		if lastMsg != "" {
+			query = lastMsg
+		} else if symptoms != "" {
+			query = fmt.Sprintf("증상: %s", symptoms)
+		}
+	}
+
+	// ===== LLM 프롬프트 구성 =====
 	sys := map[string]string{
-		"ko": "너는 의료 정보 도우미야. 진단/처방 없이 안전한 일반 의학 정보를 '한 문장'으로만 제공해. 응급 징후가 의심되면 전문의 진료를 권유하고, 과도한 세부사항/코드블록/목록은 금지.",
-		"en": "You are a medical info assistant. Provide one short, safe, general informational sentence. No diagnosis/prescription. If red flags are possible, suggest seeing a professional. No lists or code blocks.",
+		"ko": "너는 의료 정보 도우미야. 진단/처방 없이, 안전하고 일반적인 의학 정보를 한 문장으로만 제공해. 응급 징후가 의심되면 전문의 진료를 권유해. 목록/코드블록/장황한 설명 금지.",
+		"en": "You are a medical info assistant. Provide ONE short, safe, general informational sentence. No diagnosis/prescription. If red flags are possible, suggest seeing a professional. No lists or code blocks.",
 	}[lang]
 
 	var sb strings.Builder
+	// 요약 컨텍스트 블록(LLM이 이해하기 쉬운 형태)
 	if query != "" {
 		fmt.Fprintf(&sb, "UserQuestion: %s\n", query)
+	}
+	if condition != "" {
+		fmt.Fprintf(&sb, "Condition: %s\n", condition)
+	}
+	if topic != "" {
+		fmt.Fprintf(&sb, "Topic: %s\n", topic)
 	}
 	if symptoms != "" {
 		fmt.Fprintf(&sb, "Symptoms: %s\n", symptoms)
@@ -382,28 +403,45 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		fmt.Fprintf(&sb, "Allergies: %s\n", allergy)
 	}
 	if conds != "" {
-		fmt.Fprintf(&sb, "Conditions: %s\n", conds)
+		fmt.Fprintf(&sb, "OtherConditions: %s\n", conds)
+	}
+	if initialQ != "" {
+		fmt.Fprintf(&sb, "InitialQuestion: %s\n", initialQ)
+	}
+	if len(history) > 0 {
+		fmt.Fprintf(&sb, "History(last %d):\n", len(history))
+		for _, line := range history {
+			fmt.Fprintf(&sb, "- %s\n", strings.TrimSpace(line))
+		}
+	}
+	if lastMsg != "" {
+		fmt.Fprintf(&sb, "LastUserMessage: %s\n", lastMsg)
+	}
+	// 출력 형식 고정
+	if lang == "ko" {
+		fmt.Fprint(&sb, "Output: 한 문장 한국어 답변만.\n")
+	} else {
+		fmt.Fprint(&sb, "Output: ONE-sentence answer only.\n")
 	}
 	usr := sb.String()
 
-	// LLM 호출 (없거나 실패 시 보수적 폴백)
+	// ===== LLM 호출 (실패 시 폴백) =====
 	text := ""
 	if e.llmClient != nil {
 		out, err := e.llmClient.Chat(ctx, sys, usr)
+		e.logger.Println("[medical][llm]", out)
 		if err != nil {
 			e.logger.Printf("[medical][llm] chat error: %v", err)
+		} else if trimmed := strings.TrimSpace(out); trimmed != "" {
+			e.logger.Printf("[medical][llm] chat ok bytes=%d", len(trimmed))
+			text = trimmed
 		} else {
-			trimmed := strings.TrimSpace(out)
-			if trimmed == "" {
-				e.logger.Printf("[medical][llm] chat returned empty text")
-			} else {
-				e.logger.Printf("[medical][llm] chat ok bytes=%d", len(trimmed))
-				text = trimmed
-			}
+			e.logger.Printf("[medical][llm] chat returned empty text")
 		}
 	} else {
 		e.logger.Printf("[medical][llm] client not initialized (using fallback)")
 	}
+
 	if text == "" {
 		if lang == "en" {
 			text = "This is general health information, not a diagnosis. If symptoms are severe or worsening (e.g., chest pain, trouble breathing, confusion), seek emergency care; otherwise rest, hydrate, monitor, and see a clinician if symptoms persist."
@@ -412,6 +450,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}
 	}
 
+	// ===== 응답 메시지 =====
 	out := types.AgentMessage{
 		ID:        in.ID + "-medical",
 		From:      "medical",
@@ -423,18 +462,25 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 			"agent": "medical",
 			"hpke":  msg.Metadata["hpke"],
 			"context": map[string]any{
-				"symptoms": symptoms,
-				"age":      age,
-				"sex":      sex,
-				"duration": duration,
-				"severity": severity,
-				"meds":     meds,
-				"allergy":  allergy,
-				"conds":    conds,
+				"condition":        condition,
+				"topic":            topic,
+				"symptoms":         symptoms,
+				"age":              age,
+				"sex":              sex,
+				"duration":         duration,
+				"severity":         severity,
+				"meds":             meds,
+				"allergies":        allergy,
+				"other_conditions": conds,
+				"initial_question": initialQ,
+				"history":          history,
+				"history_len":      len(history),
+				"last_message":     lastMsg,
 			},
 		},
 	}
 	b, _ := json.Marshal(out)
+
 	return &transport.Response{
 		Success:   true,
 		MessageID: msg.ID,
@@ -566,10 +612,15 @@ func firstNonEmpty(vs ...string) string {
 	return ""
 }
 
+func itoa(n int64) string {
+	return fmt.Sprintf("%d", n)
+}
+
+// 이미 있다면 재사용. 없으면 추가
 func getMetaString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := m[k]; ok {
-			if s, ok2 := v.(string); ok2 && strings.TrimSpace(s) != "" {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
 				return strings.TrimSpace(s)
 			}
 		}
@@ -597,6 +648,42 @@ func getMetaInt64(m map[string]any, keys ...string) int64 {
 	return 0
 }
 
-func itoa(n int64) string {
-	return fmt.Sprintf("%d", n)
+func getMetaStringSlice(m map[string]any, keys ...string) []string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok && v != nil {
+			switch t := v.(type) {
+			case []string:
+				out := make([]string, 0, len(t))
+				for _, s := range t {
+					if s2 := strings.TrimSpace(s); s2 != "" {
+						out = append(out, s2)
+					}
+				}
+				return out
+			case []any:
+				out := make([]string, 0, len(t))
+				for _, e := range t {
+					if s, ok := e.(string); ok && strings.TrimSpace(s) != "" {
+						out = append(out, strings.TrimSpace(s))
+					}
+				}
+				return out
+			case string:
+				s := strings.TrimSpace(t)
+				if s == "" {
+					return nil
+				}
+				seps := func(r rune) bool { return r == '\n' || r == ',' }
+				parts := strings.FieldsFunc(s, seps)
+				out := make([]string, 0, len(parts))
+				for _, p := range parts {
+					if q := strings.TrimSpace(p); q != "" {
+						out = append(out, q)
+					}
+				}
+				return out
+			}
+		}
+	}
+	return nil
 }

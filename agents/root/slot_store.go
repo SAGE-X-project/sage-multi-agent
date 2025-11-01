@@ -79,16 +79,12 @@ func delPayCtx(id string) {
 }
 
 // ==== Medical minimal context (per conversation) ====
-// ==== Medical context (per conversation) ====
 type medCtx struct {
-	Condition   string // 질병명 (ex. 당뇨병)
-	Symptoms    string // 개인 증상 (자유 텍스트)
-	Topic       string // "증상", "검사/진단", "약물/복용", "부작용", "식단", "운동", "관리" 등
-	Audience    string // "본인", "가족", "임산부", "아동", "노인"
-	Duration    string // "2주", "어제부터" 등
-	Age         string // 선택
-	Medications string // 선택
-	Await       string // "", "symptoms", "condition" (다음 턴 힌트)
+	Slots      medicalSlots
+	Symptoms   string   // 자유 텍스트 증상
+	Await      string   // "", "symptoms", "condition"
+	Transcript []string // 유저 원문 히스토리(턴별 Content)
+	FirstQ     string   // 첫 질문 원문(선택)
 }
 
 var medStore sync.Map
@@ -105,159 +101,112 @@ func putMedCtx(cid string, s medCtx) { medStore.Store(cid, s) }
 func delMedCtx(cid string)           { medStore.Delete(cid) }
 
 func mergeMedCtx(a, b medCtx) medCtx {
-	// b의 비어있지 않은 값만 a에 덮어쓰기
-	if strings.TrimSpace(b.Condition) != "" {
-		a.Condition = strings.TrimSpace(b.Condition)
+	ts := func(s string) string { return strings.TrimSpace(s) }
+
+	// slots
+	if v := ts(b.Slots.Condition); v != "" {
+		a.Slots.Condition = v
 	}
-	if strings.TrimSpace(b.Symptoms) != "" {
-		a.Symptoms = strings.TrimSpace(b.Symptoms)
+	if v := ts(b.Slots.Topic); v != "" {
+		a.Slots.Topic = v
 	}
-	if strings.TrimSpace(b.Topic) != "" {
-		a.Topic = strings.TrimSpace(b.Topic)
+	if v := ts(b.Slots.Audience); v != "" {
+		a.Slots.Audience = v
 	}
-	if strings.TrimSpace(b.Audience) != "" {
-		a.Audience = strings.TrimSpace(b.Audience)
+	if v := ts(b.Slots.Duration); v != "" {
+		a.Slots.Duration = v
 	}
-	if strings.TrimSpace(b.Duration) != "" {
-		a.Duration = strings.TrimSpace(b.Duration)
+	if v := ts(b.Slots.Age); v != "" {
+		a.Slots.Age = v
 	}
-	if strings.TrimSpace(b.Age) != "" {
-		a.Age = strings.TrimSpace(b.Age)
+	if v := ts(b.Slots.Medications); v != "" {
+		a.Slots.Medications = v
 	}
-	if strings.TrimSpace(b.Medications) != "" {
-		a.Medications = strings.TrimSpace(b.Medications)
+
+	if v := ts(b.Slots.Symptoms); v != "" {
+		a.Symptoms = v
 	}
-	if strings.TrimSpace(b.Await) != "" {
-		a.Await = strings.TrimSpace(b.Await)
+	if v := ts(b.Symptoms); v != "" {
+		a.Symptoms = v
 	}
+
+	// transcript/await/firstQ는 호출부에서 관리
 	return a
 }
+func hasMedCtx(cid string) bool {
+	_, ok := medStore.Load(cid)
+	return ok
+}
 
-// ---- minimal extractor: condition + symptoms (필요시 확장) ----
 func extractMedicalCore(msg *types.AgentMessage) medCtx {
 	var s medCtx
 
 	// 1) metadata 우선
 	if msg.Metadata != nil {
 		if v, ok := msg.Metadata["medical.condition"].(string); ok && strings.TrimSpace(v) != "" {
-			s.Condition = strings.TrimSpace(v)
+			s.Slots.Condition = strings.TrimSpace(v)
 		} else if v, ok := msg.Metadata["condition"].(string); ok && strings.TrimSpace(v) != "" {
-			s.Condition = strings.TrimSpace(v)
+			s.Slots.Condition = strings.TrimSpace(v)
 		}
 		if v, ok := msg.Metadata["medical.symptoms"].(string); ok && strings.TrimSpace(v) != "" {
 			s.Symptoms = strings.TrimSpace(v)
 		} else if v, ok := msg.Metadata["symptoms"].(string); ok && strings.TrimSpace(v) != "" {
 			s.Symptoms = strings.TrimSpace(v)
 		}
-
-		// (선택) 추가 필드도 메타데이터에서 받으면 채워줌
-		if v, ok := msg.Metadata["medical.topic"].(string); ok {
-			s.Topic = strings.TrimSpace(v)
-		}
-		if v, ok := msg.Metadata["medical.audience"].(string); ok {
-			s.Audience = strings.TrimSpace(v)
-		}
-		if v, ok := msg.Metadata["medical.duration"].(string); ok {
-			s.Duration = strings.TrimSpace(v)
-		}
-		if v, ok := msg.Metadata["medical.age"].(string); ok {
-			s.Age = strings.TrimSpace(v)
-		}
-		if v, ok := msg.Metadata["medical.meds"].(string); ok {
-			s.Medications = strings.TrimSpace(v)
-		}
 	}
 
-	// 2) JSON 본문 폴백 (top-level 또는 fields{} 내 키 지원)
+	// 2) JSON 본문 폴백
 	c := strings.TrimSpace(msg.Content)
 	if strings.HasPrefix(c, "{") {
 		var m map[string]any
 		if json.Unmarshal([]byte(c), &m) == nil {
-			getStr := func(mm map[string]any, keys ...string) string {
-				for _, k := range keys {
-					if v, ok := mm[k].(string); ok && strings.TrimSpace(v) != "" {
-						return strings.TrimSpace(v)
-					}
-				}
-				return ""
+			if v, ok := m["medical.condition"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Slots.Condition = strings.TrimSpace(v)
 			}
-			// top-level
-			if v := getStr(m, "medical.condition", "condition"); v != "" {
-				s.Condition = v
+			if v, ok := m["condition"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Slots.Condition = strings.TrimSpace(v)
 			}
-			if v := getStr(m, "medical.symptoms", "symptoms"); v != "" {
-				s.Symptoms = v
+			if v, ok := m["medical.symptoms"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Symptoms = strings.TrimSpace(v)
 			}
-			if v := getStr(m, "medical.topic", "topic"); v != "" {
-				s.Topic = v
-			}
-			if v := getStr(m, "medical.audience", "audience"); v != "" {
-				s.Audience = v
-			}
-			if v := getStr(m, "medical.duration", "duration"); v != "" {
-				s.Duration = v
-			}
-			if v := getStr(m, "medical.age", "age"); v != "" {
-				s.Age = v
-			}
-			if v := getStr(m, "medical.medications", "medications", "meds"); v != "" {
-				s.Medications = v
-			}
-
-			// fields{}
-			if f, ok := m["fields"].(map[string]any); ok {
-				if v := getStr(f, "condition"); v != "" {
-					s.Condition = v
-				}
-				if v := getStr(f, "symptoms"); v != "" {
-					s.Symptoms = v
-				}
-				if v := getStr(f, "topic"); v != "" {
-					s.Topic = v
-				}
-				if v := getStr(f, "audience"); v != "" {
-					s.Audience = v
-				}
-				if v := getStr(f, "duration"); v != "" {
-					s.Duration = v
-				}
-				if v := getStr(f, "age"); v != "" {
-					s.Age = v
-				}
-				if v := getStr(f, "medications"); v != "" {
-					s.Medications = v
-				}
+			if v, ok := m["symptoms"].(string); ok && strings.TrimSpace(v) != "" {
+				s.Symptoms = strings.TrimSpace(v)
 			}
 		}
 	}
 
-	// 3) condition 힌트(키워드) — 없을 때만
-	if s.Condition == "" {
+	// 3) condition 힌트 — 없을 때만
+	if s.Slots.Condition == "" {
 		low := strings.ToLower(c)
 		switch {
 		case containsAny(low, "당뇨", "혈당", "diabetes"):
-			s.Condition = "당뇨병"
+			s.Slots.Condition = "당뇨병"
 		case containsAny(low, "고혈압", "hypertension"):
-			s.Condition = "고혈압"
+			s.Slots.Condition = "고혈압"
 		case containsAny(low, "우울", "depress"):
-			s.Condition = "우울증"
+			s.Slots.Condition = "우울증"
 		case containsAny(low, "불안", "anxiety"):
-			s.Condition = "불안장애"
+			s.Slots.Condition = "불안장애"
 		case containsAny(low, "콜레스테롤", "고지혈", "cholesterol"):
-			s.Condition = "고지혈증"
+			s.Slots.Condition = "고지혈증"
 		}
 	}
 	return s
 }
 
 func medicalMissing(s medCtx) (missing []string) {
-	if strings.TrimSpace(s.Condition) == "" {
-		missing = append(missing, "condition(질병)")
+	if strings.TrimSpace(s.Slots.Condition) == "" {
+		missing = append(missing, "condition(질환)")
 	}
 	if strings.TrimSpace(s.Symptoms) == "" {
 		missing = append(missing, "symptoms(개인 증상)")
 	}
 	return
+}
+
+func isInfoTopic(t string) bool {
+	t = strings.TrimSpace(t)
+	return containsAny(t, "관리", "식단", "운동", "약물", "복용", "검사", "치료", "예방", "일반", "정보", "가이드", "방법")
 }
 
 // ---- 증상 유도 질문 (ONE sentence) ----
