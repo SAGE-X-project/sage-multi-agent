@@ -235,10 +235,10 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	return agent, nil
 }
 
-// 핸들러 반환
+// Return the handler
 func (e *PaymentAgent) Handler() http.Handler { return e.handler }
 
-// 서버 실행
+// Start server
 func (e *PaymentAgent) Start(addr string) error {
 	if e.handler == nil {
 		return fmt.Errorf("handler not initialized")
@@ -248,7 +248,7 @@ func (e *PaymentAgent) Start(addr string) error {
 	return e.httpSrv.ListenAndServe()
 }
 
-// 서버 종료
+// Shutdown server
 func (e *PaymentAgent) Shutdown(ctx context.Context) error {
 	if e.httpSrv == nil {
 		return nil
@@ -367,9 +367,9 @@ func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		return &transport.Response{Success: true, MessageID: msg.ID, TaskID: msg.TaskID, Data: b}, nil
 	}
 
-	// === LLM로 영수증 한 줄 생성 (실패 시 템플릿 폴백) ===
-	text := e.generateReceipt(ctx, lang, to, amount, method, item, memo)
-	// === 끝 ===
+    // === Generate one-line receipt with LLM (fallback to template on failure) ===
+    text := e.generateReceipt(ctx, lang, to, amount, method, item, memo)
+    // === end ===
 
 	out := types.AgentMessage{
 		ID:        in.ID + "-receipt",

@@ -30,7 +30,7 @@ type paySlots struct {
 	Note      string
 }
 
-// 병합(우변 우선)
+// Merge (right-hand side wins)
 func mergePaySlots(a, b paySlots) paySlots {
 	out := a
 	if strings.TrimSpace(b.Mode) != "" {
@@ -86,7 +86,7 @@ func computeMissingPayment(s paySlots) []string {
 	return m
 }
 
-// 미리보기
+// Preview
 func buildPaymentPreview(lang string, s paySlots) string {
 	item := strings.TrimSpace(firstNonEmpty(s.Item, s.Model))
 	if item == "" {
@@ -145,7 +145,7 @@ func withComma(n int64) string {
 func (r *RootAgent) buildConfirmPromptLLM(ctx context.Context, lang string, s paySlots) string {
 	r.ensureLLM()
 	if r.llmClient == nil {
-		// 기존 고정 프롬프트 폴백
+        // Fallback to fixed prompt
 		if lang == "ko" {
 			return "이대로 진행할까요? (예/아니오)"
 		}
@@ -171,7 +171,7 @@ Rules:
 
 	styleSeed := fmt.Sprintf("%d", time.Now().UnixNano()%7919)
 
-	// 슬랏 요약 키워드만 제공(자연어는 LLM이)
+    // Provide only slot keywords (LLM crafts natural language)
 	var b strings.Builder
 	if lang == "ko" {
 		fmt.Fprintf(&b, "키워드 요약: ")
@@ -281,17 +281,17 @@ Rules:
 	return strings.TrimSpace(out)
 }
 
-// 예/아니오 판별
-// 교체: 더 넓은 한국어/축약/명령형 긍정/부정 분류
+// Yes/No classification
+// Replacement: broader classification for Korean/abbreviations/imperatives
 func parseYesNo(s string) (yes bool, no bool) {
 	t := strings.TrimSpace(strings.ToLower(s))
 
-	// 강한 긍정 (예/네/ㅇㅇ/ㄱㄱ/진행/구매/결제/확정/바로/고고/진행해/진행해줘/구매해줘/결제해줘 등)
+    // Strong positive (various affirmative/imperative cues, including abbreviated forms)
 	pos := []string{
 		"예", "네", "응", "ㅇㅇ", "ㅇㅋ", "ok", "okay", "그래", "좋아", "진행", "진행해", "진행해줘", "진행하세요",
 		"구매", "구매해", "구매해줘", "사줘", "사 주세요", "결제", "결제해", "결제해줘", "바로", "확정", "고고", "ㄱㄱ",
 	}
-	// 강한 부정
+    // Strong negative
 	neg := []string{
 		"아니오", "아니", "싫어", "ㄴㄴ", "no", "취소", "취소해", "그만", "중단", "보류", "대기",
 	}
@@ -309,8 +309,8 @@ func parseYesNo(s string) (yes bool, no bool) {
 	return false, false
 }
 
-// 본문/메타/JSON/정규식을 종합해 슬롯 채우기.
-// root.go의 llmExtractPayment가 먼저 시도되고, 실패 시 이 규칙 파서가 보조.
+// Fill slots by combining body/metadata/JSON/regex.
+// root.go's llmExtractPayment is tried first; this rule-based parser assists on failure.
 func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string, ok bool) {
 	// meta
 	if msg.Metadata != nil {
@@ -358,7 +358,7 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		s.BudgetKRW = getI("payment.budgetKRW", "budgetKRW", "budget")
 	}
 
-	// JSON 본문
+    // JSON body
 	content := strings.TrimSpace(msg.Content)
 	if strings.HasPrefix(content, "{") {
 		var m map[string]any
@@ -398,7 +398,7 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		}
 	}
 
-	// 금액 표현 (원/만 원)
+    // Amount expressions (won/ten-thousand won)
 	low := strings.ToLower(content)
 	if s.AmountKRW == 0 {
 		if m := regexp.MustCompile(`([0-9][0-9,\.]*)\s*(원|krw)`).FindStringSubmatch(low); len(m) >= 2 {
@@ -417,7 +417,7 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		}
 	}
 
-	// 결제수단 힌트
+    // Payment method hints
 	if s.Method == "" {
 		switch {
 		case containsAny(low, "신용카드", "체크카드", " card"):
@@ -435,7 +435,7 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		}
 	}
 
-	// 상품/상점 힌트
+    // Item/merchant hints
 	if s.Item == "" && (containsAny(low, "macbook") || strings.Contains(content, "맥북")) {
 		s.Item = "맥북"
 	}
@@ -448,7 +448,7 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		}
 	}
 
-	// 카드 끝4
+    // Card last4
 	if s.CardLast4 == "" && s.Method == "card" {
 		if m := regexp.MustCompile(`(?:끝|last)\s*4\s*(?:자리|digits?)?\s*[:\-]?\s*([0-9]{4})`).FindStringSubmatch(low); len(m) == 2 {
 			s.CardLast4 = m[1]

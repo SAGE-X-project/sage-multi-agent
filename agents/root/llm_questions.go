@@ -16,8 +16,8 @@ import (
 // ignoring rigid keyword lists to keep behavior adaptive.
 // It asks ONE natural sentence tailored to purchase vs transfer.
 
-// LLM이 매번 다른 표현으로 "부족 정보 질문"을 생성하도록 하는 버전
-// LLM이 매번 다른 표현으로 "부족 정보 질문"을 생성하도록 하는 버전 (기존 함수 교체)
+// Version that lets the LLM generate a varied "missing info question" each time
+// Replacement for the previous function to encourage phrasing variety
 // ==== RootAgent.askForMissingPaymentWithLLM (DROP-IN REPLACEMENT) ====
 func (r *RootAgent) askForMissingPaymentWithLLM(
 	ctx context.Context, lang string, s paySlots, missing []string, userText string,
@@ -136,8 +136,8 @@ Rules:
 	return out
 }
 
-// 추가: 확인 단계에서 애매하면 LLM로 yes/no/unclear 분류
-// 기존 함수 교체: yes/no/unclear 분류를 더 튼튼하게
+    // Add: when ambiguous at confirmation, classify yes/no/unclear with the LLM
+    // Replace previous function: make yes/no/unclear classification more robust
 func (r *RootAgent) llmConfirmIntent(ctx context.Context, lang, user string) string {
 	r.ensureLLM()
 	if r.llmClient == nil {
@@ -152,10 +152,10 @@ func (r *RootAgent) llmConfirmIntent(ctx context.Context, lang, user string) str
 		return "unclear"
 	}
 	o := strings.ToLower(strings.TrimSpace(out))
-	o = strings.Trim(o, "`\"'") // 따옴표/백틱 제거
-	if i := strings.IndexAny(o, "\r\n"); i >= 0 {
-		o = strings.TrimSpace(o[:i])
-	} // 첫 줄만
+    o = strings.Trim(o, "`\"'") // strip quotes/backticks
+    if i := strings.IndexAny(o, "\r\n"); i >= 0 {
+        o = strings.TrimSpace(o[:i])
+    } // first line only
 
 	switch o {
 	case "yes", "y", "ok", "okay", "확인", "진행", "네", "예":
@@ -194,11 +194,11 @@ func (r *RootAgent) askForMissingMedicalWithLLM(ctx context.Context, lang string
 }
 
 // askForMissingPlanningWithLLM: ONE-line ask covering all missing essentials.
-// 계획(PLANNING) 누락 슬롯 질문기
+// PLANNING missing slot question generator
 func (r *RootAgent) askForMissingPlanningWithLLM(ctx context.Context, lang string, missing []string, userText string) string {
 	r.ensureLLM()
 
-	// 언어별 폴백(LLM 비활성/실패 시)
+    // Language-specific fallback (when LLM disabled or fails)
 	koFallback := fmt.Sprintf("계획을 세우려면 %s 정보가 필요해요.", strings.Join(missing, ", "))
 	enFallback := fmt.Sprintf("To make the plan, I need %s.", strings.Join(missing, ", "))
 	fallback := map[string]string{"ko": koFallback, "en": enFallback}[lang]
@@ -207,7 +207,7 @@ func (r *RootAgent) askForMissingPlanningWithLLM(ctx context.Context, lang strin
 		return fallback
 	}
 
-	// 시스템 프롬프트
+    // System prompt
 	var sys string
 	if lang == "ko" {
 		sys = "너는 일정/계획 도우미야. 부족한 정보만 한국어 '한 문장'으로 짧고 자연스럽게 물어봐. 예시/코드블록/리스트 금지."
@@ -230,7 +230,7 @@ func (r *RootAgent) askForMissingPlanningWithLLM(ctx context.Context, lang strin
 
 func (r *RootAgent) llmMedicalAnswer(ctx context.Context, lang string, userText string, s medicalSlots) string {
 	r.ensureLLM()
-	// 안전 가드: 의학적 조언/진단 아님 + 응급 징후 안내 + 간결/근거지향
+    // Safety guards: not medical advice/diagnosis + red-flag guidance + concise/evidence-oriented
 	sys := map[string]string{
 		"ko": `너는 의료 정보 어시스턴트야. 
 - 의학적 조언/진단을 대체하지 않는다고 명확히 말해. 

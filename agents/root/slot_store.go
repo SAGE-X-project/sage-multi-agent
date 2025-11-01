@@ -18,7 +18,7 @@ var payContextStore struct {
 	m  map[string]*payCtx
 }
 
-// payCtx에 Stage/Token 추가
+// Add Stage/Token to payCtx
 type payCtx struct {
 	Slots     paySlots
 	Stage     string // "collect" | "await_confirm"
@@ -28,7 +28,7 @@ type payCtx struct {
 
 func init() { payContextStore.m = make(map[string]*payCtx) }
 
-// 기존 get/put/del 그대로 두되 Stage/Token 유지
+// Keep existing get/put/del while preserving Stage/Token
 func getPayCtx(id string) paySlots {
 	payContextStore.mu.Lock()
 	defer payContextStore.mu.Unlock()
@@ -79,7 +79,7 @@ func delPayCtx(id string) {
 	delete(payContextStore.m, id)
 }
 
-// 현재 결제 슬롯이 비어있는지 여부
+// Whether current payment slots are non-empty
 func payCtxNotEmpty(s paySlots) bool {
 	return strings.TrimSpace(s.Method) != "" ||
 		strings.TrimSpace(s.Shipping) != "" ||
@@ -91,22 +91,22 @@ func payCtxNotEmpty(s paySlots) bool {
 		s.AmountKRW > 0 || s.BudgetKRW > 0
 }
 
-// stage 이름만 추출 (getStageToken이 (stage, token) 반환하므로 보조로 둠)
+// Extract only the stage name (helper for getStageToken which returns (stage, token))
 func getStageName(id string) string {
 	stage, _ := getStageToken(id)
 	return stage
 }
 
-// sticky payment: (1) 슬롯이 일부라도 채워졌거나 (2) stage가 collect/await_confirm 이면
-// 사용자가 "의료/플래닝"을 강하게 말하지 않는 한 payment로 고정
+// Sticky payment: (1) any slot is partially filled or (2) stage is collect/await_confirm
+// Keep routing to payment unless the user strongly asks for "medical/planning"
 func shouldForcePayment(cid, userText string) bool {
 	s := getPayCtx(cid)
 	stage, _ := getStageToken(cid)
 
 	if payCtxNotEmpty(s) || stage == "collect" || stage == "await_confirm" {
 		low := strings.ToLower(strings.TrimSpace(userText))
-		// 아래 두 함수는 이미 프로젝트에 있을 가능성이 큼.
-		// 없다면 간단한 휴리스틱으로 만들어도 됨.
+        // These two functions likely already exist in the project.
+        // If not, simple heuristics are fine.
 		if !isMedicalActionIntent(low) && !isPlanningActionIntent(low) {
 			return true
 		}
@@ -166,7 +166,7 @@ func mergeMedCtx(a, b medCtx) medCtx {
 		a.Symptoms = v
 	}
 
-	// transcript/await/firstQ는 호출부에서 관리
+    // transcript/await/firstQ are managed by the caller
 	return a
 }
 func hasMedCtx(cid string) bool {
@@ -177,7 +177,7 @@ func hasMedCtx(cid string) bool {
 func extractMedicalCore(msg *types.AgentMessage) medCtx {
 	var s medCtx
 
-	// 1) metadata 우선
+    // 1) metadata first
 	if msg.Metadata != nil {
 		if v, ok := msg.Metadata["medical.condition"].(string); ok && strings.TrimSpace(v) != "" {
 			s.Slots.Condition = strings.TrimSpace(v)
@@ -191,7 +191,7 @@ func extractMedicalCore(msg *types.AgentMessage) medCtx {
 		}
 	}
 
-	// 2) JSON 본문 폴백
+    // 2) JSON body fallback
 	c := strings.TrimSpace(msg.Content)
 	if strings.HasPrefix(c, "{") {
 		var m map[string]any
@@ -211,7 +211,7 @@ func extractMedicalCore(msg *types.AgentMessage) medCtx {
 		}
 	}
 
-	// 3) condition 힌트 — 없을 때만
+    // 3) condition hints — only when absent
 	if s.Slots.Condition == "" {
 		low := strings.ToLower(c)
 		switch {
@@ -245,8 +245,8 @@ func isInfoTopic(t string) bool {
 	return containsAny(t, "관리", "식단", "운동", "약물", "복용", "검사", "치료", "예방", "일반", "정보", "가이드", "방법")
 }
 
-// ---- 증상 유도 질문 (ONE sentence) ----
-// 예: askForSymptomsLLM 실패 시 폴백
+// ---- Symptom prompt (ONE sentence) ----
+// Example: fallback when askForSymptomsLLM fails
 func (r *RootAgent) askForSymptomsLLM(ctx context.Context, lang, condition, userText string) string {
 	r.ensureLLM()
 	if r.llmClient != nil {
@@ -263,7 +263,7 @@ func (r *RootAgent) askForSymptomsLLM(ctx context.Context, lang, condition, user
 		}
 
 	}
-	// ---- 폴백(상황형) ----
+    // ---- Fallback (situational) ----
 	if langOrDefault(lang) == "ko" {
 		if strings.TrimSpace(condition) != "" {
 			return fmt.Sprintf("%s 관련해서 지금 느끼는 주요 증상·지속 기간·복용 중인 약을 한 문장으로 알려주세요.", condition)
@@ -276,7 +276,7 @@ func (r *RootAgent) askForSymptomsLLM(ctx context.Context, lang, condition, user
 	return "Please describe your main symptoms, since when, and any medications in one sentence."
 }
 
-// ---- (둘 다 비었을 때) 질병+증상 함께 요청 ----
+// ---- Ask for both condition+symptoms when both are empty ----
 func (r *RootAgent) askForCondAndSymptomsLLM(ctx context.Context, lang, userText string) string {
 	r.ensureLLM()
 	if r.llmClient == nil {
@@ -308,14 +308,14 @@ func (r *RootAgent) askForCondAndSymptomsLLM(ctx context.Context, lang, userText
 var amountRe = regexp.MustCompile(`(?i)(\d[\d,\.]*)\s*(원|krw|만원|usd|usdc|eth|btc)`)
 
 func isPaymentActionIntent(c string) bool {
-	// 질문투면 라우팅 보류(강한 지시어 있으면 허용)
+    // If phrased as a question, hold off routing (allow if strong imperative)
 	if isQuestionLike(c) && !isOrderish(c) && !containsAny(c, "보내", "송금", "이체", "지불해", "pay", "send", "transfer") {
 		return false
 	}
 	if isOrderish(c) || containsAny(c, "보내", "송금", "이체", "결제해", "지불해", "pay", "send", "transfer") {
 		return true
 	}
-	// 슬롯 힌트 2개 이상이면 결제 의도
+    // If two or more slot hints, treat as payment intent
 	hits := 0
 	if amountRe.FindStringIndex(c) != nil {
 		hits++
@@ -332,7 +332,7 @@ func isPaymentActionIntent(c string) bool {
 func isMedicalActionIntent(c string) bool {
 	c = strings.ToLower(strings.TrimSpace(c))
 
-	// 대표 질환/영역
+    // Representative conditions/categories
 	if containsAny(c,
 		"당뇨", "혈당", "고혈당", "저혈당", "당화혈색소", "insulin", "metformin",
 		"정신", "우울", "불안", "조현", "bipolar", "adhd", "치매", "수면",
@@ -342,7 +342,7 @@ func isMedicalActionIntent(c string) bool {
 		return true
 	}
 
-	// 의료정보 톤
+    // Medical-information tone
 	if containsAny(c,
 		"증상", "원인", "치료", "약", "복용", "부작용", "관리", "생활습관",
 		"가이드라인", "권고안", "주의사항", "금기", "진단", "검사",
@@ -354,7 +354,7 @@ func isMedicalActionIntent(c string) bool {
 		"dizzy", "headache", "pain", "nausea", "vomit", "fever", "cough", "shortness of breath", "fatigue") {
 		return true
 	}
-	// "~~ 먹어도 돼?" 같은 질문
+// Questions like "Is it okay to eat ~~?"
 	if containsAny(c, "먹어도 돼", "괜찮아", "해도 돼", "해도돼", "임신", "모유", "술", "운동") &&
 		containsAny(c, "약", "복용", "병", "질환", "증상") {
 		return true
@@ -367,6 +367,6 @@ func isPlanningActionIntent(c string) bool {
 	if containsAny(c, "계획해", "플랜 짜줘", "일정 짜줘", "plan", "schedule", "스케줄 만들어", "할일 정리") {
 		return true
 	}
-	// '계획/일정' 키워드가 있고 질문투가 아니면 라우팅
+// Route to planning when 'plan/schedule' keywords exist and it's not phrased as a question
 	return containsAny(c, "계획", "일정", "플랜", "todo") && !isQuestionLike(c)
 }

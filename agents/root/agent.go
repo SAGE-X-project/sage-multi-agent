@@ -2,10 +2,10 @@
 // It signs outbound HTTP (RFC 9421 via A2A client) and optionally uses HPKE for payload
 // encryption. Sub-agents focus on business logic; Root handles network crypto.
 //
-// 한국어 설명:
-// - 외부 서비스로의 HTTP 전송, RFC9421 서명, HPKE 암복호화를 Root가 전담합니다.
-// - 서브 에이전트(planning/medical)는 로컬 비즈니스 로직만 수행하고, payment는 외부 서버로만 보냅니다.
-// - 외부 URL이 없을 때만 planning/medical에 대해 로컬 fallback을 사용합니다( payment는 fallback 제거 ).
+// Korean summary:
+// - Root owns outbound HTTP to external services, RFC 9421 signing, and HPKE encrypt/decrypt.
+// - Sub-agents (planning/medical) handle local business logic; payment is sent only to the external server.
+// - Use local fallbacks for planning/medical only when no external URL is configured (payment has no fallback).
 package root
 
 import (
@@ -363,7 +363,7 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 		}
 	}
 
-	// 1) content-based intent (외부 URL 유무와 무관)
+    // 1) content-based intent (regardless of external URL presence)
 	c := strings.ToLower(strings.TrimSpace(msg.Content))
 
 	if isPaymentActionIntent(c) {
@@ -794,12 +794,12 @@ func (r *RootAgent) mountRoutes() {
 		// ====== RootAgent: payment flow (DROP-IN REPLACEMENT with LOGS) ======
 		case "payment":
 			{
-				// ---- 공통: 진입/스테이지 로그 ----
+                // ---- Common: entry/stage logging ----
 				stage, token := getStageToken(cid)
 				r.logger.Printf("[root][payment][enter] cid=%s stage=%s token=%s lang=%s text=%q",
 					cid, stage, token, lang, strings.TrimSpace(msg.Content))
 
-				// ==== 확인 단계 처리 ====
+                // ==== Confirmation step handling ====
 				if stage == "await_confirm" && token != "" {
 					yes, no := parseYesNo(msg.Content)
 					r.logger.Printf("[root][payment][confirm] parsed yes=%v no=%v", yes, no)
@@ -814,7 +814,7 @@ func (r *RootAgent) mountRoutes() {
 							no = true
 						}
 						if !yes && !no {
-							// 확인 단계에서도 추가 슬롯 추출 시도
+                            // Try additional slot extraction even in confirmation step
 							slots := getPayCtx(cid)
 							r.logger.Printf("[root][payment][confirm] before-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
 								slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
@@ -824,7 +824,7 @@ func (r *RootAgent) mountRoutes() {
 								r.logger.Printf("[root][payment][confirm] xo: mode=%s method=%q to=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
 									xo.Fields.Mode, xo.Fields.Method, xo.Fields.To, xo.Fields.Shipping, xo.Fields.Merchant, xo.Fields.AmountKRW, xo.Fields.BudgetKRW, xo.Fields.Item, xo.Fields.Model)
 
-								// 🔧 핫픽스: To/Recipient 둘 다 병합 (이 줄이 없으면 수령자 누락 반복됨)
+                                // 🔧 Hotfix: merge both To and Recipient (prevents missing recipient)
 								slots = mergePaySlots(slots, paySlots{
 									Mode: xo.Fields.Mode, To: xo.Fields.To,
 									AmountKRW: xo.Fields.AmountKRW, BudgetKRW: xo.Fields.BudgetKRW,
@@ -870,18 +870,18 @@ func (r *RootAgent) mountRoutes() {
 					}
 
 					if yes {
-						// 1) 최종 슬롯 로드
+                        // 1) Load final slots
 						slots := getPayCtx(cid)
 						r.logger.Printf("[root][payment][send] YES; final slots: method=%q to=%q recipient=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
 							slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.AmountKRW, slots.BudgetKRW, slots.Item, slots.Model)
 
-						// 2) 필수 메타데이터 주입
+                        // 2) Inject required metadata
 						if msg.Metadata == nil {
 							msg.Metadata = map[string]any{}
 						}
 						msg.Metadata["lang"] = lang
 
-						// amount: 명시 금액 없으면 예산으로 대체
+                        // amount: fall back to budget when explicit amount is missing
 						amt := slots.AmountKRW
 						if amt <= 0 && slots.BudgetKRW > 0 {
 							amt = slots.BudgetKRW
@@ -892,7 +892,7 @@ func (r *RootAgent) mountRoutes() {
 							msg.Metadata["amountKRW"] = amt // 호환 키
 						}
 
-						// 수신자/결제수단/상품/상점/배송지/카드끝4자리
+                        // recipient/method/item/merchant/shipping/card last4
 						if v := strings.TrimSpace(firstNonEmpty(slots.Recipient, slots.To)); v != "" {
 							msg.Metadata["payment.to"] = v
 							msg.Metadata["to"] = v // 호환 키
@@ -918,7 +918,7 @@ func (r *RootAgent) mountRoutes() {
 						r.logger.Printf("[root][payment][send] injected meta: amount=%d method=%q to/recipient=%q shipping=%q merchant=%q",
 							amt, slots.Method, firstNonEmpty(slots.Recipient, slots.To), slots.Shipping, slots.Merchant)
 
-						// 3) per-request SAGE/HPKE 헤더 처리
+                        // 3) Handle per-request SAGE/HPKE headers
 						sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
 						hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
 						r.logger.Printf("[root][payment][send] headers SAGE=%q HPKE=%q", sageRaw, hpkeRaw)
@@ -942,7 +942,7 @@ func (r *RootAgent) mountRoutes() {
 							ctx2 = context.WithValue(ctx2, ctxHPKERawKey, hpkeRaw)
 						}
 
-						// 4) 외부 전송 (실결제)
+                        // 4) Send to external (actual payment)
 						r.logger.Printf("[root][payment][send] -> sendExternal(payment)")
 						outPtr, err := r.sendExternal(ctx2, "payment", &msg)
 						if err != nil {
@@ -953,13 +953,13 @@ func (r *RootAgent) mountRoutes() {
 						out := *outPtr
 						r.logger.Printf("[root][payment][send][resp] type=%s content.len=%d", out.Type, len(out.Content))
 
-						// 성공 시 컨텍스트 정리
+                        // Clear context on success
 						if strings.EqualFold(out.Type, "response") && !strings.HasPrefix(strings.ToLower(out.Content), "external error:") {
 							r.logger.Printf("[root][payment][ctx] delPayCtx cid=%s", cid)
 							delPayCtx(cid)
 						}
 
-						// 응답
+                        // Response
 						status := http.StatusOK
 						if code, ok := httpStatusFromAgent(&out); ok {
 							status = code
@@ -1008,18 +1008,18 @@ func (r *RootAgent) mountRoutes() {
 					return
 				}
 
-				// ==== 수집 단계 (collect) ====
+                // ==== Collect stage ====
 				slots := getPayCtx(cid)
 				r.logger.Printf("[root][payment][collect] before-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
 					slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
 
-				// LLM 추출 → 수동 추출 보완
+                // LLM extraction → augment with manual extraction
 				if xo, ok := r.llmExtractPayment(req.Context(), lang, msg.Content); ok {
 
 					r.logger.Printf("[root][payment][collect] xo: mode=%s method=%q to=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
 						xo.Fields.Mode, xo.Fields.Method, xo.Fields.To, xo.Fields.Shipping, xo.Fields.Merchant, xo.Fields.AmountKRW, xo.Fields.BudgetKRW, xo.Fields.Item, xo.Fields.Model)
 
-					// 🔧 핫픽스: To/Recipient 둘 다 병합
+                        // 🔧 Hotfix: merge both To and Recipient
 					slots = mergePaySlots(slots, paySlots{
 						Mode: xo.Fields.Mode, To: xo.Fields.To,
 						AmountKRW: xo.Fields.AmountKRW, BudgetKRW: xo.Fields.BudgetKRW,
@@ -1063,7 +1063,7 @@ func (r *RootAgent) mountRoutes() {
 					return
 				}
 
-				// ==== 미리보기 + 확인 ====
+                // ==== Preview + confirm ====
 				preview := buildPaymentPreview(lang, slots)
 				token2 := uuid.NewString()
 				putPayCtxFull(cid, slots, "await_confirm", token2)
@@ -1087,7 +1087,7 @@ func (r *RootAgent) mountRoutes() {
 
 			r.logger.Printf("[root][medical][enter] cid=%s lang=%s text=%q", cid, lang, strings.TrimSpace(msg.Content))
 
-			// 컨텍스트 로드 & 히스토리 누적
+            // Load context & accumulate history
 			st := getMedCtx(cid)
 			utter := strings.TrimSpace(msg.Content)
 			if utter != "" {
@@ -1097,10 +1097,10 @@ func (r *RootAgent) mountRoutes() {
 				st.FirstQ = utter
 			}
 
-			// 1) 로컬 키워드 추출 병합
+            // 1) Merge local keyword extraction
 			cur := extractMedicalCore(&msg)
 
-			// Await 힌트: 지난 턴에 "증상/질환"을 부탁했다면 이번 입력을 그대로 수용
+            // Await hint: if previous turn asked for "symptoms/condition", accept this input as-is
 			if st.Await == "symptoms" && strings.TrimSpace(cur.Symptoms) == "" && utter != "" {
 				cur.Symptoms = utter
 			}
@@ -1113,12 +1113,12 @@ func (r *RootAgent) mountRoutes() {
 			r.logger.Printf("[root][medical][merge] cid=%s cond=%q symptoms.len=%d",
 				cid, st.Slots.Condition, len(strings.TrimSpace(st.Symptoms)))
 
-			// 2) LLM 추출로 보강
+            // 2) Augment via LLM extraction
 			var xo medicalXO
 			if got, ok := r.llmExtractMedical(req.Context(), lang, utter); ok {
 				xo = got
 
-				// LLM 결과를 비어있는 칸에만 채움 (symptoms는 별도)
+                // Fill only empty fields from LLM result (symptoms handled separately)
 				st = mergeMedCtx(st, medCtx{
 					Slots: medicalSlots{
 						Condition:   xo.Fields.Condition,
@@ -1136,9 +1136,9 @@ func (r *RootAgent) mountRoutes() {
 					cid, st.Slots.Condition, st.Slots.Topic, len(strings.TrimSpace(st.Symptoms)), xo.Missing, xo.Ask)
 			}
 
-			// 3) 포워딩 조건 (fast-path 금지: 반드시 '질환+증상' 채워진 뒤 진행)
+            // 3) Forwarding condition (no fast-path: require both condition+symptoms filled)
 			if strings.TrimSpace(st.Slots.Condition) != "" && strings.TrimSpace(st.Symptoms) != "" {
-				// 메타데이터 구성 (히스토리 포함)
+                // Build metadata (include history)
 				if msg.Metadata == nil {
 					msg.Metadata = map[string]any{}
 				}
@@ -1174,7 +1174,7 @@ func (r *RootAgent) mountRoutes() {
 					return
 				}
 
-				// SAGE/HPKE 헤더 처리
+                // Handle SAGE/HPKE headers
 				sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
 				hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
 				r.logger.Printf("[root][medical][send] headers SAGE=%q HPKE=%q (forward)", sageRaw, hpkeRaw)
@@ -1199,7 +1199,7 @@ func (r *RootAgent) mountRoutes() {
 					ctx2 = context.WithValue(ctx2, ctxHPKERawKey, hpkeRaw)
 				}
 
-				// 외부 전송
+                // External send
 				outPtr, err := r.sendExternal(ctx2, "medical", &msg)
 				if err != nil {
 					r.logger.Printf("[root][medical][forward][err] cid=%s: %v", cid, err)
@@ -1209,7 +1209,7 @@ func (r *RootAgent) mountRoutes() {
 				out := *outPtr
 				r.logger.Printf("[root][medical][forward] cid=%s -> external ok", cid)
 
-				// 대화 유지 시 초기화 생략 가능. 여기선 질문 대기 해제만.
+                // If conversation continues, you can skip reset; here we just clear awaiting state.
 				st.Await = ""
 				putMedCtx(cid, st)
 
@@ -1230,7 +1230,7 @@ func (r *RootAgent) mountRoutes() {
 				return
 			}
 
-			// 4) 부족 → 질문 생성 (LLM ask 우선, 없으면 기본 규칙)
+            // 4) Missing → generate question (prefer LLM ask, else fallback rules)
 			{
 				missing := medicalMissing(st)
 
@@ -1251,7 +1251,7 @@ func (r *RootAgent) mountRoutes() {
 						}
 						st.Await = "condition"
 					default:
-						// 안전 기본값
+                        // Safe defaults
 						if langOrDefault(lang) == "ko" {
 							ask = "현재 겪고 있는 주요 증상을 한 문장으로 알려주세요."
 						} else {
@@ -1260,7 +1260,7 @@ func (r *RootAgent) mountRoutes() {
 						st.Await = "symptoms"
 					}
 				} else {
-					// LLM ask가 있으나 await 비어 있으면 증상 우선
+                // If LLM ask exists but await is empty, prioritize symptoms
 					if st.Await == "" && strings.TrimSpace(st.Symptoms) == "" {
 						st.Await = "symptoms"
 					}
@@ -1359,7 +1359,7 @@ func (r *RootAgent) mountRoutes() {
 				msg.Metadata["lang"] = lang
 			}
 
-			// 외부 URL 없으면 로컬 LLM로 요약
+            // If no external URL, summarize locally with LLM
 			if r.externalURLFor("planning") == "" {
 				r.ensureLLM()
 				if r.llmClient == nil {

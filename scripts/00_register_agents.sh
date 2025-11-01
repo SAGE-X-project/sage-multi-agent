@@ -4,10 +4,10 @@
 # - KEM register   : register_kem_agents.go   (-tags reg_kem)   → ECDSA + X25519 in one shot
 #
 # Notes:
-#   • ECDSA publicKey: 0x04 + X + Y (65B uncompressed) 권장. (압축도 허용하되 Go에서 복원)
-#   • X25519 publicKey: 정확히 32바이트(16진수 64글자; 0x 접두 허용).
-#   • 서명은 Go 코드에서 chainId + registry(address(this)) + owner(Address)에 대해
-#     EIP-191(eth_sign) 프리픽스 적용해 생성(컨트랙트와 동일).
+#   • ECDSA publicKey: 0x04 + X + Y (65B uncompressed) recommended. (Compressed allowed; restored in Go.)
+#   • X25519 publicKey: exactly 32 bytes (64 hex chars; 0x prefix allowed).
+#   • Sign in Go over chainId + registry(address(this)) + owner(Address)
+#     with the EIP-191 (eth_sign) prefix, same as the contract.
 
 set -euo pipefail
 
@@ -23,7 +23,7 @@ echo ""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-# ENV 우선: SAGE_REGISTRY_V4_ADDRESS → (fallback) SAGE_REGISTRY_ADDRESS
+# ENV precedence: SAGE_REGISTRY_V4_ADDRESS → (fallback) SAGE_REGISTRY_ADDRESS
 CONTRACT_ADDRESS="${SAGE_REGISTRY_V4_ADDRESS:-${SAGE_REGISTRY_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}}"
 RPC_URL="${ETH_RPC_URL:-http://127.0.0.1:8545}"
 
@@ -215,7 +215,7 @@ validate_signing_json() {
     jq -e 'type=="array" and length>=1 and (.[0]|has("name") and has("did") and has("publicKey") and has("privateKey") and has("address"))' "$f" >/dev/null 2>&1 \
       && echo -e "${GREEN} Signing keys JSON OK${NC} (records: $(jq 'length' "$f"))" \
       || { echo -e "${RED}Error:${NC} '$f' is not a valid signing-key summary array."; exit 1; }
-    # ⛔️ 문제되던 startswith 검사 제거 (일부 row의 타입 변형/누락으로 jq가 크래시하던 부분)
+    # ⛔️ Removed problematic startswith check (jq crashed due to some row type variations/missing fields)
   else
     grep -q '"publicKey"' "$f" || { echo -e "${RED}Error:${NC} missing 'publicKey' in '$f'"; exit 1; }
     grep -q '"privateKey"' "$f" || { echo -e "${RED}Error:${NC} missing 'privateKey' in '$f'"; exit 1; }
@@ -264,9 +264,9 @@ fi
 if [[ $DO_KEM -eq 1 ]]; then
   echo " Validating KEM inputs..."
   if [[ $DO_MERGE -eq 1 ]]; then
-    # signing 파일은 항상 검증
+    # Always validate the signing file
     validate_signing_json "$SIGNING_KEYS"
-    # kem 파일이 존재하면 검증, 없으면 병합 시 빈 값으로 생성됨
+    # Validate KEM file if present; if missing, merged JSON will create empty fields
     if [[ -f "$KEM_KEYS" ]]; then
       validate_kem_json "$KEM_KEYS"
     else
@@ -344,10 +344,10 @@ fi
 if [[ $DO_KEM -eq 1 ]]; then
   echo -e "${YELLOW}>>> Registering agents with KEM (ECDSA+X25519)...${NC}"
 
-  # (0) Build MERGED JSON (Go 빌더 사용; x25519 필드 항상 포함)
+  # (0) Build MERGED JSON (use Go builder; always include x25519 fields)
   if [[ $DO_MERGE -eq 1 ]]; then
     echo -e "${YELLOW}>>> Building MERGED JSON (ECDSA+X25519, did=address if missing) -> ${COMBINED_OUT}${NC}"
-    # KEM 파일이 있으면 -kem 플래그에 전달; 없으면 빈 문자열 필드로 생성됨
+    # Pass -kem flag if KEM file exists; otherwise create empty string fields
     go run tools/registration/build_combined_from_signing.go \
       -signing "$SIGNING_KEYS" \
       ${KEM_KEYS:+-kem "$KEM_KEYS"} \

@@ -30,12 +30,12 @@ type llmPaymentExtract struct {
 	} `json:"fields"`
 }
 
-// llmExtractPayment.go (교체)
+// llmExtractPayment.go (replacement)
 func (r *RootAgent) llmExtractPayment(ctx context.Context, lang, text string) (*llmPaymentExtract, bool) {
 	r.ensureLLM()
 	xo := &llmPaymentExtract{}
 
-	// 1) LLM JSON 우선 추출
+    // 1) Prefer LLM JSON extraction
 	if r.llmClient != nil && strings.TrimSpace(text) != "" {
 		sys := map[string]string{
 			"ko": `역할: 결제/구매 정보 추출기.
@@ -55,7 +55,7 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 		if out, err := r.llmClient.Chat(ctx, sys, strings.TrimSpace(text)); err == nil && strings.TrimSpace(out) != "" {
 			js := extractFirstJSONObject(out)
 			if js != "" {
-				// recipient -> to 보정 허용
+                // Allow recipient -> to normalization
 				js = strings.ReplaceAll(js, `"recipient"`, `"to"`)
 				_ = json.Unmarshal([]byte(js), xo)
 			} else {
@@ -66,7 +66,7 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 		}
 	}
 
-	// 2) 규칙 폴백/보강 (LLM이 비운 필드만 채움)
+    // 2) Rule-based fallback/augmentation (fill only fields left empty by LLM)
 	if strings.TrimSpace(xo.Fields.Method) == "" {
 		if m := pickMethod(text); m != "" {
 			xo.Fields.Method = m
@@ -97,7 +97,7 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 			}
 		}
 	}
-	// 금액/예산 보강
+    // Amount/budget augmentation
 	if xo.Fields.AmountKRW <= 0 && xo.Fields.BudgetKRW <= 0 {
 		if n := parseKRWFromText(text); n > 0 {
 			if looksLikeTransfer(text) {
@@ -107,16 +107,16 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 			}
 		}
 	}
-	// 모드 보정
+    // Mode adjustment
 	if strings.TrimSpace(xo.Fields.Mode) == "" {
-		ps := paySlots{} // 네 내부 타입
+        ps := paySlots{} // internal type
 		xo.Fields.Mode = classifyPaymentMode(text, ps)
 		if xo.Fields.Mode == "" {
 			xo.Fields.Mode = "buy"
 		}
 	}
 
-	// 아무 것도 못 뽑았으면 실패
+    // Fail if nothing extracted
 	if strings.TrimSpace(xo.Fields.Method) == "" &&
 		strings.TrimSpace(xo.Fields.Shipping) == "" &&
 		strings.TrimSpace(xo.Fields.To) == "" &&
@@ -130,7 +130,7 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 
 /* ------------------------- MEDICAL ------------------------- */
 
-// llmExtractMedical: 입력에서 medicalSlots를 뽑고, 부족하면 한 문장 질문까지 생성
+// llmExtractMedical: extract medicalSlots from input and generate a one-sentence ask if needed
 type medicalXO struct {
 	Fields  medicalSlots `json:"fields"`
 	Missing []string     `json:"missing,omitempty"`
@@ -170,7 +170,7 @@ If informational query (diet/exercise/management), "topic" should reflect that. 
 		return zero, false
 	}
 
-	raw := routerJSONRe.FindString(out) // 당신이 쓰던 JSON 추출 정규식
+    raw := routerJSONRe.FindString(out) // JSON extraction regex used in the router
 	if raw == "" {
 		return zero, false
 	}
@@ -189,13 +189,13 @@ If informational query (diet/exercise/management), "topic" should reflect that. 
 	xo.Fields.Medications = trim(xo.Fields.Medications)
 	xo.Fields.Symptoms = trim(xo.Fields.Symptoms)
 
-	// missing 보정(LLM이 비워도 최소 요건 보장)
+    // Adjust missing (ensure minimum requirements even if LLM leaves empty)
 	if len(xo.Missing) == 0 {
 		if xo.Fields.Condition == "" {
 			xo.Missing = append(xo.Missing, "condition(질환)")
 		}
 		if xo.Fields.Symptoms == "" && xo.Fields.Topic == "" {
-			// 증상도 토픽도 없으면 증상 요청
+            // If neither symptoms nor topic, request symptoms
 			xo.Missing = append(xo.Missing, "symptoms(개인 증상)")
 		}
 	}
@@ -260,13 +260,13 @@ func (r *RootAgent) llmExtractPlanning(ctx context.Context, lang, text string) (
 	return out, s.Task != ""
 }
 
-// pickItemAndModel는 문장 내에서 "구매/주문/결제/사다" 등 동사와 가장 가까운 객체를 아이템 후보로 추출하고,
-// 숫자/버전/수식어(프로/울트라/플러스/맥스/SE/Ultra/Pro/Max/Plus/Ti/Super 등)가 섞인 부분을 모델로 분리한다.
-// merchant나 주소처럼 아이템이 될 수 없는 후보는 제외한다.
+// pickItemAndModel extracts the closest object to verbs like "buy/order/pay/purchase",
+// and splits the model part where numbers/versions/modifiers (Pro/Ultra/Plus/Max/SE/Ti/Super, etc.) appear.
+// Excludes candidates that cannot be items, such as merchants or addresses.
 func pickItemAndModel(text, merchant, shipping string) (item string, model string) {
 	t := strings.TrimSpace(normalizeSpaces(text))
 
-	// 0) 주소/상점 토큰은 제외
+    // 0) Exclude address/merchant tokens
 	exclude := map[string]struct{}{}
 	if merchant = strings.TrimSpace(merchant); merchant != "" {
 		exclude[merchant] = struct{}{}
@@ -281,12 +281,12 @@ func pickItemAndModel(text, merchant, shipping string) (item string, model strin
 		exclude[m] = struct{}{}
 	}
 
-	// 1) 따옴표 안 구절 우선: “ … ” / " … "
+    // 1) Prefer quoted phrase: “ … ” / " … "
 	if q := firstQuoted(t); q != "" && !isExcluded(q, exclude) {
 		return splitItemModel(q)
 	}
 
-	// 2) 목적격 + 구매동사 패턴:  (NOUN{1,6}) (을|를) (구매|주문|결제|사|사줘|사주세요)
+    // 2) Accusative + purchase-verb pattern:  (NOUN{1,6}) (accusative particle) (buy|order|pay|purchase)
 	re := regexp.MustCompile(`([^\s,]{1,80}(?:\s+[^\s,]{1,80}){0,5})\s*(?:을|를)\s*(?:구매|주문|결제|사|사줘|사주세요)`)
 	if m := re.FindStringSubmatch(t); len(m) > 1 {
 		cand := strings.TrimSpace(m[1])
@@ -295,11 +295,11 @@ func pickItemAndModel(text, merchant, shipping string) (item string, model strin
 		}
 	}
 
-	// 3) 구매동사 앞쪽 명사구 근접 탐색
+    // 3) Nearby noun phrase before purchase verbs
 	re2 := regexp.MustCompile(`([^\s,]{1,80}(?:\s+[^\s,]{1,80}){0,5})\s*(?:로|으로|에서)?\s*(?:주문|구매|결제|사(?:요|자|줘|줄래|주세요)?)`)
 	if m := re2.FindStringSubmatch(t); len(m) > 1 {
 		cand := strings.TrimSpace(m[1])
-		// "쿠팡에서 주문" 같은 상점 문구 제거
+        // Remove store phrase like "order on Coupang"
 		cand = strings.TrimSuffix(cand, "에서")
 		cand = strings.TrimSpace(cand)
 		if cand != "" && !isExcluded(cand, exclude) {
@@ -307,7 +307,7 @@ func pickItemAndModel(text, merchant, shipping string) (item string, model strin
 		}
 	}
 
-	// 4) 마지막 수단: 긴 명사구 후보(쉼표로 구분된 항목 중 상점/주소 제외, 숫자·대문자 혼합 우선)
+    // 4) Last resort: long noun phrase candidates (comma-separated; exclude merchant/address; prefer digits/caps mix)
 	for _, seg := range strings.Split(t, ",") {
 		seg = strings.TrimSpace(seg)
 		if seg == "" || isExcluded(seg, exclude) {
@@ -360,7 +360,7 @@ func splitItemModel(phrase string) (item string, model string) {
 		return "", ""
 	}
 
-	// (a) 숫자/하이픈/모델 큐가 처음 나타나는 위치를 모델 시작으로 간주
+    // (a) Treat the first occurrence of a digit/hyphen/model cue as model start
 	idx := -1
 	for i, tk := range toks {
 		if hasDigitOrHyphen.MatchString(tk) || modelCue.MatchString(tk) {
@@ -368,17 +368,17 @@ func splitItemModel(phrase string) (item string, model string) {
 			break
 		}
 	}
-	if idx <= 0 {
-		// 모델 단서가 없으면 전체를 item
-		return phrase, ""
-	}
+    if idx <= 0 {
+        // If no model cue, treat the whole phrase as item
+        return phrase, ""
+    }
 	item = strings.Join(toks[:idx], " ")
 	model = strings.Join(toks[idx:], " ")
 	return strings.TrimSpace(item), strings.TrimSpace(model)
 }
 
 func likelyProductPhrase(seg string) bool {
-	// 상품스러움의 매우 약한 힌트: 숫자/영문대문자/하이픈 포함 또는 2~6어절의 명사구
+    // Very weak hint of product-likeness: has digits/uppercase/hyphen or a 2–6 word noun phrase
 	if hasDigitOrHyphen.MatchString(seg) {
 		return true
 	}
@@ -386,7 +386,7 @@ func likelyProductPhrase(seg string) bool {
 	return words >= 2 && words <= 6
 }
 
-// LLM이 앞뒤에 설명을 붙여도 첫 '{'~마지막 '}'만 남김
+// Even if LLM adds pre/post text, keep only from the first '{' to the last '}'
 func trimToJSONObject(s string) string {
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
@@ -416,7 +416,7 @@ func normalizeMethod(m string) string {
 	}
 }
 
-// "150만원", "1.5만", "150,000원", "150만 원" → KRW 정수
+// Examples: 150 x 10k KRW (1.5M), 1.5 x 10k KRW, 150,000 KRW → integer KRW
 var reKRW = regexp.MustCompile(`(?i)(\d[\d,\.]*)\s*(만원|만|원|krw)`)
 
 func parseKRW(s string) int64 {
@@ -430,7 +430,7 @@ func parseKRW(s string) int64 {
 	if unit == "만원" || unit == "만" {
 		factor = 10000
 	}
-	// 소수점 지원 (1.5만)
+    // Support decimals (e.g., 1.5 x 10k KRW)
 	if strings.Contains(num, ".") {
 		if f, err := strconv.ParseFloat(num, 64); err == nil {
 			return int64(f * float64(factor))
@@ -447,7 +447,7 @@ var knownMerchants = []string{"쿠팡", "네이버", "11번가", "지마켓", "G
 func inferMerchant(s string) string {
 	for _, k := range knownMerchants {
 		if strings.Contains(s, k) {
-			// 통일
+            // Normalize
 			if k == "G마켓" {
 				return "지마켓"
 			}
@@ -460,7 +460,7 @@ func inferMerchant(s string) string {
 	return ""
 }
 
-// "배송지: 서울..." / "배송지는 서울 ..." / "수령자 황수진" 같은 패턴 추출
+    // Extract patterns like "Shipping address: <city> ..." / "Shipping address is <city> ..." / "Recipient <name>"
 func inferAfterKeyword(s, keywordRegex string) string {
 	re := regexp.MustCompile(`(?i)(` + keywordRegex + `)\s*[:=\s]\s*([^,，\n]+)`)
 	if mm := re.FindStringSubmatch(s); len(mm) >= 3 {
@@ -471,7 +471,7 @@ func inferAfterKeyword(s, keywordRegex string) string {
 
 func extractFirstJSONObject(s string) string {
 	s = strings.TrimSpace(s)
-	// 가장 앞의 '{'부터 마지막 '}'까지 단순 추출
+    // Extract from the first '{' to the last '}'
 	l := strings.IndexByte(s, '{')
 	r := strings.LastIndexByte(s, '}')
 	if l >= 0 && r > l {
@@ -489,27 +489,27 @@ func parseKRWFromText(t string) int64 {
 	t = strings.ReplaceAll(t, ",", "")
 	t = strings.TrimSpace(t)
 
-	// 150만 원 / 2.3억
+    // 1.5 million won / 230 million won
 	reUnit := regexp.MustCompile(`(\d+(?:\.\d+)?)\s*(억|만)\s*원?`)
 	if m := reUnit.FindStringSubmatch(t); len(m) == 3 {
 		f, _ := strconv.ParseFloat(m[1], 64)
 		unit := int64(1)
 		switch m[2] {
-		case "억":
-			unit = 100_000_000
-		case "만":
-			unit = 10_000
+        case "억":
+            unit = 100_000_000
+        case "만":
+            unit = 10_000
 		}
 		return int64(f * float64(unit))
 	}
-	// 1500000원
+    // 1,500,000 won
 	reWon := regexp.MustCompile(`\b(\d+)\s*원`)
 	if m := reWon.FindStringSubmatch(t); len(m) == 2 {
 		if n, _ := strconv.ParseInt(m[1], 10, 64); n > 0 {
 			return n
 		}
 	}
-	// 마지막 보루: 큰 정수
+    // Last fallback: big integer
 	reBig := regexp.MustCompile(`\b(\d{6,})\b`)
 	if m := reBig.FindStringSubmatch(t); len(m) == 2 {
 		if n, _ := strconv.ParseInt(m[1], 10, 64); n > 0 {
@@ -520,7 +520,7 @@ func parseKRWFromText(t string) int64 {
 }
 
 func pickMethod(t string) string {
-	// 대표 키워드만 간단히
+// Only representative keywords, briefly
 	banks := []string{"국민", "신한", "우리", "하나", "농협", "롯데", "삼성", "현대"}
 	w := strings.ReplaceAll(t, "카 드", "카드")
 	w = strings.ReplaceAll(w, "카드", " 카드")
@@ -545,7 +545,7 @@ func pickMethod(t string) string {
 }
 
 func pickAddress(t string) string {
-	// 가벼운 주소 힌트
+// Light address hints
 	keys := []string{"서울", "수원", "경기", "광진구", "능동로", "동", "로", "길", "호"}
 	hit := 0
 	for _, k := range keys {
@@ -560,7 +560,7 @@ func pickAddress(t string) string {
 }
 
 func pickRecipient(t string) string {
-	// "~에게/한테 배송", "수령자는 XXX"
+// Patterns like "deliver to ~", "recipient is XXX"
 	if i := strings.Index(t, "수령자"); i >= 0 {
 		seg := strings.TrimSpace(t[i:])
 		seg = strings.TrimPrefix(seg, "수령자")

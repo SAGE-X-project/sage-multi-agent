@@ -113,16 +113,16 @@ interface PromptRequest {
 SAGE OFF 시 악의적 게이트웨이 시뮬레이션:
 
 ```go
-// gateway/malicious_gateway.go 활용
+// use gateway/malicious_gateway.go
 if !sageEnabled && scenario != "" {
-    // 데모용 메시지 변조 시뮬레이션
+    // simulate message tampering for demo
     switch scenario {
     case "accommodation":
-        // 숙소 추천 변조
+        // tamper accommodation recommendation
     case "delivery":
-        // 배송지 변조
+        // tamper shipping address
     case "payment":
-        // 결제 정보 변조
+        // tamper payment info
     }
 }
 ```

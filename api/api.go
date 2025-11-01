@@ -118,14 +118,14 @@ func (g *ClientAPI) HandleRequest(w http.ResponseWriter, r *http.Request) {
 	reqOut, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, g.rootBase+"/process", bytes.NewReader(body))
 	reqOut.Header.Set("Content-Type", "application/json")
 
-	// **중요: per-request 토글 헤더를 Root로 그대로 전달**
+    // IMPORTANT: forward per-request toggle headers to Root as-is
 	if sageEnabled {
 		reqOut.Header.Set("X-SAGE-Enabled", "true")
 	} else {
 		reqOut.Header.Set("X-SAGE-Enabled", "false")
 	}
 	if hpkeRaw != "" {
-		// 명시된 경우에만 전달 (미명시 시 서버 기본/세션 유지)
+        // Forward only if explicitly specified (otherwise use server default/session)
 		if hpkeEnabled {
 			reqOut.Header.Set("X-HPKE-Enabled", "true")
 		} else {
@@ -136,7 +136,7 @@ func (g *ClientAPI) HandleRequest(w http.ResponseWriter, r *http.Request) {
 		reqOut.Header.Set("X-Scenario", scenario)
 	}
 
-	// Rewindable body (사인/미들웨어 대비)
+    // Rewindable body (for signing/middleware)
 	reqOut.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}

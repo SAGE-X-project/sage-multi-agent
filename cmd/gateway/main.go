@@ -38,11 +38,11 @@ type tamperTransport struct {
 }
 
 func (t *tamperTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// 조작 대상: POST .../process
+    // Target for tampering: POST .../process
 	if req != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/process") && t.attackMsg != "" {
 		ct := strings.ToLower(strings.TrimSpace(req.Header.Get("Content-Type")))
 
-		// HPKE(application/sage+hpke)은 기본적으로 건드리지 않음 (변조시 서명/복호 실패 데모 원하면 여기서 깨면 됨)
+        // Do not alter HPKE (application/sage+hpke) by default; tamper here only for demos
 		if strings.HasPrefix(ct, "application/json") {
 			var body []byte
 			if req.Body != nil {
@@ -51,7 +51,7 @@ func (t *tamperTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			newBody := body
 
-			// JSON 파싱 후 Content 필드에 주입, 실패하면 _gw_tamper 필드 추가, 그래도 안되면 단순 append
+            // Parse JSON and inject into Content; on failure add _gw_tamper; otherwise append
 			var m map[string]any
 			if len(body) > 0 && body[0] == '{' && json.Unmarshal(body, &m) == nil {
 				if old, ok := m["Content"].(string); ok {
@@ -79,7 +79,7 @@ func (t *tamperTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	// 아웃바운드 덤프 (조작 전/후 최종 송신 패킷)
+    // Outbound dump (final packet after tamper/no-tamper)
 	if req != nil && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/process") {
 		if dump, err := httputil.DumpRequestOut(req, true); err == nil {
 			log.Printf("\n===== GW OUTBOUND >>> %s %s =====\n%s\n===== END GW OUTBOUND =====\n",
@@ -100,10 +100,10 @@ func proxyKeepPath(target string, attackMsg string, recomputeDigest bool) *httpu
 
 	origDirector := rp.Director
 	rp.Director = func(req *http.Request) {
-		_ = origDirector // 경로/쿼리는 원본 유지
+    _ = origDirector // Preserve original path/query
 		req.URL.Scheme = u.Scheme
 		req.URL.Host = u.Host
-		req.Host = u.Host // @authority 일관성
+    req.Host = u.Host // Keep @authority consistent
 	}
 
 	rp.Transport = &tamperTransport{
@@ -119,12 +119,12 @@ func proxyKeepPath(target string, attackMsg string, recomputeDigest bool) *httpu
 	return rp
 }
 
-// 인바운드 풀덤프 + 바디 재주입
+// Inbound full dump + body re-injection
 func dumpInboundMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 
-		// /.../process 로 들어오는 POST만 바디까지 풀덤프
+        // For POST to .../process, dump full request including body
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/process") {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -172,11 +172,11 @@ func (rw *recorder) WriteHeader(code int) {
 }
 
 func main() {
-	// Env 기본값 + 플래그
+    // Env defaults + flags
 	listenDef := envOr("GW_LISTEN", ":5500")
 	payDef := envOr("PAYMENT_UPSTREAM", "http://localhost:19083")
 	medDef := envOr("MEDICAL_UPSTREAM", "http://localhost:19082")
-	attackDef := os.Getenv("ATTACK_MESSAGE") // tamper 모드에서 스크립트가 세팅
+    attackDef := os.Getenv("ATTACK_MESSAGE") // set by scripts in tamper mode
 
 	listen := flag.String("listen", listenDef, "listen address")
 	payUp := flag.String("pay-upstream", payDef, "payment upstream")
@@ -186,11 +186,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Upstreams (경로 유지)
+    // Upstreams (preserve path)
 	mux.Handle("/payment/", proxyKeepPath(*payUp, *attackMsg, true))
 	mux.Handle("/medical/", proxyKeepPath(*medUp, *attackMsg, true))
 
-	// 헬스체크
+    // Health check
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

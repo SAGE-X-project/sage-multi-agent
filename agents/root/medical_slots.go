@@ -11,18 +11,18 @@ import (
 
 // Unified medical slots (single source of truth).
 type medicalSlots struct {
-	Condition   string `json:"condition"`          // ex. 당뇨병
-	Topic       string `json:"topic"`              // ex. 증상/관리/식단/운동/검사/치료/예방/약물/부작용/일반지식
-	Audience    string `json:"audience,omitempty"` // ex. 본인/가족/임산부/아동/노인
-	Duration    string `json:"duration,omitempty"` // ex. 2주, 어제부터
-	Age         string `json:"age,omitempty"`
-	Medications string `json:"medications,omitempty"` // 복용 중 약
-	// LLM 추출 전용(컨텍스트에 별도 보관): 아래 Symptoms는 medCtx.Symptoms 로 거울처럼 옮겨담는다.
-	Symptoms string `json:"symptoms,omitempty"`
+    Condition   string `json:"condition"`          // e.g., diabetes
+    Topic       string `json:"topic"`              // e.g., symptoms/management/diet/exercise/tests/treatment/prevention/medication/side effects/general info
+    Audience    string `json:"audience,omitempty"` // e.g., self/family/pregnant/child/elderly
+    Duration    string `json:"duration,omitempty"` // e.g., 2 weeks, since yesterday
+    Age         string `json:"age,omitempty"`
+    Medications string `json:"medications,omitempty"` // current medications
+    // For LLM extraction only (kept separately in context): the Symptoms below are mirrored into medCtx.Symptoms.
+    Symptoms string `json:"symptoms,omitempty"`
 }
 
-// 메타데이터 우선 + 가벼운 본문 힌트 + JSON 폴백.
-// '질환' 또는 '주제' 중 하나라도 없으면 누락 목록에 포함.
+// Metadata first + light body hints + JSON fallback.
+// If either 'condition' or 'topic' is missing, include in the missing list.
 func extractMedicalSlots(msg *types.AgentMessage) (s medicalSlots, missing []string) {
 	getS := func(keys ...string) string {
 		if msg.Metadata == nil {
@@ -44,7 +44,7 @@ func extractMedicalSlots(msg *types.AgentMessage) (s medicalSlots, missing []str
 	s.Age = getS("medical.age", "age", "나이")
 	s.Medications = getS("medical.meds", "meds", "복용약", "medications")
 
-	// JSON 본문 폴백
+    // JSON body fallback
 	if strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
 		var m map[string]any
 		if json.Unmarshal([]byte(msg.Content), &m) == nil {
@@ -63,7 +63,7 @@ func extractMedicalSlots(msg *types.AgentMessage) (s medicalSlots, missing []str
 		}
 	}
 
-	// 가벼운 키워드 힌트
+    // Light keyword hints
 	low := strings.ToLower(strings.TrimSpace(msg.Content))
 	if s.Condition == "" {
 		switch {
@@ -98,10 +98,10 @@ func extractMedicalSlots(msg *types.AgentMessage) (s medicalSlots, missing []str
 		}
 	}
 
-	// 최소 요구
-	if s.Condition == "" {
-		missing = append(missing, "condition(질환)")
-	}
+    // Minimum requirements
+    if s.Condition == "" {
+        missing = append(missing, "condition(질환)")
+    }
 	if s.Topic == "" {
 		missing = append(missing, "topic(주제)")
 	}

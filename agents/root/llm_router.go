@@ -20,7 +20,7 @@ var routerJSONRe = regexp.MustCompile(`(?s)\{.*\}`)
 
 // llmRoute uses the LLM to classify domain, with minimal hard guards as safety rails.
 func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) {
-	// 1) 규칙 우선 빠른 판정
+    // 1) Fast rule-first decision
 	low := strings.ToLower(strings.TrimSpace(text))
 	if isPaymentActionIntent(low) {
 		return routeOut{Domain: "payment", Lang: llm.DetectLang(text)}, true
@@ -32,7 +32,7 @@ func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) 
 		return routeOut{Domain: "planning", Lang: llm.DetectLang(text)}, true
 	}
 
-	// 2) LLM 사용 (있을 때만)
+    // 2) Use LLM (when available)
 	r.ensureLLM()
 	if r.llmClient == nil {
 		return routeOut{}, false
@@ -47,7 +47,7 @@ Pick the most likely domain.`
 	if err != nil || strings.TrimSpace(out) == "" {
 		return routeOut{}, false
 	}
-	// 관대한 파서
+    // Lenient parser
 	var m struct{ Domain, Lang string }
 	_ = json.Unmarshal([]byte(out), &m)
 	m.Domain = strings.ToLower(strings.TrimSpace(m.Domain))

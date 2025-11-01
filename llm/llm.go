@@ -179,7 +179,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, system, user string) (string, e
 
 	endpoint := c.BaseURL + "/chat/completions"
 
-	// --- 최대 1회 재시도 루프 ---
+    // --- Retry loop (max one retry) ---
 	for attempt := 0; attempt < 2; attempt++ {
 		httpReq, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -200,7 +200,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, system, user string) (string, e
 		body, _ := io.ReadAll(res.Body)
 		if res.StatusCode == http.StatusTooManyRequests { // 429
 			if attempt == 0 {
-				// Retry-After 헤더가 있으면 사용
+                // Honor Retry-After header if present
 				if ra := strings.TrimSpace(res.Header.Get("Retry-After")); ra != "" {
 					if sec, _ := strconv.Atoi(ra); sec > 0 {
 						time.Sleep(time.Duration(sec) * time.Second)
@@ -224,7 +224,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, system, user string) (string, e
 
 		var out chatResp
 		if err := json.Unmarshal(body, &out); err != nil {
-			// OpenAI가 배열/다른 형태를 줄 때 보호
+            // Guard against OpenAI returning arrays/other shapes
 			return "", fmt.Errorf("llm decode failed: %w; raw=%s", err, strings.TrimSpace(string(body)))
 		}
 		if out.Error != nil {

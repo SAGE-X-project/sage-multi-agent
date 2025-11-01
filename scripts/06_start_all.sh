@@ -216,10 +216,10 @@ export HPKE_KEYS_FILE="${HPKE_KEYS_FILE:-merged_agent_keys.json}"
 ROOT_SAGE="$(to_bool "${SAGE_MODE:-off}" false)"
 
 echo "[START] root     :${ROOT_PORT} (sage=${ROOT_SAGE})"
-# --- OpenAI로 Root의 LLM을 고정 ---
+# --- Pin Root's LLM to OpenAI ---
 OPENAI_API_BASE="${OPENAI_API_BASE:-https://api.openai.com/v1}"
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-4o-mini}"
-# OPENAI_API_KEY 는 실행 전에 export 해두거나 .env에 넣어두면 됩니다.
+# You can export OPENAI_API_KEY before running or put it in .env.
 
 nohup env \
   PAYMENT_URL="${PAYMENT_URL}" \

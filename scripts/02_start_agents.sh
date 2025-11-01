@@ -49,7 +49,7 @@ to_bool() {
 
 normalize_base() { echo "${1%/}"; }
 
-# ❗️set -e에서 안전하게 동작하도록 if 블록으로 작성 (조건 실패로 종료 방지)
+# Write as an if-block to work safely with set -e (avoid exit on condition failure)
 warn_if_missing() {
   local p="$1" name="$2"
   if [[ -n "$p" && ! -f "$p" ]]; then
@@ -134,7 +134,7 @@ echo "  MEDICAL_KEM_JWK_FILE=${MEDICAL_KEM_JWK_FILE}"
 echo "  PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
 echo "  PAYMENT_KEM_JWK_FILE=${PAYMENT_KEM_JWK_FILE}"
 
-# 경고만 출력 (종료 금지)
+# Print warnings only (do not exit)
 warn_if_missing "$HPKE_KEYS_FILE" "HPKE_KEYS_FILE"
 warn_if_missing "$MEDICAL_JWK_FILE" "MEDICAL_JWK_FILE"
 warn_if_missing "$MEDICAL_KEM_JWK_FILE" "MEDICAL_KEM_JWK_FILE"
@@ -157,7 +157,7 @@ if [[ -f cmd/medical/main.go ]]; then
     -llm-lang "${LLM_LANG_DEFAULT}"
     -llm-timeout "${GEMINI_TIMEOUT_MS}"
   )
-  # 키가 존재할 때만 플래그 추가 (없으면 HPKE 없이도 기동)
+  # Add flags only if keys exist (otherwise start even without HPKE)
   [[ -f "${HPKE_KEYS_FILE}" ]]         && MED_ARGS+=( -keys "${HPKE_KEYS_FILE}" )
   [[ -n "${GEMINI_API_KEY:-}" && "$LLM_ENABLED" == "true" ]] && MED_ARGS+=( -llm-key "${GEMINI_API_KEY}" )
   [[ -f "${MEDICAL_JWK_FILE}" ]]       && MED_ARGS+=( -sign-jwk "${MEDICAL_JWK_FILE}" )
@@ -193,7 +193,7 @@ if [[ -f cmd/payment/main.go ]]; then
     -llm-lang "${LLM_LANG_DEFAULT}"
     -llm-timeout "${GEMINI_TIMEOUT_MS}"
   )
-  # 키가 존재할 때만 플래그 추가
+  # Add flags only if keys exist
   [[ -f "${HPKE_KEYS_FILE}" ]]           && PAY_ARGS+=( -keys "${HPKE_KEYS_FILE}" )
   [[ -n "${GEMINI_API_KEY:-}" && "$LLM_ENABLED" == "true" ]] && PAY_ARGS+=( -llm-key "${GEMINI_API_KEY}" )
   [[ -f "${PAYMENT_JWK_FILE}" ]]         && PAY_ARGS+=( -sign-jwk "${PAYMENT_JWK_FILE}" )

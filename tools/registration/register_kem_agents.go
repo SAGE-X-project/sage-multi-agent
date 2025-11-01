@@ -124,11 +124,11 @@ func main() {
 
 	ctx := context.Background()
 
-	ownerCli, err := agentcard.NewAgentCardClient(&did.RegistryConfig{
-		RPCEndpoint:     *rpcURL,
-		ContractAddress: *contract,
-		PrivateKey:      "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // 컨트랙트 배포자/오너 키
-	})
+    ownerCli, err := agentcard.NewAgentCardClient(&did.RegistryConfig{
+        RPCEndpoint:     *rpcURL,
+        ContractAddress: *contract,
+        PrivateKey:      "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // contract deployer/owner key
+    })
 	if err == nil {
 		if err := ownerCli.SetActivationDelay(ctx, 0); err != nil {
 			fmt.Printf("SetActivationDelay(0) failed: %v\n", err)
@@ -139,7 +139,7 @@ func main() {
 		fmt.Printf("owner client init failed: %v\n", err)
 	}
 
-	// (옵션) 지금 체인의 activationDelay를 로깅
+    // (optional) log the current chain activationDelay
 	if d, err := viewClient.GetActivationDelay(ctx); err == nil {
 		fmt.Printf(" Current activationDelay = %s\n", d)
 	}
@@ -266,14 +266,14 @@ func loadSigning(path string) ([]signingRow, error) {
 }
 
 // === KEM JSON loader (top-level array OR {"agents":[]}) ===
-// 같은 파일 안에 두기 때문에 go run -tags=reg_kem tools/registration/register_kem_agents.go 만으로 동작
+// Since both are in the same file, `go run -tags=reg_kem tools/registration/register_kem_agents.go` works standalone
 
 type KemRow struct {
 	Name          string `json:"name"`
 	DID           string `json:"did,omitempty"`
 	Address       string `json:"address,omitempty"`
-	X25519Public  string `json:"x25519Public"`            // ← JSON과 동일
-	X25519Private string `json:"x25519Private,omitempty"` // ← JSON과 동일
+    X25519Public  string `json:"x25519Public"`            // ← same as JSON
+    X25519Private string `json:"x25519Private,omitempty"` // ← same as JSON
 }
 type kemWrapper struct {
 	Agents []KemRow `json:"agents"`
@@ -492,7 +492,7 @@ func devWarpTo(ctx context.Context, rpcURL string, target time.Time) error {
 	}
 	defer c.Close()
 
-	// 1) 시각 고정형 시도 (하드햇/아나빌 공통)
+    // 1) Fixed timestamp attempt (Hardhat/Anvil)
 	ts := target.Unix()
 	var dummy any
 	if err := c.CallContext(ctx, &dummy, "evm_setNextBlockTimestamp", ts); err == nil {
@@ -504,7 +504,7 @@ func devWarpTo(ctx context.Context, rpcURL string, target time.Time) error {
 		return nil
 	}
 
-	// 2) 증가형(하드햇/가나슈)
+    // 2) Incremental (Hardhat/Ganache)
 	delta := time.Until(target).Seconds()
 	if delta < 0 {
 		delta = 0

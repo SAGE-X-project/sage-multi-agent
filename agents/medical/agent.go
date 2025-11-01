@@ -234,10 +234,10 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 	return agent, nil
 }
 
-// 핸들러 반환
+// Return the handler
 func (e *MedicalAgent) Handler() http.Handler { return e.handler }
 
-// 서버 실행
+// Start server
 func (e *MedicalAgent) Start(addr string) error {
 	if e.handler == nil {
 		return fmt.Errorf("handler not initialized")
@@ -247,7 +247,7 @@ func (e *MedicalAgent) Start(addr string) error {
 	return e.httpSrv.ListenAndServe()
 }
 
-// 서버 종료
+// Shutdown server
 func (e *MedicalAgent) Shutdown(ctx context.Context) error {
 	if e.httpSrv == nil {
 		return nil
@@ -326,7 +326,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}, nil
 	}
 
-	// ===== Metadata 수집 (Root가 채워준 필드 우선) =====
+    // ===== Metadata collection (prefer fields set by Root) =====
 	lang := getMetaString(in.Metadata, "lang")
 	if lang == "" {
 		lang = llm.DetectLang(in.Content)
@@ -354,7 +354,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		history = history[len(history)-int(histN):]
 	}
 
-	// 사용자 질문 본문(없으면 lastMsg/symptoms로 보강)
+    // User question body (fallback to lastMsg/symptoms if missing)
 	query := strings.TrimSpace(in.Content)
 	if query == "" {
 		if lastMsg != "" {
@@ -364,14 +364,14 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}
 	}
 
-	// ===== LLM 프롬프트 구성 =====
+    // ===== Build LLM prompt =====
 	sys := map[string]string{
 		"ko": "너는 의료 정보 도우미야. 진단/처방 없이, 안전하고 일반적인 의학 정보를 한 문장으로만 제공해. 응급 징후가 의심되면 전문의 진료를 권유해. 목록/코드블록/장황한 설명 금지.",
 		"en": "You are a medical info assistant. Provide ONE short, safe, general informational sentence. No diagnosis/prescription. If red flags are possible, suggest seeing a professional. No lists or code blocks.",
 	}[lang]
 
 	var sb strings.Builder
-	// 요약 컨텍스트 블록(LLM이 이해하기 쉬운 형태)
+    // Summary context block (LLM-friendly format)
 	if query != "" {
 		fmt.Fprintf(&sb, "UserQuestion: %s\n", query)
 	}
@@ -417,7 +417,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 	if lastMsg != "" {
 		fmt.Fprintf(&sb, "LastUserMessage: %s\n", lastMsg)
 	}
-	// 출력 형식 고정
+    // Enforce output format
 	if lang == "ko" {
 		fmt.Fprint(&sb, "Output: 한 문장 한국어 답변만.\n")
 	} else {
@@ -425,7 +425,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 	}
 	usr := sb.String()
 
-	// ===== LLM 호출 (실패 시 폴백) =====
+    // ===== LLM call (fallback on failure) =====
 	text := ""
 	if e.llmClient != nil {
 		out, err := e.llmClient.Chat(ctx, sys, usr)
@@ -450,7 +450,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}
 	}
 
-	// ===== 응답 메시지 =====
+    // ===== Response message =====
 	out := types.AgentMessage{
 		ID:        in.ID + "-medical",
 		From:      "medical",
@@ -616,7 +616,7 @@ func itoa(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// 이미 있다면 재사용. 없으면 추가
+// Reuse if already exists; add if not
 func getMetaString(m map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := m[k]; ok {
