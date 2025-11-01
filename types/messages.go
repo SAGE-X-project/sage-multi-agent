@@ -9,10 +9,10 @@ import (
 
 // PromptRequest represents an incoming prompt request from the frontend
 type PromptRequest struct {
-	Prompt      string                 `json:"prompt"`
-	SAGEEnabled bool                   `json:"sageEnabled,omitempty"`
-	Scenario    string                 `json:"scenario,omitempty"`
-	Metadata    *RequestMetadata       `json:"metadata,omitempty"`
+	Prompt      string           `json:"prompt"`
+	SAGEEnabled bool             `json:"sageEnabled,omitempty"`
+	Scenario    string           `json:"scenario,omitempty"`
+	Metadata    *RequestMetadata `json:"metadata,omitempty"`
 }
 
 // RequestMetadata contains metadata for the request
@@ -25,24 +25,24 @@ type RequestMetadata struct {
 
 // PromptResponse represents the response to a prompt request
 type PromptResponse struct {
-	Response         string                 `json:"response"`
-	Logs             []AgentLog             `json:"logs,omitempty"`
+	Response         string                  `json:"response"`
+	Logs             []AgentLog              `json:"logs,omitempty"`
 	SAGEVerification *SAGEVerificationResult `json:"sageVerification,omitempty"`
-	Metadata         *ResponseMetadata      `json:"metadata,omitempty"`
-	Error            *ErrorDetail           `json:"error,omitempty"`
+	Metadata         *ResponseMetadata       `json:"metadata,omitempty"`
+	Error            *ErrorDetail            `json:"error,omitempty"`
 }
 
 // ResponseMetadata contains metadata for the response
 type ResponseMetadata struct {
-	RequestID     string  `json:"requestId"`
-	ProcessingTime float64 `json:"processingTime"` // in milliseconds
-	AgentPath     []string `json:"agentPath,omitempty"`
-	Timestamp     string  `json:"timestamp"`
+	RequestID      string   `json:"requestId"`
+	ProcessingTime float64  `json:"processingTime"` // in milliseconds
+	AgentPath      []string `json:"agentPath,omitempty"`
+	Timestamp      string   `json:"timestamp"`
 }
 
 // WebSocketMessage represents a WebSocket message
 type WebSocketMessage struct {
-	Type      string      `json:"type"`      // "log", "error", "status", "heartbeat", "connection"
+	Type      string      `json:"type"` // "log", "error", "status", "heartbeat", "connection"
 	Payload   interface{} `json:"payload"`
 	Timestamp string      `json:"timestamp"`
 	MessageID string      `json:"messageId,omitempty"`
@@ -50,15 +50,15 @@ type WebSocketMessage struct {
 
 // AgentLog represents a log entry from an agent
 type AgentLog struct {
-	Type           string    `json:"type"`           // "routing", "planning", "ordering", "gateway", "sage", "error"
-	From           string    `json:"from"`
-	To             string    `json:"to,omitempty"`
-	Content        string    `json:"content"`
-	Timestamp      string    `json:"timestamp"`
-	MessageID      string    `json:"messageId,omitempty"`
-	OriginalPrompt string    `json:"originalPrompt,omitempty"`
-	TamperedPrompt string    `json:"tamperedPrompt,omitempty"`
-	Level          string    `json:"level,omitempty"` // "info", "warning", "error", "debug"
+	Type           string `json:"type"` // "routing", "planning", "medical", "gateway", "sage", "error"
+	From           string `json:"from"`
+	To             string `json:"to,omitempty"`
+	Content        string `json:"content"`
+	Timestamp      string `json:"timestamp"`
+	MessageID      string `json:"messageId,omitempty"`
+	OriginalPrompt string `json:"originalPrompt,omitempty"`
+	TamperedPrompt string `json:"tamperedPrompt,omitempty"`
+	Level          string `json:"level,omitempty"` // "info", "warning", "error", "debug"
 }
 
 // SAGEVerificationResult represents the result of SAGE protocol verification
@@ -90,16 +90,16 @@ type ConnectionStatus struct {
 
 // HealthCheckResponse represents the health status of the service
 type HealthCheckResponse struct {
-	Status    string                 `json:"status"` // "healthy", "degraded", "unhealthy"
-	Timestamp string                 `json:"timestamp"`
-	Version   string                 `json:"version"`
+	Status    string                   `json:"status"` // "healthy", "degraded", "unhealthy"
+	Timestamp string                   `json:"timestamp"`
+	Version   string                   `json:"version"`
 	Services  map[string]ServiceStatus `json:"services"`
 }
 
 // ServiceStatus represents the status of a dependent service
 type ServiceStatus struct {
 	Name      string  `json:"name"`
-	Status    string  `json:"status"` // "up", "down", "degraded"
+	Status    string  `json:"status"`            // "up", "down", "degraded"
 	Latency   float64 `json:"latency,omitempty"` // in milliseconds
 	LastCheck string  `json:"lastCheck"`
 	Error     string  `json:"error,omitempty"`
@@ -117,7 +117,7 @@ const (
 	// Agent log types
 	LogTypeRouting  = "routing"
 	LogTypePlanning = "planning"
-	LogTypeOrdering = "ordering"
+	LogTypeMEDICAL  = "medical"
 	LogTypeGateway  = "gateway"
 	LogTypeSAGE     = "sage"
 	LogTypeError    = "error"

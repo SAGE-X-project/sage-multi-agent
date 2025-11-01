@@ -17,7 +17,7 @@ GOMOD=$(GOCMD) mod
 # Binary names
 BINARY_CLI=cli
 BINARY_ROOT=root
-BINARY_ORDERING=ordering
+BINARY_MEDICAL=medical
 BINARY_PLANNING=planning
 BINARY_PAYMENT=payment
 BINARY_REGISTER=register
@@ -56,7 +56,7 @@ help:
 	@echo "  $(YELLOW)build-agents$(NC)     - Build only agent binaries"
 	@echo "  $(YELLOW)build-cli$(NC)        - Build CLI client"
 	@echo "  $(YELLOW)build-root$(NC)       - Build root agent"
-	@echo "  $(YELLOW)build-ordering$(NC)   - Build ordering agent"
+	@echo "  $(YELLOW)build-medical$(NC)   - Build medical agent"
 	@echo "  $(YELLOW)build-planning$(NC)   - Build planning agent"
 	@echo "  $(YELLOW)build-register$(NC)   - Build registration tool"
 	@echo "  $(YELLOW)build-client$(NC)     - Build client servers"
@@ -67,7 +67,7 @@ help:
 	@echo "  $(YELLOW)deps$(NC)             - Download and verify dependencies"
 	@echo "  $(YELLOW)tidy$(NC)             - Tidy go.mod and go.sum"
 	@echo "  $(YELLOW)run-root$(NC)         - Run root agent"
-	@echo "  $(YELLOW)run-ordering$(NC)     - Run ordering agent"
+	@echo "  $(YELLOW)run-medical$(NC)     - Run medical agent"
 	@echo "  $(YELLOW)run-planning$(NC)     - Run planning agent"
 	@echo "  $(YELLOW)run-cli$(NC)          - Run CLI client"
 	@echo "  $(YELLOW)install$(NC)          - Install binaries to GOPATH/bin"
@@ -85,7 +85,7 @@ build: deps build-dir
 	@ls -la $(BIN_DIR)/
 
 # Build only agent binaries
-build-agents: build-root build-ordering build-planning build-payment
+build-agents: build-root build-medical build-planning build-payment
 	@echo "$(GREEN)All agents built$(NC)"
 
 # Build launcher
@@ -109,10 +109,10 @@ build-root: build-dir
 	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ROOT) ./$(CLI_DIR)/root
 	@echo "$(GREEN)Root agent built$(NC)"
 
-build-ordering: build-dir
-	@echo "$(YELLOW)Building ordering agent...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ORDERING) ./$(CLI_DIR)/ordering
-	@echo "$(GREEN)Ordering agent built$(NC)"
+build-medical: build-dir
+	@echo "$(YELLOW)Building medical agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_MEDICAL) ./$(CLI_DIR)/medical
+	@echo "$(GREEN)MEDICAL agent built$(NC)"
 
 build-planning: build-dir
 	@echo "$(YELLOW)Building planning agent...$(NC)"
@@ -200,9 +200,9 @@ run-root:
 	@echo "$(YELLOW)Starting root agent...$(NC)"
 	@$(GOCMD) run ./$(CLI_DIR)/root -port 8080
 
-run-ordering:
-	@echo "$(YELLOW)Starting ordering agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/ordering -port 8083
+run-medical:
+	@echo "$(YELLOW)Starting medical agent...$(NC)"
+	@$(GOCMD) run ./$(CLI_DIR)/medical -port 8083
 
 run-planning:
 	@echo "$(YELLOW)Starting planning agent...$(NC)"
@@ -234,7 +234,7 @@ install: build
 	@echo "$(YELLOW)Installing binaries to GOPATH/bin...$(NC)"
 	@cp $(BIN_DIR)/$(BINARY_CLI) $(GOPATH)/bin/sage-cli
 	@cp $(BIN_DIR)/$(BINARY_ROOT) $(GOPATH)/bin/sage-root
-	@cp $(BIN_DIR)/$(BINARY_ORDERING) $(GOPATH)/bin/sage-ordering
+	@cp $(BIN_DIR)/$(BINARY_MEDICAL) $(GOPATH)/bin/sage-medical
 	@cp $(BIN_DIR)/$(BINARY_PLANNING) $(GOPATH)/bin/sage-planning
 	@cp $(BIN_DIR)/$(BINARY_REGISTER) $(GOPATH)/bin/sage-register
 	@echo "$(GREEN)Installation complete$(NC)"
@@ -242,7 +242,7 @@ install: build
 	@echo "Installed binaries:"
 	@echo "  sage-cli       - CLI client"
 	@echo "  sage-root      - Root agent"
-	@echo "  sage-ordering  - Ordering agent"
+	@echo "  sage-medical  - MEDICAL agent"
 	@echo "  sage-planning  - Planning agent"
 	@echo "  sage-register  - Registration tool"
 

@@ -1,33 +1,13 @@
 #!/usr/bin/env bash
-# SAGE V4 Agent Registration (self-signed by agents)
-# - Signing only: register_agents.go (//go:build reg_agent)            ← register ECDSA only
-# - KEM Register: register_kem_agents.go (//go:build reg_kem)          ← register ECDSA+X25519 in one shot (Register or addKey)
-# - Default behavior: when --kem/--kem-only is set, build merged JSON from signing JSON (ecdsa+x25519, did=address) and register
+# AgentCardRegistry Registration Orchestrator (aligned with AgentCardClient)
+# - Signing only   : register_agents.go       (-tags reg_agent) → ECDSA key, commit→register→(activate)
+# - KEM register   : register_kem_agents.go   (-tags reg_kem)   → ECDSA + X25519 in one shot
 #
-# Examples:
-#   # 1) Register signing keys only
-#   sh ./scripts/00_register_agents.sh \
-#     --signing-keys ./generated_agent_keys.json \
-#     --agents "ordering,planing,payment,external"
-#
-#   # 2) Register KEM only (Register if not exists, addKey if exists)
-#   sh ./scripts/00_register_agents.sh \
-#     --kem \
-#     --signing-keys ./generated_agent_keys.json \
-#     --agents "ordering,planing,payment,external"
-#
-#   # 3) Both (signing → KEM)
-#   sh ./scripts/00_register_agents.sh \
-#     --both \
-#     --signing-keys ./generated_agent_keys.json \
-#     --agents "ordering,planing,payment,external"
-#
-#   # Note: If you already have a KEM JSON and want to use it as-is, set --no-merge and specify --kem-keys
-#   sh ./scripts/00_register_agents.sh \
-#     --kem --no-merge \
-#     --kem-keys ./keys/kem/generated_kem_keys.json \
-#     --signing-keys ./generated_agent_keys.json \
-#     --agents "ordering,planing,payment,external"
+# Notes:
+#   • ECDSA publicKey: 0x04 + X + Y (65B uncompressed) 권장. (압축도 허용하되 Go에서 복원)
+#   • X25519 publicKey: 정확히 32바이트(16진수 64글자; 0x 접두 허용).
+#   • 서명은 Go 코드에서 chainId + registry(address(this)) + owner(Address)에 대해
+#     EIP-191(eth_sign) 프리픽스 적용해 생성(컨트랙트와 동일).
 
 set -euo pipefail
 
@@ -35,7 +15,7 @@ set -euo pipefail
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 echo "======================================"
-echo " SAGE V4 Agent Registration Tool"
+echo " AgentCard Registration Tool"
 echo "======================================"
 echo ""
 
@@ -43,7 +23,8 @@ echo ""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 
-CONTRACT_ADDRESS="${SAGE_REGISTRY_V4_ADDRESS:-0x5FbDB2315678afecb367f032d93F642f64180aa3}"
+# ENV 우선: SAGE_REGISTRY_V4_ADDRESS → (fallback) SAGE_REGISTRY_ADDRESS
+CONTRACT_ADDRESS="${SAGE_REGISTRY_V4_ADDRESS:-${SAGE_REGISTRY_ADDRESS:-0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512}}"
 RPC_URL="${ETH_RPC_URL:-http://127.0.0.1:8545}"
 
 # Signing keys JSON default
@@ -65,61 +46,58 @@ fi
 SIGNING_KEYS="$SIGNING_KEYS_DEFAULT"
 KEM_KEYS="$KEM_KEYS_DEFAULT"
 
-# Merged key file path & flags
+# Merge output (top-level array; includes x25519Public/x25519Private always)
 COMBINED_OUT="$PROJECT_ROOT/merged_agent_keys.json"
-BUILD_MERGED=1             # Default: when KEM is enabled, auto-build merged JSON from signing
-ADDR_SOURCE="$SIGNING_KEYS" # JSON used to extract addresses for funding (default: signing)
+DO_MERGE=0                    # --merge 시 1
+ADDR_SOURCE="$SIGNING_KEYS"   # funding 시 주소 추출에 사용할 JSON
 
 # Funding
 FUNDING_KEY=""
-FUNDING_AMOUNT_WEI="10000000000000000"   # 0.01 ETH
+FUNDING_AMOUNT_WEI="100000000000000000"   # 0.01 ETH
 
 # Agent filter (comma-separated)
 AGENTS="${SAGE_AGENTS:-}"
 
 # Execution toggles
-DO_SIGNING=1      # Default: register ECDSA only
-DO_KEM=0          # Enable via --kem / --kem-only / --both
+DO_SIGNING=1      # 기본: ECDSA 등록
+DO_KEM=0          # --kem 또는 --both 지정 시 활성화
+TRY_ACTIVATE=0
+WAIT_SECONDS=65   # commit→register 최소 60초 이상
 
-# Optional: build KEM JSON from PEM before registering (legacy path)
+# Optional: PEM→JSON builder path for KEM (legacy)
 PEM_DIR=""
-REQUIRE_PRIV=0   # pass to builder if supported
+REQUIRE_PRIV=0
 
 usage() {
   cat <<EOF
 Usage: $0 [options]
 
 Options:
-  --contract ADDRESS         SageRegistryV4 (proxy) address (default/env)
+  --contract ADDRESS         AgentCardRegistry (proxy) address (default/env)
   --rpc URL                  RPC endpoint (default/env)
 
   --signing-keys FILE        Signing keys JSON (secp256k1)
                              Default: $SIGNING_KEYS_DEFAULT
-  --kem-keys FILE            KEM (HPKE X25519) keys JSON (object.agents[] or top-level array)
+  --kem-keys FILE            KEM (X25519) keys JSON; supports top-level array or {"agents":[]}
                              Default: $KEM_KEYS_DEFAULT
-  --pem-dir DIR              (optional) Build KEM JSON from PEMs in DIR before registering
-  --require-priv             (optional) Builder fails if *_x25519_priv.pem is missing
+  --merge                    Build merged JSON (SIGNING+KEM) → includes x25519 fields ("" if absent)
+  --combined-out FILE        Output path for merged JSON (default: $COMBINED_OUT)
 
-  --combined-out FILE        (optional) merged JSON output path (default: $COMBINED_OUT)
-  --no-merge                 (optional) don't build merged JSON; use --kem-keys as-is
+  --pem-dir DIR              (optional) Build KEM JSON from PEMs in DIR before registering
+  --require-priv             (optional) Builder fails if *_x25519_priv.pem missing
 
   --agents "A,B,C"           (optional) limit to these agent names
 
   --funding-key HEX          (optional) funder private key (hex, 0x-prefixed ok)
   --funding-amount-wei AMT   (optional) wei per address (default: $FUNDING_AMOUNT_WEI)
 
-  --kem                      Register ECDSA + X25519 (single Register/addKey)
-  --kem-only                 Only run KEM Register (skip plain signing)
-  --both                     Run signing-only first, then KEM
+  --kem                      Do KEM registration (ECDSA + X25519)
+  --both                     Run signing first, then KEM
+
+  --wait-seconds N           Seconds to wait between commit and register (default: $WAIT_SECONDS)
+  --try-activate             Try to activate immediately if activation time has passed
 
   --help                     Show help
-
-Notes:
-- For KEM Register, the tx sender must be the agent's EOA and must match the Register message sender.
-- By default, each agent's privateKey (EOA) from signing-keys is used to send transactions.
-- Funding (local dev convenience):
-    1) On dev nodes, set balance directly via hardhat_setBalance / anvil_setBalance
-    2) If (1) fails and --funding-key is provided and cast is installed, the funder sends actual transfers
 EOF
 }
 
@@ -130,22 +108,23 @@ while [[ $# -gt 0 ]]; do
     --rpc)                 RPC_URL="$2"; shift 2 ;;
     --signing-keys)        SIGNING_KEYS="$2"; shift 2 ;;
     --kem-keys)            KEM_KEYS="$2"; shift 2 ;;
+    --merge)               DO_MERGE=1; shift ;;
+    --combined-out)        COMBINED_OUT="$2"; shift 2 ;;
     --pem-dir)             PEM_DIR="$2"; shift 2 ;;
     --require-priv)        REQUIRE_PRIV=1; shift ;;
     --agents)              AGENTS="$2"; shift 2 ;;
     --funding-key)         FUNDING_KEY="$2"; shift 2 ;;
     --funding-amount-wei)  FUNDING_AMOUNT_WEI="$2"; shift 2 ;;
     --kem)                 DO_KEM=1; DO_SIGNING=0; shift ;;
-    --kem-only)            DO_KEM=1; DO_SIGNING=0; shift ;;
     --both)                DO_KEM=1; DO_SIGNING=1; shift ;;
-    --combined-out)        COMBINED_OUT="$2"; shift 2 ;;
-    --no-merge)            BUILD_MERGED=0; shift ;;
+    --wait-seconds)        WAIT_SECONDS="$2"; shift 2 ;;
+    --try-activate)        TRY_ACTIVATE=1; shift ;;
     --help|-h)             usage; exit 0 ;;
     *) echo -e "${RED}Unknown option: $1${NC}"; usage; exit 1 ;;
   esac
 done
 
-# Check for jq/curl/go/cast
+# ---------- Binaries ----------
 need() { command -v "$1" >/dev/null 2>&1 || { echo -e "${RED}Error: '$1' not found${NC}"; exit 1; }; }
 need go
 need curl
@@ -155,17 +134,11 @@ has_cast=0; command -v cast >/dev/null 2>&1 && has_cast=1
 # Export AGENTS for jq filters
 [[ -n "${AGENTS:-}" ]] && export AGENTS
 
-# ---------- Helpers ----------
-wei_to_hex() {
-  local dec="$1"
-  printf "0x%x" "${dec}"
-}
-
+# ---------- JSON-RPC helpers ----------
+wei_to_hex() { local dec="$1"; printf "0x%x" "${dec}"; }
 jsonrpc() {
-  local method="$1"
-  local params="$2"
-  curl -s -X POST "$RPC_URL" \
-    -H 'Content-Type: application/json' \
+  local method="$1"; local params="$2"
+  curl -s -X POST "$RPC_URL" -H 'Content-Type: application/json' \
     --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":${params}}"
 }
 
@@ -179,22 +152,16 @@ fund_one_addr_devnode() {
     if echo "$res" | grep -q "\"error\""; then
       return 1
     else
-      echo "  - anvil_setBalance OK (addr=$addr, amount=$hex_amt)"
-      return 0
+      echo "  - anvil_setBalance OK (addr=$addr, amount=$hex_amt)"; return 0
     fi
   else
-    echo "  - hardhat_setBalance OK (addr=$addr, amount=$hex_amt)"
-    return 0
+    echo "  - hardhat_setBalance OK (addr=$addr, amount=$hex_amt)"; return 0
   fi
 }
 
-# ADDR_SOURCE (JSON) supports either a top-level array or {"agents":[...]}
 jq_addresses() {
   local file="$1"
-  if [[ $has_jq -ne 1 ]]; then
-    echo ""
-    return 1
-  fi
+  if [[ $has_jq -ne 1 ]]; then echo ""; return 1; fi
   jq -r '
     def roots: if type=="array" then . else .agents end;
     roots as $r
@@ -211,8 +178,7 @@ jq_addresses() {
 
 fund_addresses_devnode() {
   [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} skipping auto-funding because jq is not installed"; return 1; }
-  local addrs
-  addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
+  local addrs; addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
   [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} no addresses to fund ($ADDR_SOURCE)"; return 1; }
   local ok_any=0
   while IFS= read -r addr; do
@@ -224,26 +190,19 @@ fund_addresses_devnode() {
 
 fund_addresses_cast() {
   [[ $has_cast -ne 1 ]] && return 1
-  [[ -z "$FUNDING_KEY" ]] && return 1
+  [[ -n "$FUNDING_KEY" ]] || return 1
   [[ $has_jq -ne 1 ]] && { echo -e "${YELLOW}Warning:${NC} skipping cast funding because jq is not installed"; return 1; }
-  local addrs
-  addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
+  local addrs; addrs=$(jq_addresses "$ADDR_SOURCE") || return 1
   [[ -z "$addrs" ]] && { echo -e "${YELLOW}Warning:${NC} no addresses to fund ($ADDR_SOURCE)"; return 1; }
   local ok_any=0
   while IFS= read -r addr; do
     [[ -z "$addr" ]] && continue
-    local bal_hex
-    bal_hex=$(jsonrpc "eth_getBalance" "[\"$addr\",\"latest\"]" | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "0x0")
+    local bal_hex; bal_hex=$(jsonrpc "eth_getBalance" "[\"$addr\",\"latest\"]" | grep -o '"result":"[^"]*"' | cut -d'"' -f4 || echo "0x0")
     if [[ "$bal_hex" == "0x0" || "$bal_hex" == "0x" ]]; then
       echo "  - cast send: $addr <= ${FUNDING_AMOUNT_WEI} wei"
-      if cast send --rpc-url "$RPC_URL" --private-key "$FUNDING_KEY" "$addr" --value "$FUNDING_AMOUNT_WEI" >/dev/null 2>&1; then
-        ok_any=1
-      else
-        echo "    * cast transfer failed (addr=$addr)"
-      fi
+      if cast send --rpc-url "$RPC_URL" --private-key "$FUNDING_KEY" "$addr" --value "$FUNDING_AMOUNT_WEI" >/dev/null 2>&1; then ok_any=1; else echo "    * cast transfer failed (addr=$addr)"; fi
     else
-      echo "  - balance exists: $addr ($bal_hex) → skip transfer"
-      ok_any=1
+      echo "  - balance exists: $addr ($bal_hex) → skip transfer"; ok_any=1
     fi
   done <<< "$addrs"
   [[ $ok_any -eq 1 ]] && return 0 || return 1
@@ -251,15 +210,12 @@ fund_addresses_cast() {
 
 # ---------- Validators ----------
 validate_signing_json() {
-  local f="$1"
-  [[ -f "$f" ]] || { echo -e "${RED}Signing keys file not found: $f${NC}"; exit 1; }
+  local f="$1"; [[ -f "$f" ]] || { echo -e "${RED}Signing keys not found: $f${NC}"; exit 1; }
   if [[ $has_jq -eq 1 ]]; then
-    if ! jq -e 'type=="array" and length>=1 and
-                (.[0]|has("name") and has("did") and has("publicKey") and has("privateKey") and has("address"))' "$f" >/dev/null 2>&1; then
-      echo -e "${RED}Error:${NC} '$f' is not a valid signing-key summary array."
-      exit 1
-    fi
-    echo -e "${GREEN} Signing keys JSON OK${NC} (records: $(jq 'length' "$f"))"
+    jq -e 'type=="array" and length>=1 and (.[0]|has("name") and has("did") and has("publicKey") and has("privateKey") and has("address"))' "$f" >/dev/null 2>&1 \
+      && echo -e "${GREEN} Signing keys JSON OK${NC} (records: $(jq 'length' "$f"))" \
+      || { echo -e "${RED}Error:${NC} '$f' is not a valid signing-key summary array."; exit 1; }
+    # ⛔️ 문제되던 startswith 검사 제거 (일부 row의 타입 변형/누락으로 jq가 크래시하던 부분)
   else
     grep -q '"publicKey"' "$f" || { echo -e "${RED}Error:${NC} missing 'publicKey' in '$f'"; exit 1; }
     grep -q '"privateKey"' "$f" || { echo -e "${RED}Error:${NC} missing 'privateKey' in '$f'"; exit 1; }
@@ -268,27 +224,17 @@ validate_signing_json() {
 }
 
 validate_kem_json() {
-  local f="$1"
-  [[ -f "$f" ]] || { echo -e "${RED}KEM keys file not found: $f${NC}"; exit 1; }
+  local f="$1"; [[ -f "$f" ]] || { echo -e "${RED}KEM keys file not found: $f${NC}"; exit 1; }
   if [[ $has_jq -eq 1 ]]; then
-    # object.agents[] OR top-level array — both allowed
-    if ! jq -e '
+    jq -e '
       (
-        (type=="object") and (.agents|type=="array") and
-        ( (.agents|length)==0 or (.agents[0]|has("name") and has("x25519Public")) )
+        (type=="object") and (.agents|type=="array")
+      ) or (
+        (type=="array")
       )
-      or
-      (
-        (type=="array") and
-        ( (length)==0 or (.[0]|has("name") and has("x25519Public")) )
-      )
-    ' "$f" >/dev/null 2>&1; then
-      echo -e "${RED}Error:${NC} '$f' must be either {\"agents\":[...]} or a top-level array of rows with name/x25519Public."
-      exit 1
-    fi
-    local count
-    count=$(jq -r 'if type=="object" then (.agents|length) else (length) end' "$f")
-    echo -e "${GREEN} KEM keys JSON OK${NC} (agents: ${count})"
+    ' "$f" >/dev/null 2>&1 \
+      || { echo -e "${RED}Error:${NC} '$f' must be either {\"agents\":[...]} or a top-level array."; exit 1; }
+    echo -e "${GREEN} KEM keys JSON OK${NC}"
   else
     grep -Eq '"agents"|^\s*\[' "$f" || { echo -e "${RED}Error:${NC} not a recognized KEM JSON shape."; exit 1; }
     grep -q 'x25519Public' "$f" || { echo -e "${RED}Error:${NC} missing x25519Public."; exit 1; }
@@ -299,38 +245,39 @@ validate_kem_json() {
 # ---------- Connectivity ----------
 echo " Checking blockchain connection..."
 if ! curl -s -X POST --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' "$RPC_URL" >/dev/null; then
-  echo -e "${RED} Error: Cannot connect to blockchain at $RPC_URL${NC}"
-  exit 1
+  echo -e "${RED} Error: Cannot connect to blockchain at $RPC_URL${NC}"; exit 1
 fi
 echo -e "${GREEN} Blockchain connected${NC}"
 
 echo " Checking registry contract..."
 CODE=$(curl -s -X POST --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getCode\",\"params\":[\"$CONTRACT_ADDRESS\", \"latest\"],\"id\":1}" "$RPC_URL" | grep -o '"result":"[^"]*"' | cut -d'"' -f4)
 if [[ "$CODE" == "0x" || -z "$CODE" ]]; then
-  echo -e "${RED} Error: No contract at $CONTRACT_ADDRESS${NC}"
-  exit 1
+  echo -e "${RED} Error: No contract at $CONTRACT_ADDRESS${NC}"; exit 1
 fi
 echo -e "${GREEN} Contract found${NC}"
 
 # ---------- Validate JSONs ----------
 if [[ $DO_SIGNING -eq 1 ]]; then
-  echo " Validating signing keys..."
-  validate_signing_json "$SIGNING_KEYS"
+  echo " Validating signing keys..."; validate_signing_json "$SIGNING_KEYS"
 fi
 
 if [[ $DO_KEM -eq 1 ]]; then
-  if [[ $BUILD_MERGED -eq 1 ]]; then
-    echo " Will build MERGED JSON from signing (ECDSA+X25519, did=address): $COMBINED_OUT"
-    echo " Validating signing keys for senders..."
+  echo " Validating KEM inputs..."
+  if [[ $DO_MERGE -eq 1 ]]; then
+    # signing 파일은 항상 검증
     validate_signing_json "$SIGNING_KEYS"
+    # kem 파일이 존재하면 검증, 없으면 병합 시 빈 값으로 생성됨
+    if [[ -f "$KEM_KEYS" ]]; then
+      validate_kem_json "$KEM_KEYS"
+    else
+      echo -e "${YELLOW}Note:${NC} KEM keys file missing; merged JSON은 x25519 필드를 빈 문자열로 생성."
+    fi
   else
     if [[ -n "$PEM_DIR" ]]; then
       echo " Will build KEM JSON from PEM before registering."
     else
-      echo " Validating KEM keys..."
       validate_kem_json "$KEM_KEYS"
     fi
-    echo " Validating signing keys for senders..."
     validate_signing_json "$SIGNING_KEYS"
   fi
 fi
@@ -348,21 +295,17 @@ else
   echo "Signing  : (disabled)"
 fi
 if [[ $DO_KEM -eq 1 ]]; then
-  if [[ $BUILD_MERGED -eq 1 ]]; then
-    echo "KEM Reg  : merged from signing -> $COMBINED_OUT (Register/AddKey: ECDSA+X25519, did=address)"
+  if [[ $DO_MERGE -eq 1 ]]; then
+    echo "KEM Reg  : will MERGE signing+kem → $COMBINED_OUT (top-level array)"
   elif [[ -n "$PEM_DIR" ]]; then
-    echo "KEM Reg  : will build JSON from PEM ($PEM_DIR) -> $KEM_KEYS"
+    echo "KEM Reg  : will build JSON from PEM ($PEM_DIR) → $KEM_KEYS"
   else
-    echo "KEM Reg  : $KEM_KEYS (Register/AddKey: ECDSA+X25519)"
+    echo "KEM Reg  : $KEM_KEYS (ECDSA+X25519)"
   fi
 else
   echo "KEM Reg  : (disabled)"
 fi
-if [[ -n "${AGENTS:-}" ]]; then
-  echo "Agents   : $AGENTS"
-else
-  echo "Agents   : ALL (no filter)"
-fi
+[[ -n "${AGENTS:-}" ]] && echo "Agents   : $AGENTS" || echo "Agents   : ALL (no filter)"
 if [[ -n "$FUNDING_KEY" ]]; then
   echo "Funding  : enabled | per-address: $FUNDING_AMOUNT_WEI wei"
 else
@@ -375,41 +318,42 @@ elif [[ $DO_KEM -eq 1 ]]; then
 else
   echo "Mode     : signing only"
 fi
+echo "Wait     : ${WAIT_SECONDS}s between commit→register | TryActivate=${TRY_ACTIVATE}"
 echo "======================================"
 echo ""
 
 cd "$PROJECT_ROOT"
 
-# ---------- Run signing-only registration (ECDSA) ----------
+# ---------- Signing-only registration (ECDSA) ----------
 if [[ $DO_SIGNING -eq 1 ]]; then
   echo -e "${YELLOW}>>> Registering SIGNING keys (ECDSA only)...${NC}"
   CMD=( go run -tags=reg_agent tools/registration/register_agents.go
     -contract="$CONTRACT_ADDRESS"
     -rpc="$RPC_URL"
     -keys="$SIGNING_KEYS"
+    -wait-seconds="$WAIT_SECONDS"
   )
   [[ -n "${AGENTS:-}" ]] && CMD+=( -agents="$AGENTS" )
-  if [[ -n "$FUNDING_KEY" ]]; then
-    CMD+=( -funding-key="$FUNDING_KEY" -funding-amount-wei="$FUNDING_AMOUNT_WEI" )
-  fi
+  [[ -n "$FUNDING_KEY" ]] && CMD+=( -funding-key="$FUNDING_KEY" -funding-amount-wei="$FUNDING_AMOUNT_WEI" )
+  [[ $TRY_ACTIVATE -eq 1 ]] && CMD+=( -try-activate )
   "${CMD[@]}"
-  echo -e "${GREEN}Signing-only registration done.${NC}"
-  echo ""
+  echo -e "${GREEN}Signing-only registration done.${NC}\n"
 fi
 
-# ---------- KEM Register flow (ECDSA+X25519 in one Register or addKey) ----------
+# ---------- KEM Register flow (ECDSA+X25519) ----------
 if [[ $DO_KEM -eq 1 ]]; then
   echo -e "${YELLOW}>>> Registering agents with KEM (ECDSA+X25519)...${NC}"
 
-  # (0) Build merged JSON (default) or use existing KEM JSON
-  if [[ $BUILD_MERGED -eq 1 ]]; then
-    echo -e "${YELLOW}>>> Building MERGED JSON (ECDSA+X25519, did=address) -> ${COMBINED_OUT}${NC}"
+  # (0) Build MERGED JSON (Go 빌더 사용; x25519 필드 항상 포함)
+  if [[ $DO_MERGE -eq 1 ]]; then
+    echo -e "${YELLOW}>>> Building MERGED JSON (ECDSA+X25519, did=address if missing) -> ${COMBINED_OUT}${NC}"
+    # KEM 파일이 있으면 -kem 플래그에 전달; 없으면 빈 문자열 필드로 생성됨
     go run tools/registration/build_combined_from_signing.go \
       -signing "$SIGNING_KEYS" \
+      ${KEM_KEYS:+-kem "$KEM_KEYS"} \
       -out "$COMBINED_OUT" \
       ${AGENTS:+-agents "$AGENTS"}
     echo -e "${GREEN}Merged keys at ${COMBINED_OUT}${NC}"
-    # After this, all address/funding/registration use the merged file
     KEM_KEYS="$COMBINED_OUT"
     ADDR_SOURCE="$COMBINED_OUT"
   else
@@ -429,8 +373,8 @@ if [[ $DO_KEM -eq 1 ]]; then
   fi
   echo ""
 
-  # (2) (optional) PEM → JSON build path (only when no-merge)
-  if [[ -n "$PEM_DIR" && $BUILD_MERGED -eq 0 ]]; then
+  # (2) (optional) PEM → JSON build path (when not merging)
+  if [[ -n "$PEM_DIR" && $DO_MERGE -eq 0 ]]; then
     if [[ -f tools/registration/build_kem_json_from_pem.go ]]; then
       echo -e "${YELLOW}>>> Building KEM JSON from PEM (${PEM_DIR}) -> ${KEM_KEYS}${NC}"
       CMD_BUILD=( go run tools/registration/build_kem_json_from_pem.go
@@ -441,42 +385,30 @@ if [[ $DO_KEM -eq 1 ]]; then
       [[ -n "${AGENTS:-}" ]] && CMD_BUILD+=( -agents="$AGENTS" )
       [[ $REQUIRE_PRIV -eq 1 ]] && CMD_BUILD+=( -require-priv )
       "${CMD_BUILD[@]}"
-      echo -e "${GREEN}KEM JSON built at ${KEM_KEYS}.${NC}"
-      echo ""
+      echo -e "${GREEN}KEM JSON built at ${KEM_KEYS}.${NC}\n"
     else
-      echo -e "${RED}Error:${NC} tools/registration/build_kem_json_from_pem.go not found."
-      echo "       Provide --kem-keys directly or add the builder."
+      echo -e "${RED}Error:${NC} tools/registration/build_kem_json_from_pem.go not found. Provide --kem-keys or add the builder."
       exit 1
     fi
   fi
 
-  # (3) Register/AddKey with KEM (reg_kem)
+  # (3) Run reg_kem
   if [[ ! -f tools/registration/register_kem_agents.go ]]; then
-    echo -e "${RED}Error:${NC} tools/registration/register_kem_agents.go not found."
-    exit 1
+    echo -e "${RED}Error:${NC} tools/registration/register_kem_agents.go not found."; exit 1
   fi
 
-  # In merged mode, pass the same file for both inputs to ensure DID/address/key consistency
-  if [[ $BUILD_MERGED -eq 1 ]]; then
-    CMD2=( go run -tags=reg_kem tools/registration/register_kem_agents.go
-      -contract="$CONTRACT_ADDRESS"
-      -rpc="$RPC_URL"
-      -kem-keys="$KEM_KEYS"
-      -signing-keys="$KEM_KEYS"
-    )
-  else
-    CMD2=( go run -tags=reg_kem tools/registration/register_kem_agents.go
-      -contract="$CONTRACT_ADDRESS"
-      -rpc="$RPC_URL"
-      -kem-keys="$KEM_KEYS"
-      -signing-keys="$SIGNING_KEYS"
-    )
-  fi
+  CMD2=( go run -tags=reg_kem tools/registration/register_kem_agents.go
+    -contract="$CONTRACT_ADDRESS"
+    -rpc="$RPC_URL"
+    -kem-keys="$KEM_KEYS"
+    -signing-keys="$SIGNING_KEYS"
+    -wait-seconds="$WAIT_SECONDS"
+  )
   [[ -n "${AGENTS:-}" ]] && CMD2+=( -agents="$AGENTS" )
+  [[ $TRY_ACTIVATE -eq 1 ]] && CMD2+=( -try-activate )
   "${CMD2[@]}"
 
-  echo -e "${GREEN}KEM register process done.${NC}"
-  echo ""
+  echo -e "${GREEN}KEM register process done.${NC}\n"
 fi
 
 echo "======================================"

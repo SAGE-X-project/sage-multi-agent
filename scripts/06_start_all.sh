@@ -1,109 +1,34 @@
 #!/usr/bin/env bash
-# One-click launcher (minimal, IN-PROC planning/ordering):
-# payment (verifier) -> gateway (tamper|pass) -> root (routes out) -> client
-#
-# Options:
-#   --tamper                  start gateway with tamper ON  (default)
-#   --pass | --passthrough    start gateway pass-through
-#   --attack-msg "<text>"     override tamper message
-#   --sage on|off             set SAGE mode for Root/Payment (default: env SAGE_MODE or off)
-#   --hpke on|off             enable HPKE at Root for outbound (default: off)
-#   --hpke-keys <path>        DID mapping for Root HPKE (default: generated_agent_keys.json)
-#   --force-kill              kill occupied ports automatically
-#
-# Notes:
-# - PaymentAgent runs EXTERNAL via gateway here. Planning/Ordering are in-proc (fallback).
+# One-click launcher: 02_start_agents.sh (medical+payment) -> Gateway -> Root -> Client
+# Modes: SAGE on|off, Gateway tamper|pass
+# LLM: JAMINAI_* ONLY
 
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-mkdir -p logs
-
-# load .env if present
-_PASSED_SAGE_MODE="${SAGE_MODE-}"
 [[ -f .env ]] && source .env
-[[ -n "${_PASSED_SAGE_MODE}" ]] && SAGE_MODE="${_PASSED_SAGE_MODE}"
 
-# ---------- Defaults ----------
-HOST="${HOST:-localhost}"
-ROOT_PORT="${ROOT_PORT:-${ROOT_AGENT_PORT:-8080}}"
-CLIENT_PORT="${CLIENT_PORT:-8086}"
-GATEWAY_PORT="${GATEWAY_PORT:-5500}"
-EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-19083}"
+mkdir -p logs pids
 
-# Payment sub-agent (IN-PROC) needs these to call outward
-PAYMENT_EXTERNAL_URL_DEFAULT="http://${HOST}:${GATEWAY_PORT}"
-PAYMENT_EXTERNAL_URL="${PAYMENT_EXTERNAL_URL:-$PAYMENT_EXTERNAL_URL_DEFAULT}"
-PAYMENT_JWK_FILE="${PAYMENT_JWK_FILE:-keys/payment.jwk}"   # MUST exist for outbound signing
-[[ -n "${PAYMENT_DID:-}" ]] || true
-
-# HPKE control (CLI flags; default OFF)
-PAYMENT_HPKE_ENABLE="0"                                    # 0=off, 1=on
-PAYMENT_HPKE_KEYS="${PAYMENT_HPKE_KEYS:-generated_agent_keys.json}"
-
-GATEWAY_MODE="tamper"                         # tamper|pass
-SAGE_MODE_CLI=""                              # on|off (optional CLI override)
-ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gateway'}}"
-FORCE_KILL=0
-
-usage() {
-  cat <<EOF
-Usage: $0 [--tamper|--pass] [--attack-msg "<text>"] [--sage on|off] [--hpke on|off] [--hpke-keys <path>] [--force-kill]
-EOF
+# ---------- Helpers ----------
+kill_port() {
+  local port="$1"; local pids
+  pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
+  [[ -z "$pids" ]] && return
+  echo "[kill] :$port -> $pids"
+  kill $pids 2>/dev/null || true
+  sleep 0.2
+  pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
+  [[ -n "$pids" ]] && kill -9 $pids 2>&1 >/dev/null || true
 }
-
-# ---------- Args ----------
-PAYMENT_HPKE_ENABLE="0"
-PAYMENT_HPKE_KEYS="${PAYMENT_HPKE_KEYS:-generated_agent_keys.json}"
-
-SAGE_MODE="${SAGE_MODE:-off}"      # env 기본값
-HPKE_CLI="off"                     # CLI로 받은 hpke 값(기본 off)
-
-# ---------- Args ----------
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --tamper)                 GATEWAY_MODE="tamper"; shift ;;
-    --pass|--passthrough)     GATEWAY_MODE="pass"; shift ;;
-    --attack-msg)             ATTACK_MESSAGE="${2:-}"; shift 2 ;;
-
-    # === NEW: --sage 지원 (공백/=/대소문자 모두) ===
-    --sage=*)
-      SAGE_MODE="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')"; shift ;;
-    --sage)
-      SAGE_MODE="$(printf '%s' "${2:-on}" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
-
-    # hpke도 공백/=/대소문자 모두 지원
-    --hpke=*)
-      HPKE_CLI="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')"; shift ;;
-    --hpke)
-      HPKE_CLI="$(printf '%s' "${2:-off}" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
-
-    --hpke-keys)
-      PAYMENT_HPKE_KEYS="${2:-generated_agent_keys.json}"; shift 2 ;;
-
-    --force-kill)             FORCE_KILL=1; shift ;;
-    -h|--help)                usage; exit 0 ;;
-    *) echo "[WARN] unknown arg: $1"; shift ;;
-  esac
-done
-
-# SAGE 모드 해석
-case "$SAGE_MODE" in
-  on|true|1|yes)  EXT_VERIFY="on";  ROOT_SAGE="true"  ;;
-  *)              EXT_VERIFY="off"; ROOT_SAGE="false" ;;
-esac
-
-# HPKE 모드 해석
-case "$HPKE_CLI" in
-  on|true|1|yes)  PAYMENT_HPKE_ENABLE="1" ;;
-  *)              PAYMENT_HPKE_ENABLE="0" ;;
-esac
-
-require() { command -v "$1" >/dev/null 2>&1 || { echo "[ERR] '$1' not found"; exit 1; }; }
-require go
-require curl
-
+wait_http() {
+  local url="$1" tries="${2:-40}" delay="${3:-0.25}"
+  for ((i=1;i<=tries;i++)); do
+    if curl -sSf -m 1 "$url" >/dev/null 2>&1; then return 0; fi
+    sleep "$delay"
+  done; return 1
+}
 wait_tcp() {
   local host="$1" port="$2" tries="${3:-60}" delay="${4:-0.2}"
   for ((i=1;i<=tries;i++)); do
@@ -111,180 +36,157 @@ wait_tcp() {
     sleep "$delay"
   done; return 1
 }
-tail_fail() {
-  local name="$1"
-  echo "[FAIL] $name failed to start. Showing last 120 log lines:"
-  echo "--------------------------------------------------------"
-  tail -n 120 "logs/${name}.log" || true
-  echo "--------------------------------------------------------"
+to_bool() {
+  local v="${1:-}"; v="$(echo "$v" | tr '[:upper:]' '[:lower:]')"
+  case "$v" in 1|true|on|yes) echo "true";; 0|false|off|no) echo "false";; *) echo "$2";; esac
 }
-kill_port() {
-  local port="$1"
-  local pids
-  pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
-  [[ -z "$pids" ]] && return
-  echo "[KILL] :$port occupied → $pids"
-  kill $pids 2>/dev/null || true
-  sleep 0.2
-  pids="$(lsof -ti tcp:"$port" -sTCP:LISTEN || true)"
-  [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
-}
-start_bg() {
-  local name="$1" port="$2"; shift 2
-  local cmd=( "$@" )
-  if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$port"; fi
-  echo "[START] $name on :$port"
-  printf "[CMD] %s\n" "${cmd[*]}"
-  ( "${cmd[@]}" ) >"logs/${name}.log" 2>&1 &
-  if ! wait_tcp "$HOST" "$port" 60 0.2; then tail_fail "$name"; exit 1; fi
-}
+normalize_base() { echo "${1%/}"; }
 
-# ---------- 0) optional kill ----------
-if [[ $FORCE_KILL -eq 1 ]]; then
-  "$ROOT_DIR/scripts/01_kill_ports.sh" --force || true
+require() { command -v "$1" >/dev/null 2>&1 || { echo "[ERR] '$1' not found"; exit 1; }; }
+require go; require curl; require lsof
+
+# ---------- Ports ----------
+HOST="${HOST:-localhost}"
+EXT_MEDICAL_PORT="${EXT_MEDICAL_PORT:-${MEDICAL_AGENT_PORT:-19082}}"
+EXT_PAYMENT_PORT="${EXT_PAYMENT_PORT:-${PAYMENT_AGENT_PORT:-19083}}"
+GATEWAY_PORT="${GATEWAY_PORT:-5500}"
+ROOT_PORT="${ROOT_PORT:-${ROOT_AGENT_PORT:-18080}}"
+CLIENT_PORT="${CLIENT_PORT:-8086}"
+
+# ---------- Modes ----------
+SAGE_MODE="${SAGE_MODE:-off}"      # on|off
+GATEWAY_MODE="tamper"              # tamper|pass
+ATTACK_MESSAGE="${ATTACK_MESSAGE:-${ATTACK_MSG:-$'\n[GW-ATTACK] injected by gateway'}}"
+
+# ---------- LLM (JAMINAI_* ONLY, OpenAI-compatible path) ----------
+LLM_ENABLED="${LLM_ENABLED:-true}"
+JAMINAI_API_URL="$(normalize_base "${JAMINAI_API_URL:-https://generativelanguage.googleapis.com/v1beta/openai}")"
+if [[ -z "${JAMINAI_API_KEY:-}" && -n "${GEMINI_API_KEY:-}" ]]; then
+  JAMINAI_API_KEY="${GEMINI_API_KEY}"
 fi
+if [[ -z "${JAMINAI_API_KEY:-}" && -n "${GOOGLE_API_KEY:-}" ]]; then
+  JAMINAI_API_KEY="${GOOGLE_API_KEY}"
+fi
+JAMINAI_MODEL="${JAMINAI_MODEL:-gemini-2.5-flash}"
+JAMINAI_TIMEOUT="${JAMINAI_TIMEOUT:-12s}"
 
-# ---------- preflight: payment JWK ----------
-if [[ ! -f "$PAYMENT_JWK_FILE" ]]; then
-  echo "[ERR] PAYMENT_JWK_FILE not found: $PAYMENT_JWK_FILE"
-  echo "      Put a JWK at that path or export PAYMENT_JWK_FILE=<path>"
+# ---------- CLI args ----------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tamper)                 GATEWAY_MODE="tamper"; shift ;;
+    --pass|--passthrough)     GATEWAY_MODE="pass"; shift ;;
+    --attack-msg)             ATTACK_MESSAGE="${2:-}"; shift 2 ;;
+    --sage=*)                 SAGE_MODE="$(printf '%s' "${1#*=}" | tr '[:upper:]' '[:lower:]')"; shift ;;
+    --sage)                   SAGE_MODE="$(printf '%s' "${2:-on}" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+    --medical-port)           EXT_MEDICAL_PORT="${2:-$EXT_MEDICAL_PORT}"; shift 2 ;;
+    --payment-port)           EXT_PAYMENT_PORT="${2:-$EXT_PAYMENT_PORT}"; shift 2 ;;
+    --llm)                    LLM_ENABLED="$(to_bool "${2:-$LLM_ENABLED}" "$LLM_ENABLED")"; shift 2 ;;
+    --llm-on)                 LLM_ENABLED="true"; shift ;;
+    --llm-off)                LLM_ENABLED="false"; shift ;;
+    --llm-base)               JAMINAI_API_URL="$(normalize_base "${2:-$JAMINAI_API_URL}")"; shift 2 ;;
+    --llm-key)                JAMINAI_API_KEY="${2:-}"; shift 2 ;;
+    --llm-model)              JAMINAI_MODEL="${2:-$JAMINAI_MODEL}"; shift 2 ;;
+    --llm-timeout)            JAMINAI_TIMEOUT="${2:-$JAMINAI_TIMEOUT}"; shift 2 ;;
+    -h|--help)
+      cat <<USAGE
+Usage: $0 [--tamper|--pass] [--attack-msg <txt>] [--sage on|off]
+          [--medical-port N] [--payment-port N]
+          [--llm on|off] [--llm-base URL] [--llm-key KEY] [--llm-model MODEL] [--llm-timeout 12s]
+USAGE
+      exit 0 ;;
+    *) echo "[WARN] unknown arg: $1"; shift ;;
+  esac
+done
+
+if [[ "$(to_bool "$LLM_ENABLED" true)" == "true" && -z "${JAMINAI_API_KEY:-}" ]]; then
+  echo "[ERR] Set JAMINAI_API_KEY (or GEMINI_API_KEY/GOOGLE_API_KEY)."
   exit 1
 fi
 
-# ---------- LLM defaults (NEW, minimal) ----------
-LLM_ENABLED="${LLM_ENABLED:-true}"
-case "$(echo "$LLM_ENABLED" | tr '[:upper:]' '[:lower:]')" in
-  1|true|on|yes) LLM_ENABLED=true ;;
-  *)             LLM_ENABLED=false ;;
-esac
-LLM_BASE_URL="${LLM_BASE_URL:-http://localhost:11434}"
-LLM_API_KEY="${LLM_API_KEY:-}"                     # empty if not needed
-LLM_MODEL="${LLM_MODEL:-gemma2:2b}"
-LLM_LANG_DEFAULT="${LLM_LANG_DEFAULT:-auto}"       # auto|ko|en
-LLM_TIMEOUT_MS="${LLM_TIMEOUT_MS:-8000}"
+echo "[CFG] Ports: medical=${EXT_MEDICAL_PORT} payment=${EXT_PAYMENT_PORT} gateway=${GATEWAY_PORT} root=${ROOT_PORT} client=${CLIENT_PORT}"
+echo "[CFG] SAGE_MODE=${SAGE_MODE} GATEWAY_MODE=${GATEWAY_MODE}"
+echo "[LLM] enabled=${LLM_ENABLED} base=${JAMINAI_API_URL} model=${JAMINAI_MODEL} timeout=${JAMINAI_TIMEOUT}"
 
-echo "[LLM] enabled=${LLM_ENABLED} base_url=${LLM_BASE_URL} model=${LLM_MODEL} lang=${LLM_LANG_DEFAULT} timeout=${LLM_TIMEOUT_MS}ms"
+# Bridge to JAMINAI_* for all processes
+export JAMINAI_API_URL JAMINAI_MODEL JAMINAI_TIMEOUT
+if [[ "$(to_bool "$LLM_ENABLED" true)" == "true" ]]; then export JAMINAI_API_KEY; else unset JAMINAI_API_KEY; fi
 
-# ---------- 1) Payment service (verifier) ----------
-# Resolve final SAGE mode: CLI > env > default(off)
-SMODE="$(printf '%s' "${SAGE_MODE:-off}" | tr '[:upper:]' '[:lower:]')"
-case "$SMODE" in
-  off|false|0|no) EXT_VERIFY="off"; ROOT_SAGE="false" ;;
-  *)              EXT_VERIFY="on";  ROOT_SAGE="true"  ;;
-esac
+# ---------- Kill any previous ----------
+kill_port "${EXT_MEDICAL_PORT}"
+kill_port "${EXT_PAYMENT_PORT}"
+kill_port "${GATEWAY_PORT}"
+kill_port "${ROOT_PORT}"
+kill_port "${CLIENT_PORT}"
 
-# HPKE server keys for payment (enable whenever keys are present)
-SIGN_JWK="${EXTERNAL_JWK_FILE:-}"
-KEM_JWK="${EXTERNAL_KEM_JWK_FILE:-}"
-KEYS_FILE="$PAYMENT_HPKE_KEYS"
-
-# Resolve default key paths if not provided
-[[ -z "$SIGN_JWK" ]] && [[ -f "keys/external.jwk" ]] && SIGN_JWK="keys/external.jwk"
-[[ -z "$KEM_JWK"  ]] && [[ -f "keys/kem/external.x25519.jwk" ]] && KEM_JWK="keys/kem/external.x25519.jwk"
-
-PAYMENT_ARGS=(
-  go run ./cmd/payment/main.go
-    -port "$EXT_PAYMENT_PORT"
-    -require $([ "$EXT_VERIFY" = "on" ] && echo true || echo false)
-    -keys "$KEYS_FILE"
+# ---------- (A) Start Agents via 02_start_agents.sh ----------
+AGENT_ARGS=(
+  --medical-port  "${EXT_MEDICAL_PORT}"
+  --payment-port  "${EXT_PAYMENT_PORT}"
+  --llm "$(to_bool "$LLM_ENABLED" true)"
+  --llm-base "${JAMINAI_API_URL}"
+  --llm-model "${JAMINAI_MODEL}"
 )
-if [[ -n "$SIGN_JWK" && -n "$KEM_JWK" ]]; then
-  echo "[HPKE:payment] enabling server HPKE (sign=$SIGN_JWK, kem=$KEM_JWK)"
-  PAYMENT_ARGS+=( -sign-jwk "$SIGN_JWK" -kem-jwk "$KEM_JWK" )
-else
-  echo "[HPKE:payment] HPKE disabled (missing EXTERNAL_JWK_FILE/EXTERNAL_KEM_JWK_FILE or default keys)"
-fi
+[[ -n "${JAMINAI_API_KEY:-}" && "$(to_bool "$LLM_ENABLED" true)" == "true" ]] && AGENT_ARGS+=( --llm-key "${JAMINAI_API_KEY}" )
 
-# >>> NEW: pass LLM flags to payment cmd <<<
-PAYMENT_ARGS+=(
-  -llm "$LLM_ENABLED"
-  -llm-url "$LLM_BASE_URL"
-  -llm-model "$LLM_MODEL"
-  -llm-lang "$LLM_LANG_DEFAULT"
-  -llm-timeout "$LLM_TIMEOUT_MS"
-)
-[[ -n "$LLM_API_KEY" ]] && PAYMENT_ARGS+=( -llm-key "$LLM_API_KEY" )
+echo "[CALL] scripts/02_start_agents.sh ${AGENT_ARGS[*]}"
+scripts/02_start_agents.sh "${AGENT_ARGS[@]}"
 
-start_bg "payment" "$EXT_PAYMENT_PORT" "${PAYMENT_ARGS[@]}"
-
-# ---------- 2) Gateway (relay to payment) ----------
-if [[ -f cmd/gateway/main.go ]]; then
-  GW_MAIN="cmd/gateway/main.go"
-  if [[ $FORCE_KILL -eq 1 ]]; then kill_port "$GATEWAY_PORT"; fi
-  if [[ "$GATEWAY_MODE" == "pass" ]]; then
-    echo "[mode] Gateway PASS-THROUGH"
-    start_bg "gateway" "$GATEWAY_PORT" \
-      env -u ATTACK_MESSAGE \
-      go run "./${GW_MAIN}" \
-        -listen ":${GATEWAY_PORT}" \
-        -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" \
-        -attack-msg=""
-  else
-    echo "[mode] Gateway TAMPER (attack-msg length: ${#ATTACK_MESSAGE})"
-    start_bg "gateway" "$GATEWAY_PORT" \
-      go run "./${GW_MAIN}" \
-        -listen ":${GATEWAY_PORT}" \
-        -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" \
-        -attack-msg "${ATTACK_MESSAGE}"
-  fi
-else
-  echo "[SKIP] gateway main not found"
-fi
-
-# ---------- 3) Root ----------
-# Build root CLI/environment once and start a single instance
-HPKE_FLAG=$([ "${PAYMENT_HPKE_ENABLE}" = "1" ] && echo true || echo false)
-ROOT_ENV=( "PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}" "ROOT_SAGE_ENABLED=${ROOT_SAGE}" "ROOT_HPKE=${HPKE_FLAG}" )
-[[ -n "${PAYMENT_JWK_FILE:-}" ]] && ROOT_ENV+=( "ROOT_JWK_FILE=${PAYMENT_JWK_FILE}" )
-[[ -n "${PAYMENT_DID:-}"      ]] && ROOT_ENV+=( "ROOT_DID=${PAYMENT_DID}" )
-
-# Compose args
-ROOT_ARGS=( -port "$ROOT_PORT" -sage "$ROOT_SAGE" )
-if [[ "${PAYMENT_HPKE_ENABLE}" = "1" ]]; then
-  ROOT_ARGS+=( -hpke -hpke-keys "${PAYMENT_HPKE_KEYS}" )
-fi
-
-# >>> NEW: pass LLM flags to root cmd <<<
-ROOT_ARGS+=(
-  -llm "$LLM_ENABLED"
-  -llm-url "$LLM_BASE_URL"
-  -llm-model "$LLM_MODEL"
-  -llm-lang "$LLM_LANG_DEFAULT"
-  -llm-timeout "$LLM_TIMEOUT_MS"
-)
-[[ -n "$LLM_API_KEY" ]] && ROOT_ARGS+=( -llm-key "$LLM_API_KEY" )
-
-echo "[ENV]  PAYMENT_EXTERNAL_URL=${PAYMENT_EXTERNAL_URL}"
-[[ -n "${PAYMENT_JWK_FILE:-}" ]] && echo "[ENV]  ROOT_JWK_FILE=${PAYMENT_JWK_FILE}"
-[[ -n "${PAYMENT_DID:-}" ]] && echo "[ENV]  ROOT_DID=${PAYMENT_DID}"
-echo "[HPKE] enable=${PAYMENT_HPKE_ENABLE} keys=${PAYMENT_HPKE_KEYS}"
-echo "[ROOT_ARGS] ${ROOT_ARGS[*]}"
-
-start_bg "root" "$ROOT_PORT" env "${ROOT_ENV[@]}" go run ./cmd/root/main.go "${ROOT_ARGS[@]}"
-
-# ---------- 4) Client API ----------
-start_bg "client" "$CLIENT_PORT" \
-  go run ./cmd/client/main.go \
-    -port "$CLIENT_PORT" \
-    -root "http://${HOST}:${ROOT_PORT}"
-
-# ---------- Summary ----------
-echo "--------------------------------------------------"
-printf "[CHK] %-22s %s\n" "Payment Service"  "http://${HOST}:${EXT_PAYMENT_PORT}/status"
-printf "[CHK] %-22s %s\n" "Gateway (TCP)"     "tcp://${HOST}:${GATEWAY_PORT}"
-printf "[CHK] %-22s %s\n" "Root"              "http://${HOST}:${ROOT_PORT}/status"
-printf "[CHK] %-22s %s\n" "Client API"        "http://${HOST}:${CLIENT_PORT}/api/sage/config"
-echo "--------------------------------------------------"
-
+# Quick health re-check
 for url in \
-  "http://${HOST}:${EXT_PAYMENT_PORT}/status" \
-  "http://${HOST}:${ROOT_PORT}/status" \
-  "http://${HOST}:${CLIENT_PORT}/api/sage/config"; do
-  if curl -sSf -m 1 "$url" >/dev/null 2>&1; then
-    echo "[OK] $url"
-  else
-    echo "[WARN] not ready: $url"
-  fi
+  "http://${HOST}:${EXT_MEDICAL_PORT}/status" \
+  "http://${HOST}:${EXT_PAYMENT_PORT}/status"
+do
+  wait_http "$url" 20 0.2 || echo "[WARN] not ready: $url"
 done
 
-echo "[DONE] Startup initiated. Use: tail -f logs/*.log"
+# ---------- (B) Gateway (fronting Payment) ----------
+if [[ "$GATEWAY_MODE" == "pass" ]]; then
+  echo "[mode] Gateway PASS-THROUGH"
+  nohup env -u ATTACK_MESSAGE go run ./cmd/gateway/main.go \
+    -listen ":${GATEWAY_PORT}" -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" -attack-msg="" \
+    >"logs/gateway.log" 2>&1 & echo $! > "pids/gateway.pid"
+else
+  echo "[mode] Gateway TAMPER"
+  nohup env ATTACK_MESSAGE="${ATTACK_MESSAGE}" go run ./cmd/gateway/main.go \
+    -listen ":${GATEWAY_PORT}" -upstream "http://${HOST}:${EXT_PAYMENT_PORT}" -attack-msg "${ATTACK_MESSAGE}" \
+    >"logs/gateway.log" 2>&1 & echo $! > "pids/gateway.pid"
+fi
+wait_tcp "$HOST" "$GATEWAY_PORT" 60 0.2 || { echo "[FAIL] gateway"; tail -n 200 logs/gateway.log || true; exit 1; }
+
+# ---------- (C) Root ----------
+export PAYMENT_URL="http://localhost:${GATEWAY_PORT}"
+export MEDICAL_EXTERNAL_URL="http://localhost:${EXT_MEDICAL_PORT}"
+export ROOT_JWK_FILE="${ROOT_JWK_FILE:-${PAYMENT_JWK_FILE:-./keys/payment.jwk}}"
+
+ROOT_SAGE="$(to_bool "$SAGE_MODE" false)"
+echo "[START] root     :${ROOT_PORT} (sage=${ROOT_SAGE})"
+nohup env \
+  PAYMENT_URL="${PAYMENT_URL}" \
+  MEDICAL_EXTERNAL_URL="${MEDICAL_EXTERNAL_URL}" \
+  ROOT_SAGE_ENABLED="${ROOT_SAGE}" \
+  ROOT_HPKE="false" \
+  ROOT_JWK_FILE="${ROOT_JWK_FILE}" \
+  JAMINAI_API_URL="${JAMINAI_API_URL}" \
+  JAMINAI_API_KEY="${JAMINAI_API_KEY:-}" \
+  JAMINAI_MODEL="${JAMINAI_MODEL}" \
+  JAMINAI_TIMEOUT="${JAMINAI_TIMEOUT}" \
+  go run ./cmd/root/main.go -port "${ROOT_PORT}" -sage "${ROOT_SAGE}" \
+  >"logs/root.log" 2>&1 & echo $! > "pids/root.pid"
+
+wait_http "http://${HOST}:${ROOT_PORT}/status" 40 0.25 || { echo "[FAIL] root /status"; tail -n 200 logs/root.log || true; exit 1; }
+
+# ---------- (D) Client API ----------
+echo "[START] client   :${CLIENT_PORT}"
+nohup go run ./cmd/client/main.go -port "${CLIENT_PORT}" -root "http://${HOST}:${ROOT_PORT}" \
+  >"logs/client.log" 2>&1 & echo $! > "pids/client.pid"
+wait_http "http://${HOST}:${CLIENT_PORT}/api/sage/config" 40 0.25 || echo "[WARN] client not ready"
+
+echo "--------------------------------------------------"
+echo "[OK] medical  : http://${HOST}:${EXT_MEDICAL_PORT}/status"
+echo "[OK] payment  : http://${HOST}:${EXT_PAYMENT_PORT}/status  (gateway :${GATEWAY_PORT})"
+echo "[OK] root     : http://${HOST}:${ROOT_PORT}/status"
+echo "[OK] client   : http://${HOST}:${CLIENT_PORT}/api/sage/config"
+for n in medical payment gateway root client; do
+  [[ -f "pids/${n}.pid" ]] && printf "  %-8s %s\n" "$n" "$(cat "pids/${n}.pid")"
+done
+echo "Logs: ./logs/*.log"

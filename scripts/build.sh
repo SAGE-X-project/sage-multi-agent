@@ -47,8 +47,8 @@ echo ""
 # Build Root Agent
 build_component "Root Agent" "./cli/root" "bin/root"
 
-# Build Ordering Agent
-build_component "Ordering Agent" "./cli/ordering" "bin/ordering"
+# Build MEDICAL Agent
+build_component "MEDICAL Agent" "./cli/medical" "bin/medical"
 
 # Build Planning Agent
 build_component "Planning Agent" "./cli/planning" "bin/planning"

@@ -76,23 +76,24 @@ go build -o bin/register cli/register/main.go
 
 # Or register individually
 ./bin/register --agent root
-./bin/register --agent ordering
+./bin/register --agent medical
 ./bin/register --agent planning
 ```
 
 **Important Environment Setup:**
+
 - Make sure your `.env` file has the correct network configuration
 - For local development with Hardhat:
   ```bash
   SAGE_NETWORK=local
-  LOCAL_CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+  LOCAL_CONTRACT_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
   LOCAL_RPC_ENDPOINT=http://127.0.0.1:8545
   REGISTRATION_PRIVATE_KEY=ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
   ```
 - Ensure `configs/agent_config.yaml` has matching network configuration:
   ```yaml
   network:
-    chain: "local"  # Must match SAGE_NETWORK in .env
+    chain: "local" # Must match SAGE_NETWORK in .env
   ```
 
 ### Step 4: Start the Agents
@@ -103,8 +104,8 @@ Start each agent in a separate terminal:
 # Terminal 1: Root Agent
 go run cli/root/main.go
 
-# Terminal 2: Ordering Agent
-go run cli/ordering/main.go
+# Terminal 2: MEDICAL Agent
+go run cli/medical/main.go
 
 # Terminal 3: Planning Agent
 go run cli/planning/main.go
@@ -129,8 +130,8 @@ Keys are automatically generated using SAGE's crypto package:
 keys/
 ├── root_agent.key          # Root agent's private key
 ├── root_agent.key.info     # Key metadata
-├── ordering_agent.key      # Ordering agent's private key
-├── ordering_agent.key.info # Key metadata
+├── MEDICAL_agent.key      # MEDICAL agent's private key
+├── MEDICAL_agent.key.info # Key metadata
 ├── planning_agent.key      # Planning agent's private key
 └── planning_agent.key.info # Key metadata
 ```
@@ -167,12 +168,8 @@ Agent capabilities follow a defined JSON schema (see `docs/capabilities-schema.j
 {
   "type": "root",
   "version": "1.0.0",
-  "skills": [
-    "task_routing",
-    "agent_coordination",
-    "request_analysis"
-  ],
-  "subagents": ["ordering", "planning"]
+  "skills": ["task_routing", "agent_coordination", "request_analysis"],
+  "subagents": ["medical", "planning"]
 }
 ```
 
@@ -189,16 +186,19 @@ Capabilities are automatically validated:
 ### Common Issues
 
 1. **"Agent not registered" error**
+
    - Run the registration CLI command
    - Ensure you have the correct private key set
    - Check contract address configuration
 
 2. **"Failed to resolve DID" error**
+
    - Verify contract is deployed correctly
    - Check RPC endpoint is accessible
    - Ensure agent is registered on-chain
 
 3. **Key generation issues**
+
    - Check write permissions for `keys/` directory
    - Ensure SAGE package is properly installed
 

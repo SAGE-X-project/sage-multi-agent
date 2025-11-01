@@ -31,7 +31,7 @@ func generateSecp256k1Keys() (*ecdsa.PrivateKey, error) {
 
 func main() {
 	var (
-		agentName  = flag.String("agent", "", "Agent name (root, ordering, planning, client)")
+		agentName  = flag.String("agent", "", "Agent name (root, medical, planning, client)")
 		outputPath = flag.String("output", "", "Output file path")
 		keysDir    = flag.String("dir", "keys", "Keys directory")
 	)
@@ -40,7 +40,7 @@ func main() {
 	// Validate agent name
 	validAgents := map[string]bool{
 		"root":     true,
-		"ordering": true,
+		"medical":  true,
 		"planning": true,
 		"client":   true,
 	}
@@ -50,7 +50,7 @@ func main() {
 	}
 
 	if !validAgents[*agentName] {
-		log.Fatalf("Invalid agent name: %s. Valid names: root, ordering, planning, client", *agentName)
+		log.Fatalf("Invalid agent name: %s. Valid names: root, medical, planning, client", *agentName)
 	}
 
 	// Generate secp256k1 keys

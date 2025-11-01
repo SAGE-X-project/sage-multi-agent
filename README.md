@@ -12,8 +12,8 @@ This repo wires together in‑proc agents behind a Root, an External Payment ser
 ## Components
 
 - Root Agent `cmd/root/main.go` (HTTP, default `:18080`)
-- In‑proc sub‑agents: Planning, Ordering, Payment (`agents/*`)
-- External Payment server `cmd/external-payment/main.go` (HTTP, default `:19083`)
+- In‑proc sub‑agents: Planning, MEDICAL, Payment (`agents/*`)
+- External Payment server `cmd/payment/main.go` (HTTP, default `:19083`)
 - Gateway reverse proxy `cmd/gateway/main.go` (HTTP, default `:5500`)
 - Client API `cmd/client/main.go` (HTTP, default `:8086`)
 
@@ -42,10 +42,10 @@ All of these can be overridden via `.env` or flags (see scripts below).
 Environment used by servers and middleware (with working defaults):
 
 - `ETH_RPC_URL` (default `http://127.0.0.1:8545`)
-- `SAGE_REGISTRY_V4_ADDRESS` (default `0x5FbDB2315678afecb367f032d93F642f64180aa3`)
+- `SAGE_REGISTRY_ADDRESS` (default `0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512`)
 - `SAGE_EXTERNAL_KEY` (optional; hex without 0x; used for tx signing if needed)
 - `PAYMENT_JWK_FILE` (path to secp256k1 JWK for Payment outbound signing)
-- `EXTERNAL_JWK_FILE` and `EXTERNAL_KEM_JWK_FILE` for the External Payment server
+- `PAYMENT_JWK_FILE` and `PAYMENT_KEM_JWK_FILE` for the External Payment server
 
 Demo keys are provided under `keys/` and `generated_agent_keys.json` for convenience.
 
@@ -55,16 +55,16 @@ Demo keys are provided under `keys/` and `generated_agent_keys.json` for conveni
 
 ```bash
 # Writes/uses generated_agent_keys.json and registers to SageRegistryV4
-sh ./scripts/00_register_agents.sh --kem --agents "ordering,planing,payment,external" --funding-key {private key}  # or --kem / --kem-only / signing only
+sh ./scripts/00_register_agents.sh --kem --agents "medical,planing,payment,external" --funding-key {private key}  # or --kem / --kem-only / signing only
 ```
 
 If you don't have keys yet:
 
 - Generate signing (ECDSA secp256k1) keys and summary first (required before registration):
-  - `go run tools/keygen/gen_agents_key.go --agents "payment,ordering,planing,external"`
+  - `go run tools/keygen/gen_agents_key.go --agents "payment,medical,planing,external"`
 - To use HPKE, generate KEM (X25519) keys (External server requires a KEM private JWK):
   - `go run tools/keygen/gen_kem_keys.go --agents "payment,external"`
-  - Ensure `EXTERNAL_KEM_JWK_FILE` points to the external agent's KEM JWK (default: `keys/kem/external.x25519.jwk`).
+  - Ensure `PAYMENT_KEM_JWK_FILE` points to the external agent's KEM JWK (default: `keys/kem/external.x25519.jwk`).
 
 2. Run the demo with three toggles
 
@@ -170,7 +170,7 @@ The DID middleware resolves keys from the SAGE Registry V4. For a clean setup:
 
 - Generate ECDSA keys and summary (demo already includes `generated_agent_keys.json`):
 
-  - `go run -tags=reg_agents_key tools/keygen/gen_agents_key.go --agents "payment,ordering,planing,external"`
+  - `go run -tags=reg_agents_key tools/keygen/gen_agents_key.go --agents "payment,medical,planing,external"`
 
 - Generate X25519 KEM keys (optional, demo includes `keys/kem/generated_kem_keys.json`):
 
@@ -179,7 +179,7 @@ The DID middleware resolves keys from the SAGE Registry V4. For a clean setup:
 - Register ECDSA and add KEM in one flow:
 
 ```bash
-# Requires ETH_RPC_URL and SAGE_REGISTRY_V4_ADDRESS (defaults are local dev)
+# Requires ETH_RPC_URL and SAGE_REGISTRY_ADDRESS (defaults are local dev)
 ./scripts/00_register_agents.sh --both
 ```
 
@@ -187,7 +187,7 @@ Funding helpers are built‑in (Hardhat/Anvil setBalance; optional `--funding-ke
 
 ## Making Requests
 
-- The Client API exposes a single endpoint. Root routes by content (planning/ordering/payment).
+- The Client API exposes a single endpoint. Root routes by content (planning/medical/payment).
 
 ```bash
 curl -sS POST http://localhost:8086/api/request \
@@ -200,11 +200,12 @@ Header semantics:
 
 - `X-SAGE-Enabled: true|false` toggles A2A signing at sub‑agents (Payment→External)
 - `X-Scenario` is forwarded to agents as metadata (optional)
- - `X-HPKE-Enabled: true|false` toggles HPKE per request. When omitted, the server uses its current session default (e.g., demo_SAGE.sh process‑start HPKE).
+- `X-HPKE-Enabled: true|false` toggles HPKE per request. When omitted, the server uses its current session default (e.g., demo_SAGE.sh process‑start HPKE).
 
 ## Frontend Integration
 
 - Endpoint
+
   - `POST /api/request`
   - Headers
     - `X-SAGE-Enabled: true|false` (per-request signing toggle)
@@ -215,6 +216,7 @@ Header semantics:
     - `{ response, sageVerification, metadata, logs? }`
 
 - Rules
+
   - HPKE requires SAGE to be enabled. If `X-HPKE-Enabled: true` while `X-SAGE-Enabled: false`, the API returns `400 Bad Request` with `{ error: "bad_request" }`.
   - When HPKE is ON:
     - First request lazily bootstraps a session if needed; subsequent requests send ciphertext (`Content-Type: application/sage+hpke`).
@@ -249,14 +251,14 @@ curl -sS -i POST http://localhost:8086/api/request \
 - fetch example
 
 ```ts
-await fetch('http://localhost:8086/api/request', {
-  method: 'POST',
+await fetch("http://localhost:8086/api/request", {
+  method: "POST",
   headers: {
-    'Content-Type': 'application/json',
-    'X-SAGE-Enabled': 'true',
-    'X-HPKE-Enabled': 'true',
+    "Content-Type": "application/json",
+    "X-SAGE-Enabled": "true",
+    "X-HPKE-Enabled": "true",
   },
-  body: JSON.stringify({ prompt: 'send 10 USDC' }),
+  body: JSON.stringify({ prompt: "send 10 USDC" }),
 });
 ```
 
@@ -273,13 +275,13 @@ await fetch('http://localhost:8086/api/request', {
 - A2A transport used by Payment: `protocol/a2a_transport.go`
 - DID middleware wrapper: `internal/a2autil/middleware.go`
 - Gateway reverse proxy (tamper): `gateway/gateway.go`, `cmd/gateway/main.go`
-- External Payment (handshake + data mode): `cmd/external-payment/main.go`
+- External Payment (handshake + data mode): `cmd/payment/main.go`
 - Payment HPKE client wiring: `agents/payment/hpke_wrap.go`
 
 ## Troubleshooting
 
 - Check logs under `logs/*.log` (launcher scripts write there)
-- Verify middleware env: `ETH_RPC_URL`, `SAGE_REGISTRY_V4_ADDRESS`
+- Verify middleware env: `ETH_RPC_URL`, `SAGE_REGISTRY_ADDRESS`
 - Kill stuck ports: `scripts/01_kill_ports.sh --force`
 - Ensure keys exist: `keys/*.jwk`, `keys/kem/*.jwk`, `generated_agent_keys.json`
 - If developing without local `sage` repos, remove/adjust `replace` lines in `go.mod` and run `go mod tidy`

@@ -1,16 +1,16 @@
 package a2autil
 
 import (
-    "crypto/sha256"
-    "encoding/base64"
-    "fmt"
-    "os"
-    "strings"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
 
-    // a2a-go: DID verifier, key selector, RFC9421 verifier interfaces/implementations
-    "github.com/sage-x-project/sage-a2a-go/pkg/server"
-    "github.com/sage-x-project/sage/pkg/agent/did"
-    dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	// a2a-go: DID verifier, key selector, RFC9421 verifier interfaces/implementations
+	"github.com/sage-x-project/sage-a2a-go/pkg/server"
+	"github.com/sage-x-project/sage/pkg/agent/did"
+	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
 
 // DIDAuth wraps the a2a-go server middleware so callers don't depend on a2a-go directly.
@@ -19,7 +19,7 @@ type DIDAuth struct {
 }
 
 // ETH_RPC_URL               (default: http://127.0.0.1:8545)
-// SAGE_REGISTRY_V4_ADDRESS  (default: 0x5FbDB2315678afecb367f032d93F642f64180aa3)
+// SAGE_REGISTRY_ADDRESS  (default: 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512)
 // SAGE_OPERATOR_PRIVATE_KEY (default: 0xac0974...ff80)  // hex; 0x prefix allowed
 func BuildDIDMiddleware(optional bool) (*server.DIDAuthMiddleware, error) {
 
@@ -28,9 +28,9 @@ func BuildDIDMiddleware(optional bool) (*server.DIDAuthMiddleware, error) {
 	if rpc == "" {
 		rpc = "http://127.0.0.1:8545"
 	}
-	contract := strings.TrimSpace(os.Getenv("SAGE_REGISTRY_V4_ADDRESS"))
+	contract := strings.TrimSpace(os.Getenv("SAGE_REGISTRY_ADDRESS"))
 	if contract == "" {
-		contract = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+		contract = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 	}
 	priv := strings.TrimSpace(os.Getenv("SAGE_EXTERNAL_KEY"))
 	if priv == "" {
@@ -47,12 +47,19 @@ func BuildDIDMiddleware(optional bool) (*server.DIDAuthMiddleware, error) {
 		ConfirmationBlocks: 0,
 	}
 
-	ethClient, err := dideth.NewEthereumClientV4(cfg)
+	// 1) V4 AgentCard resolver (GetAgentByDID)
+	resolver, err := dideth.NewAgentCardClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("init on-chain client: %w", err)
+		panic(err)
 	}
 
-	mw := server.NewDIDAuthMiddleware(ethClient)
+	// 2) Public key client (ResolvePublicKey / ResolveKEMKey)
+	client, err := dideth.NewEthereumClient(cfg)
+	if err != nil {
+		panic(err)
+	}
+
+	mw := server.NewDIDAuthMiddleware(resolver, client)
 	mw.SetOptional(optional)
 	return mw, nil
 }

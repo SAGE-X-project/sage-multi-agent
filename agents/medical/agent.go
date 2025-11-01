@@ -1,11 +1,8 @@
-// package payment converts the former cmd/payment server into a reusable agent module.
-// It exposes a PaymentAgent that can be embedded into any HTTP stack.
-// Features:
-// - DID signature verification (RFC 9421) via internal middleware
-// - HPKE handshake (SecureMessage JSON) + data-mode HPKE decrypt/encrypt
-// - Plain JSON fallback when HPKE is off (and can be enabled lazily on first HPKE request)
-// - /status, /process endpoints identical to the cmd version
-package payment
+// package medical provides a reusable MedicalAgent with the same security model
+// as payment: RFC9421 DID signature verification middleware + HPKE (handshake/data)
+// + plain JSON fallback when HPKE is off.
+// Endpoints: /status, /process (identical behavior/headers to payment).
+package medical
 
 import (
 	"bytes"
@@ -23,7 +20,6 @@ import (
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
-	"github.com/sage-x-project/sage-multi-agent/llm"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
 	// DID / Resolver
@@ -40,11 +36,14 @@ import (
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
+
+	// [LLM] shim
+	"github.com/sage-x-project/sage-multi-agent/llm"
 )
 
 // -------- Public API --------
 
-type PaymentAgent struct {
+type MedicalAgent struct {
 	RequireSignature bool // true = RFC9421 required, false = allow plaintext (no verify)
 
 	// internals
@@ -66,35 +65,35 @@ type PaymentAgent struct {
 	llmClient llm.Client
 }
 
-// NewPaymentAgent builds the agent.
-func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
-	agent := &PaymentAgent{
+// NewMedicalAgent builds the agent (same signature as payment.NewPaymentAgent).
+func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
+	agent := &MedicalAgent{
 		RequireSignature: requireSignature,
-		logger:           log.New(os.Stdout, "[payment] ", log.LstdFlags),
+		logger:           log.New(os.Stdout, "[medical] ", log.LstdFlags),
 	}
 
 	// ===== DID middleware =====
 	if agent.RequireSignature {
 		mw, err := a2autil.BuildDIDMiddleware(true)
 		if err != nil {
-			agent.logger.Printf("[payment] DID middleware init failed: %v (running without verify)", err)
+			agent.logger.Printf("[medical] DID middleware init failed: %v (running without verify)", err)
 			agent.mw = nil
 		} else {
 			mw.SetErrorHandler(newCompactDIDErrorHandler(agent.logger))
 			agent.mw = mw
 		}
 	} else {
-		agent.logger.Printf("[payment] DID middleware disabled (requireSignature=false)")
+		agent.logger.Printf("[medical] DID middleware disabled (requireSignature=false)")
 		agent.mw = nil
 	}
 
 	// ===== Open mux: /status =====
 	open := http.NewServeMux()
-	open.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+	open.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"name":         "payment",
-			"type":         "payment",
+			"name":         "medical",
+			"type":         "medical",
 			"sage_enabled": agent.RequireSignature,
 			"hpke_ready":   agent.hpkeSrv != nil,
 			"time":         time.Now().Format(time.RFC3339),
@@ -117,7 +116,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 		// HPKE path?
 		if isHPKE(r) {
 			if err := agent.ensureHPKE(); err != nil {
-				agent.logger.Printf("[payment] ensureHPKE error: %v", err)
+				agent.logger.Printf("[medical] ensureHPKE: %v", err)
 				http.Error(w, "hpke disabled", http.StatusBadRequest)
 				return
 			}
@@ -138,7 +137,6 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 			// --- Data mode (has KID) ---
 			sess, ok := agent.hpkeMgr.GetByKeyID(kid)
 			if !ok {
-				// Try to treat as handshake if session vanished
 				if agent.hsrv != nil {
 					r.Body = io.NopCloser(bytes.NewReader(body))
 					agent.hsrv.MessagesHandler().ServeHTTP(w, r)
@@ -228,27 +226,27 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	if c, err := llm.NewFromEnv(); err == nil {
 		agent.llmClient = c
 	} else {
-		agent.logger.Printf("[payment] LLM disabled: %v", err)
+		agent.logger.Printf("[medical] LLM disabled: %v", err)
 	}
 
 	return agent, nil
 }
 
 // 핸들러 반환
-func (e *PaymentAgent) Handler() http.Handler { return e.handler }
+func (e *MedicalAgent) Handler() http.Handler { return e.handler }
 
 // 서버 실행
-func (e *PaymentAgent) Start(addr string) error {
+func (e *MedicalAgent) Start(addr string) error {
 	if e.handler == nil {
 		return fmt.Errorf("handler not initialized")
 	}
 	e.httpSrv = &http.Server{Addr: addr, Handler: e.handler}
-	e.logger.Printf("[boot] payment on %s (requireSig=%v, hpke_ready=%v)", addr, e.RequireSignature, e.hpkeSrv != nil)
+	e.logger.Printf("[boot] medical on %s (requireSig=%v, hpke_ready=%v)", addr, e.RequireSignature, e.hpkeSrv != nil)
 	return e.httpSrv.ListenAndServe()
 }
 
 // 서버 종료
-func (e *PaymentAgent) Shutdown(ctx context.Context) error {
+func (e *MedicalAgent) Shutdown(ctx context.Context) error {
 	if e.httpSrv == nil {
 		return nil
 	}
@@ -257,7 +255,7 @@ func (e *PaymentAgent) Shutdown(ctx context.Context) error {
 
 // -------- Lazy HPKE enable --------
 
-func (e *PaymentAgent) ensureHPKE() error {
+func (e *MedicalAgent) ensureHPKE() error {
 	e.hpkeMu.Lock()
 	defer e.hpkeMu.Unlock()
 
@@ -265,11 +263,11 @@ func (e *PaymentAgent) ensureHPKE() error {
 		return nil
 	}
 
-	sigPath := strings.TrimSpace(os.Getenv("PAYMENT_JWK_FILE"))
-	kemPath := strings.TrimSpace(os.Getenv("PAYMENT_KEM_JWK_FILE"))
+	sigPath := strings.TrimSpace(os.Getenv("MEDICAL_JWK_FILE"))
+	kemPath := strings.TrimSpace(os.Getenv("MEDICAL_KEM_JWK_FILE"))
 	if sigPath == "" || kemPath == "" {
-		e.logger.Printf("[boot] payment HPKE disabled (missing PAYMENT_JWK_FILE or PAYMENT_KEM_JWK_FILE)")
-		return fmt.Errorf("missing PAYMENT_JWK_FILE or PAYMENT_KEM_JWK_FILE")
+		e.logger.Printf("[boot] medical HPKE disabled (missing MEDICAL_JWK_FILE or MEDICAL_KEM_JWK_FILE)")
+		return fmt.Errorf("missing MEDICAL_JWK_FILE or MEDICAL_KEM_JWK_FILE")
 	}
 
 	hpkeMgr := session.NewManager()
@@ -291,9 +289,9 @@ func (e *PaymentAgent) ensureHPKE() error {
 	if err != nil {
 		return fmt.Errorf("HPKE: load keys (%s): %w", keysPath, err)
 	}
-	serverDID := strings.TrimSpace(nameToDID["payment"])
+	serverDID := strings.TrimSpace(nameToDID["medical"])
 	if serverDID == "" {
-		return fmt.Errorf("HPKE: server DID not found for name 'payment' in %s", keysPath)
+		return fmt.Errorf("HPKE: server DID not found for name 'medical' in %s", keysPath)
 	}
 
 	e.hpkeMgr = hpkeMgr
@@ -308,13 +306,14 @@ func (e *PaymentAgent) ensureHPKE() error {
 		return e.hpkeSrv.HandleMessage(ctx, msg)
 	})
 
-	e.logger.Printf("[boot] payment HPKE enabled (lazy)")
+	e.logger.Printf("[boot] medical HPKE enabled (lazy)")
 	return nil
 }
 
-// -------- Application handler (extended with LLM) --------
+// -------- Application handler (LLM-driven medical info) --------
 
-func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
+// -------- Application handler (LLM-driven medical info) --------
+func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
 	var in types.AgentMessage
 	if err := json.Unmarshal(msg.Payload, &in); err != nil {
 		return &transport.Response{
@@ -325,67 +324,100 @@ func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}, nil
 	}
 
-	// Extract slots passed by Root (fallback to naive parsing).
-	to := getMetaString(in.Metadata, "payment.to", "to", "recipient")
-	method := getMetaString(in.Metadata, "payment.method", "method")
-	item := getMetaString(in.Metadata, "item", "payment.item")
-	memo := getMetaString(in.Metadata, "memo", "payment.memo")
-	amount := getMetaInt64(in.Metadata, "payment.amountKRW", "amountKRW", "amount")
-	if amount <= 0 {
-		if b := getMetaInt64(in.Metadata, "payment.budgetKRW", "budgetKRW"); b > 0 {
-			amount = b
-			if in.Metadata == nil {
-				in.Metadata = map[string]any{}
-			}
-			in.Metadata["payment.amountIsEstimated"] = true
-		}
-	}
+	// Extract optional slots from metadata (Root가 채워줬다면 사용)
+	symptoms := getMetaString(in.Metadata, "medical.symptoms", "symptoms")
+	age := getMetaInt64(in.Metadata, "medical.age", "age")
+	sex := getMetaString(in.Metadata, "medical.sex", "sex")
+	duration := getMetaString(in.Metadata, "medical.duration", "duration")
+	severity := getMetaString(in.Metadata, "medical.severity", "severity")
+	meds := getMetaString(in.Metadata, "medical.meds", "medications")
+	allergy := getMetaString(in.Metadata, "medical.allergies", "allergies")
+	conds := getMetaString(in.Metadata, "medical.conditions", "conditions")
 
-	// If essential fields are missing, just echo (legacy behavior).
-	budget := getMetaInt64(in.Metadata, "payment.budgetKRW", "budgetKRW")
-	hasMoney := (amount > 0 || budget > 0)
-	useEcho := (strings.TrimSpace(to) == "" || !hasMoney || strings.TrimSpace(method) == "")
 	lang := getMetaString(in.Metadata, "lang")
 	if lang == "" {
-		lang = llm.DetectLang(in.Content) // fallback
+		lang = llm.DetectLang(in.Content)
 	}
 	if lang != "ko" && lang != "en" {
 		lang = "ko"
 	}
 
-	if e.llmClient == nil || useEcho {
-		out := types.AgentMessage{
-			ID:        in.ID + "-ok",
-			From:      "payment",
-			To:        in.From,
-			Type:      "response",
-			Content:   fmt.Sprintf("External payment processed at %s (echo): %s", time.Now().Format(time.RFC3339), strings.TrimSpace(in.Content)),
-			Timestamp: time.Now(),
-		}
-		b, _ := json.Marshal(out)
-		return &transport.Response{Success: true, MessageID: msg.ID, TaskID: msg.TaskID, Data: b}, nil
+	// 사용자 질문/컨텍스트 정리
+	query := strings.TrimSpace(in.Content)
+	if query == "" && symptoms != "" {
+		query = fmt.Sprintf("증상: %s", symptoms)
 	}
 
-	// === LLM로 영수증 한 줄 생성 (실패 시 템플릿 폴백) ===
-	text := e.generateReceipt(ctx, lang, to, amount, method, item, memo)
-	// === 끝 ===
+	// LLM 프롬프트 (안전/정보용, 한 문장)
+	sys := map[string]string{
+		"ko": "너는 의료 정보 도우미야. 진단/처방 없이 안전한 일반 의학 정보를 '한 문장'으로만 제공해. 응급 징후가 의심되면 전문의 진료를 권유하고, 과도한 세부사항/코드블록/목록은 금지.",
+		"en": "You are a medical info assistant. Provide one short, safe, general informational sentence. No diagnosis/prescription. If red flags are possible, suggest seeing a professional. No lists or code blocks.",
+	}[lang]
+
+	var sb strings.Builder
+	if query != "" {
+		fmt.Fprintf(&sb, "UserQuestion: %s\n", query)
+	}
+	if symptoms != "" {
+		fmt.Fprintf(&sb, "Symptoms: %s\n", symptoms)
+	}
+	if age > 0 {
+		fmt.Fprintf(&sb, "Age: %d\n", age)
+	}
+	if sex != "" {
+		fmt.Fprintf(&sb, "Sex: %s\n", sex)
+	}
+	if duration != "" {
+		fmt.Fprintf(&sb, "Duration: %s\n", duration)
+	}
+	if severity != "" {
+		fmt.Fprintf(&sb, "Severity: %s\n", severity)
+	}
+	if meds != "" {
+		fmt.Fprintf(&sb, "Medications: %s\n", meds)
+	}
+	if allergy != "" {
+		fmt.Fprintf(&sb, "Allergies: %s\n", allergy)
+	}
+	if conds != "" {
+		fmt.Fprintf(&sb, "Conditions: %s\n", conds)
+	}
+	usr := sb.String()
+
+	// LLM 호출 (없거나 실패 시 보수적 폴백)
+	text := ""
+	if e.llmClient != nil {
+		if out, err := e.llmClient.Chat(ctx, sys, usr); err == nil && strings.TrimSpace(out) != "" {
+			text = strings.TrimSpace(out)
+		}
+	}
+	if text == "" {
+		if lang == "en" {
+			text = "This is general health information, not a diagnosis. If symptoms are severe or worsening (e.g., chest pain, trouble breathing, confusion), seek emergency care; otherwise rest, hydrate, monitor, and see a clinician if symptoms persist."
+		} else {
+			text = "이 답변은 일반 건강 정보이며 진단이 아닙니다. 흉통·호흡곤란·의식 변화 등 심한 증상은 즉시 응급실을 방문하고, 경미하면 휴식·수분섭취·경과 관찰 후 지속 시 의료진과 상담하세요."
+		}
+	}
 
 	out := types.AgentMessage{
-		ID:        in.ID + "-receipt",
-		From:      "payment",
+		ID:        in.ID + "-medical",
+		From:      "medical",
 		To:        in.From,
 		Type:      "response",
 		Content:   text,
 		Timestamp: time.Now(),
 		Metadata: map[string]any{
-			"receipt": map[string]any{
-				"to":          to,
-				"amountKRW":   amount,
-				"method":      method,
-				"item":        item,
-				"memo":        memo,
-				"orderId":     fmt.Sprintf("ORD-%04d", time.Now().Unix()%10000),
-				"generatedAt": time.Now().Format(time.RFC3339),
+			"agent": "medical",
+			"hpke":  msg.Metadata["hpke"],
+			"context": map[string]any{
+				"symptoms": symptoms,
+				"age":      age,
+				"sex":      sex,
+				"duration": duration,
+				"severity": severity,
+				"meds":     meds,
+				"allergy":  allergy,
+				"conds":    conds,
 			},
 		},
 	}
@@ -396,108 +428,6 @@ func (e *PaymentAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		TaskID:    msg.TaskID,
 		Data:      b,
 	}, nil
-}
-
-// -------- LLM Receipt generator --------
-
-func (e *PaymentAgent) generateReceipt(ctx context.Context, lang, to string, amount int64, method, item, memo string) string {
-	// System prompt keeps it terse and single-line.
-	sys := map[string]string{
-		"ko": `너는 결제 영수증 생성기야.
-- 딱 한 줄로만 출력하고, 이모지/불릿/따옴표/코드블록/여분 공백/개행 없이.
-- 형식 예시(참고용): 영수증: 수신자=홍길동, 금액=1,250,000원, 방법=카드, 품목=iPhone 15 Pro, 메모=생일선물 · 2025-11-01T12:30:00Z
-- 필드가 비어있으면 생략.
-- KRW는 천단위 콤마와 "원"을 사용.
-- 너무 장문 금지(140자 이내).`,
-		"en": `You generate a one-line payment receipt.
-- Exactly one line, no emojis/bullets/quotes/code blocks, no extra whitespace.
-- Example (for style only): Receipt: to=Alice, amount=₩1,250,000, method=card, item=iPhone 15 Pro, memo=birthday · 2025-11-01T12:30:00Z
-- Omit empty fields.
-- Use thousands separators and the KRW symbol or "₩".
-- Keep it under ~140 chars.`,
-	}[lang]
-	// Normalize labels for method per language
-	mlabel := methodLabel(lang, method)
-	now := time.Now().UTC().Format(time.RFC3339)
-	amt := "₩" + withComma(amount)
-	if lang == "ko" {
-		amt = withComma(amount) + "원"
-	}
-
-	usr := fmt.Sprintf(
-		"lang=%s\nto=%s\namount=%s\nmethod=%s\nitem=%s\nmemo=%s\ntimestamp=%s",
-		lang, strings.TrimSpace(to), amt, mlabel, strings.TrimSpace(item), strings.TrimSpace(memo), now,
-	)
-
-	if e.llmClient != nil {
-		if out, err := e.llmClient.Chat(ctx, sys, usr); err == nil {
-			if s := strings.TrimSpace(out); s != "" && !strings.Contains(s, "\n") {
-				return s
-			}
-		}
-	}
-
-	// Fallback template (no LLM or failure)
-	ts := now
-	var parts []string
-	if to != "" {
-		if lang == "ko" {
-			parts = append(parts, "수신자="+to)
-		} else {
-			parts = append(parts, "to="+to)
-		}
-	}
-	if lang == "ko" {
-		parts = append(parts, "금액="+amt)
-		parts = append(parts, "방법="+mlabel)
-		if item != "" {
-			parts = append(parts, "품목="+item)
-		}
-		if memo != "" {
-			parts = append(parts, "메모="+memo)
-		}
-		return "영수증: " + strings.Join(parts, ", ") + " · " + ts
-	}
-	parts = append(parts, "amount="+amt, "method="+mlabel)
-	if item != "" {
-		parts = append(parts, "item="+item)
-	}
-	if memo != "" {
-		parts = append(parts, "memo="+memo)
-	}
-	return "Receipt: " + strings.Join(parts, ", ") + " · " + ts
-}
-
-func methodLabel(lang, method string) string {
-	m := strings.ToLower(strings.TrimSpace(method))
-	if lang == "ko" {
-		switch m {
-		case "card", "credit", "debit":
-			return "카드"
-		case "bank", "transfer", "account":
-			return "계좌이체"
-		case "kakaopay":
-			return "카카오페이"
-		case "naverpay":
-			return "네이버페이"
-		case "toss":
-			return "토스"
-		case "cash":
-			return "현금"
-		default:
-			return method
-		}
-	}
-	switch m {
-	case "kakaopay":
-		return "kakaopay"
-	case "naverpay":
-		return "naverpay"
-	case "toss":
-		return "toss"
-	default:
-		return m
-	}
 }
 
 // -------- Internals (ported & helpers) --------
@@ -519,33 +449,33 @@ func isHPKE(r *http.Request) bool {
 }
 
 func loadServerSigningKeyFromEnv() (sagecrypto.KeyPair, error) {
-	path := strings.TrimSpace(os.Getenv("PAYMENT_JWK_FILE"))
+	path := strings.TrimSpace(os.Getenv("MEDICAL_JWK_FILE"))
 	if path == "" {
-		return nil, fmt.Errorf("missing PAYMENT_JWK_FILE for server signing key (JWK)")
+		return nil, fmt.Errorf("missing MEDICAL_JWK_FILE for server signing key (JWK)")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read PAYMENT_JWK_FILE (%s): %w", path, err)
+		return nil, fmt.Errorf("read MEDICAL_JWK_FILE (%s): %w", path, err)
 	}
 	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
 	if err != nil {
-		return nil, fmt.Errorf("import PAYMENT_JWK_FILE (%s) as JWK: %w", path, err)
+		return nil, fmt.Errorf("import MEDICAL_JWK_FILE (%s) as JWK: %w", path, err)
 	}
 	return kp, nil
 }
 
 func loadServerKEMFromEnv() (sagecrypto.KeyPair, error) {
-	path := strings.TrimSpace(os.Getenv("PAYMENT_KEM_JWK_FILE"))
+	path := strings.TrimSpace(os.Getenv("MEDICAL_KEM_JWK_FILE"))
 	if path == "" {
-		return nil, fmt.Errorf("missing PAYMENT_KEM_JWK_FILE for server KEM key (JWK)")
+		return nil, fmt.Errorf("missing MEDICAL_KEM_JWK_FILE for server KEM key (JWK)")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read PAYMENT_KEM_JWK_FILE (%s): %w", path, err)
+		return nil, fmt.Errorf("read MEDICAL_KEM_JWK_FILE (%s): %w", path, err)
 	}
 	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
 	if err != nil {
-		return nil, fmt.Errorf("import PAYMENT_KEM_JWK_FILE (%s) as JWK: %w", path, err)
+		return nil, fmt.Errorf("import MEDICAL_KEM_JWK_FILE (%s) as JWK: %w", path, err)
 	}
 	return kp, nil
 }
@@ -589,7 +519,7 @@ func loadDIDsFromKeys(path string) (map[string]string, error) {
 }
 
 func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *http.Request, err error) {
-	return func(w http.ResponseWriter, _ *http.Request, err error) {
+	return func(w http.ResponseWriter, r *http.Request, err error) {
 		re := rootError(err)
 		if l != nil {
 			l.Printf("⚠️ [did-auth] %s", re.Error())
@@ -645,7 +575,7 @@ func getMetaInt64(m map[string]any, keys ...string) int64 {
 			case int64:
 				return t
 			case string:
-				if n, err := strconv.ParseInt(strings.ReplaceAll(strings.TrimSpace(t), ",", ""), 10, 64); err == nil {
+				if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
 					return n
 				}
 			}
@@ -654,27 +584,6 @@ func getMetaInt64(m map[string]any, keys ...string) int64 {
 	return 0
 }
 
-func withComma(n int64) string {
-	s := fmt.Sprintf("%d", n)
-	neg := ""
-	if n < 0 {
-		neg = "-"
-		s = s[1:]
-	}
-	out := ""
-	for i, c := range reverse(s) {
-		if i > 0 && i%3 == 0 {
-			out = "," + out
-		}
-		out = string(c) + out
-	}
-	return neg + out
-}
-
-func reverse(s string) []rune {
-	r := []rune(s)
-	for i, j := 0, len(r)-1; i < j; i, j = i+1, j-1 {
-		r[i], r[j] = r[j], r[i]
-	}
-	return r
+func itoa(n int64) string {
+	return fmt.Sprintf("%d", n)
 }

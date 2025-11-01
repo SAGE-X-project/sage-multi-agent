@@ -58,8 +58,8 @@ fi
 : "${PAYMENT_AGENT_PORT:=18083}"
 
 # Default paths (will be normalized later)
-: "${EXTERNAL_JWK_FILE:=keys/external.jwk}"
-: "${EXTERNAL_KEM_JWK_FILE:=keys/kem/external.x25519.jwk}"
+: "${PAYMENT_JWK_FILE:=keys/external.jwk}"
+: "${PAYMENT_KEM_JWK_FILE:=keys/kem/external.x25519.jwk}"
 : "${MERGED_KEYS_FILE:=merged_agent_keys.json}"
 : "${EXTERNAL_AGENT_NAME:=external}"
 : "${PAYMENT_JWK_FILE:=keys/payment.jwk}"
@@ -114,16 +114,15 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # ---------- normalize to absolute paths (safe under set -u) ----------
-EXTERNAL_JWK_FILE="$(abspath "${EXTERNAL_JWK_FILE:-}")"
-EXTERNAL_KEM_JWK_FILE="$(abspath "${EXTERNAL_KEM_JWK_FILE:-}")"
+PAYMENT_JWK_FILE="$(abspath "${PAYMENT_JWK_FILE:-}")"
+PAYMENT_KEM_JWK_FILE="$(abspath "${PAYMENT_KEM_JWK_FILE:-}")"
 MERGED_KEYS_FILE="$(abspath "${MERGED_KEYS_FILE:-}")"
 PAYMENT_JWK_FILE="$(abspath "${PAYMENT_JWK_FILE:-}")"
 HPKE_KEYS="$(abspath "${HPKE_KEYS:-generated_agent_keys.json}")"
 
-# If HPKE is off, blank out HPKE-related envs (do not unset under set -u)
+# If HPKE is off, only blank out HPKE-related files (keep signing JWK for SAGE)
 if [[ "$HPKE_MODE" != "on" ]]; then
-  EXTERNAL_JWK_FILE=""
-  EXTERNAL_KEM_JWK_FILE=""
+  PAYMENT_KEM_JWK_FILE=""
   MERGED_KEYS_FILE=""
 fi
 
@@ -143,14 +142,14 @@ fi
 
 # HPKE key files are only required when HPKE is on
 if [[ "$HPKE_MODE" == "on" ]]; then
-  if [[ -z "$EXTERNAL_JWK_FILE" || ! -f "$EXTERNAL_JWK_FILE" ]]; then
-    echo "[ERR] EXTERNAL_JWK_FILE not found: ${EXTERNAL_JWK_FILE:-<empty>}"
-    dbg_path EXTERNAL_JWK_FILE "$EXTERNAL_JWK_FILE"
+  if [[ -z "$PAYMENT_JWK_FILE" || ! -f "$PAYMENT_JWK_FILE" ]]; then
+    echo "[ERR] PAYMENT_JWK_FILE not found: ${PAYMENT_JWK_FILE:-<empty>}"
+    dbg_path PAYMENT_JWK_FILE "$PAYMENT_JWK_FILE"
     exit 1
   fi
-  if [[ -z "$EXTERNAL_KEM_JWK_FILE" || ! -f "$EXTERNAL_KEM_JWK_FILE" ]]; then
-    echo "[ERR] EXTERNAL_KEM_JWK_FILE not found: ${EXTERNAL_KEM_JWK_FILE:-<empty>}"
-    dbg_path EXTERNAL_KEM_JWK_FILE "$EXTERNAL_KEM_JWK_FILE"
+  if [[ -z "$PAYMENT_KEM_JWK_FILE" || ! -f "$PAYMENT_KEM_JWK_FILE" ]]; then
+    echo "[ERR] PAYMENT_KEM_JWK_FILE not found: ${PAYMENT_KEM_JWK_FILE:-<empty>}"
+    dbg_path PAYMENT_KEM_JWK_FILE "$PAYMENT_KEM_JWK_FILE"
     exit 1
   fi
   if [[ -z "$MERGED_KEYS_FILE" || ! -f "$MERGED_KEYS_FILE" ]]; then
@@ -163,14 +162,14 @@ fi
 # Export only what is needed
 export EXTERNAL_AGENT_NAME
 if [[ "$HPKE_MODE" == "on" ]]; then
-  export EXTERNAL_JWK_FILE EXTERNAL_KEM_JWK_FILE MERGED_KEYS_FILE
+  export PAYMENT_JWK_FILE PAYMENT_KEM_JWK_FILE MERGED_KEYS_FILE
 fi
 
 echo "[CFG] SAGE_MODE=${SAGE_MODE}  GW_MODE=${GW_MODE}  HPKE_MODE=${HPKE_MODE}"
 echo "[CFG] HPKE_KEYS=${HPKE_KEYS}"
 echo "[CFG] PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE}"
-echo "[CFG] EXTERNAL_JWK_FILE=${EXTERNAL_JWK_FILE:-<empty>}"
-echo "[CFG] EXTERNAL_KEM_JWK_FILE=${EXTERNAL_KEM_JWK_FILE:-<empty>}"
+echo "[CFG] PAYMENT_JWK_FILE=${PAYMENT_JWK_FILE:-<empty>}"
+echo "[CFG] PAYMENT_KEM_JWK_FILE=${PAYMENT_KEM_JWK_FILE:-<empty>}"
 echo "[CFG] MERGED_KEYS_FILE=${MERGED_KEYS_FILE:-<empty>}"
 
 # ---------- 1) bring up stack ----------

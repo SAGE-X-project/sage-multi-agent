@@ -1,16 +1,6 @@
-// Package llm provides a tiny, pluggable chat-completion client with bilingual (ko/en) support.
-// Env:
-//
-//	JAMINAI_API_URL, JAMINAI_API_KEY, JAMINAI_MODEL
-//
-// Public helpers:
-//   - DetectLang(text) -> "ko" or "en"
-//   - BuildPaymentAskPromptWithLang(lang, missing, original)
-//   - BuildPaymentReceiptPromptWithLang(lang, to, amountKRW, method, item, memo)
-//
-// Backward-compat wrappers (still available):
-//   - BuildPaymentAskPrompt(missing, original)           // auto language detection
-//   - BuildPaymentReceiptPrompt(to, amountKRW, ...)      // defaults to ko
+// Package llm provides a small, pluggable OpenAI-compatible chat client
+// with sane env defaults and local (no-key) allowance.
+// Only LLM-related code lives here. Non-LLM parts are not touched.
 package llm
 
 import (
@@ -19,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -26,40 +17,19 @@ import (
 	"unicode"
 )
 
-var ErrLLMDisabled = errors.New("llm client disabled (missing env)")
+var ErrLLMDisabled = errors.New("llm client disabled (missing key or base url)")
 
-// Client is a minimal chat interface.
+// Client is the minimal interface used by RootAgent/PaymentAgent.
 type Client interface {
 	Chat(ctx context.Context, system, user string) (string, error)
 }
 
-// JaminAIClient implements Client using an OpenAI-compatible chat endpoint.
+// JaminAIClient is an OpenAI-compatible HTTP client.
 type JaminAIClient struct {
 	BaseURL string
 	APIKey  string
 	Model   string
 	HTTP    *http.Client
-}
-
-// NewFromEnv creates a client if envs are present; otherwise returns ErrLLMDisabled.
-func NewFromEnv() (Client, error) {
-	base := strings.TrimSpace(os.Getenv("JAMINAI_API_URL"))
-	key := strings.TrimSpace(os.Getenv("JAMINAI_API_KEY"))
-	model := strings.TrimSpace(os.Getenv("JAMINAI_MODEL"))
-	if base == "" || key == "" {
-		return nil, ErrLLMDisabled
-	}
-	if model == "" {
-		model = "jaminai-chat"
-	}
-	return &JaminAIClient{
-		BaseURL: strings.TrimRight(base, "/"),
-		APIKey:  key,
-		Model:   model,
-		HTTP: &http.Client{
-			Timeout: 12 * time.Second,
-		},
-	}, nil
 }
 
 type chatReq struct {
@@ -76,10 +46,14 @@ type chatMessage struct {
 }
 
 type chatResp struct {
-	ID      string         `json:"id"`
-	Object  string         `json:"object"`
-	Choices []chatChoice   `json:"choices"`
-	Error   *providerError `json:"error,omitempty"`
+	ID      string       `json:"id"`
+	Object  string       `json:"object"`
+	Choices []chatChoice `json:"choices"`
+	Error   *struct {
+		Message string      `json:"message"`
+		Type    string      `json:"type,omitempty"`
+		Code    interface{} `json:"code,omitempty"`
+	} `json:"error,omitempty"`
 }
 
 type chatChoice struct {
@@ -88,28 +62,81 @@ type chatChoice struct {
 	Message      chatMessage `json:"message"`
 }
 
-type providerError struct {
-	Message string `json:"message"`
-	Type    string `json:"type,omitempty"`
-	Code    any    `json:"code,omitempty"`
+// NewFromEnv creates a client using relaxed env precedence.
+// Base URL precedence: JAMINAI_API_URL > LLM_BASE_URL > LLM_URL > default Google OpenAI-compatible.
+// Key precedence: JAMINAI_API_KEY > LLM_API_KEY > GEMINI_API_KEY > GOOGLE_API_KEY > OPENAI_API_KEY.
+// Local hosts (localhost/127.0.0.1) allow empty key or LLM_ALLOW_NO_KEY=true.
+func NewFromEnv() (Client, error) {
+	base := firstNonEmpty(
+		os.Getenv("JAMINAI_API_URL"),
+		os.Getenv("LLM_BASE_URL"),
+		os.Getenv("LLM_URL"),
+	)
+	if base == "" {
+		base = "https://generativelanguage.googleapis.com/v1beta/openai"
+	}
+	base = normalizeBase(base)
+
+	key := firstNonEmpty(
+		os.Getenv("JAMINAI_API_KEY"),
+		os.Getenv("LLM_API_KEY"),
+		os.Getenv("GEMINI_API_KEY"),
+		os.Getenv("GOOGLE_API_KEY"),
+		os.Getenv("OPENAI_API_KEY"),
+	)
+
+	model := firstNonEmpty(
+		os.Getenv("JAMINAI_MODEL"),
+		os.Getenv("LLM_MODEL"),
+	)
+	if model == "" {
+		model = "gemini-2.5-flash"
+	}
+
+	// Allow converting LLM_TIMEOUT_MS → JAMINAI_TIMEOUT seconds.
+	if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT_MS")); v != "" {
+		if d, err := time.ParseDuration(v + "ms"); err == nil {
+			_ = os.Setenv("JAMINAI_TIMEOUT", fmt.Sprintf("%.0fs", d.Seconds()))
+		}
+	}
+	timeout := 12 * time.Second
+	if v := strings.TrimSpace(os.Getenv("JAMINAI_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			timeout = d
+		}
+	}
+
+	allowNoKey := strings.EqualFold(os.Getenv("LLM_ALLOW_NO_KEY"), "true") ||
+		strings.Contains(base, "localhost") || strings.Contains(base, "127.0.0.1")
+
+	if key == "" && !allowNoKey {
+		return nil, ErrLLMDisabled
+	}
+
+	return &JaminAIClient{
+		BaseURL: strings.TrimRight(base, "/"),
+		APIKey:  key,
+		Model:   model,
+		HTTP:    &http.Client{Timeout: timeout},
+	}, nil
 }
 
+// Chat sends a synchronous chat.completions request.
 func (c *JaminAIClient) Chat(ctx context.Context, system, user string) (string, error) {
 	reqBody := chatReq{
-		Model: c.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
+		Model:       c.Model,
+		Messages:    []chatMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
 		MaxTokens:   320,
 		Temperature: 0.7,
 	}
 	b, _ := json.Marshal(reqBody)
-	endpoint := c.BaseURL + "/v1/chat/completions"
 
+	endpoint := c.BaseURL + "/chat/completions"
 	httpReq, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if strings.TrimSpace(c.APIKey) != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
 
 	res, err := c.HTTP.Do(httpReq)
 	if err != nil {
@@ -117,9 +144,10 @@ func (c *JaminAIClient) Chat(ctx context.Context, system, user string) (string, 
 	}
 	defer res.Body.Close()
 
+	body, _ := io.ReadAll(res.Body)
 	var out chatResp
-	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
-		return "", err
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("llm decode failed: %w; raw=%s", err, strings.TrimSpace(string(body)))
 	}
 	if out.Error != nil {
 		return "", errors.New(strings.TrimSpace(out.Error.Message))
@@ -130,7 +158,92 @@ func (c *JaminAIClient) Chat(ctx context.Context, system, user string) (string, 
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
 }
 
-// DetectLang returns "ko" if the text contains any Hangul, otherwise "en".
+// ---------- Domain helpers (safe fallbacks inside) ----------
+
+// GeneratePaymentClarify returns ONE short question asking only missing fields.
+// Always returns non-empty string (falls back if LLM fails).
+func GeneratePaymentClarify(ctx context.Context, c Client, lang string, missing []string, userText string) string {
+	// fallback labels
+	if len(missing) == 0 {
+		missing = []string{"수신자", "금액(원)", "결제수단"}
+	}
+	miss := strings.Join(missing, ", ")
+
+	if c != nil {
+		sys := "You generate ONE short clarification question focused only on the missing fields for checkout/transfer."
+		user := fmt.Sprintf("User text: %q\nMissing fields: %s\nReturn exactly ONE concise question. No list, no explanation.", strings.TrimSpace(userText), miss)
+		if lang == "ko" {
+			sys = "결제/송금 맥락에서 누락된 항목만 간결하게 한 문장으로 물어봐. 설명/목록 없이 질문 한 문장만."
+			user = fmt.Sprintf("사용자 입력: %q\n누락 항목: %s\n질문 한 문장만 출력.", strings.TrimSpace(userText), miss)
+		}
+		if out, err := c.Chat(ctx, sys, user); err == nil && strings.TrimSpace(out) != "" {
+			return strings.TrimSpace(out)
+		}
+	}
+
+	// fallback
+	if lang == "ko" {
+		return "부족한 항목만 한 문장으로 알려주세요: " + miss
+	}
+	return "Please provide the missing info in one short sentence: " + miss
+}
+
+// GeneratePaymentReceipt returns one-line receipt text.
+// Always returns non-empty string (falls back if LLM fails).
+func GeneratePaymentReceipt(ctx context.Context, c Client, lang string, to string, amountKRW int64, method, item, memo string) string {
+	amt := withComma(amountKRW)
+	if amt == "" {
+		amt = "0"
+	}
+	if c != nil {
+		sys := "Generate exactly ONE single-line human-friendly receipt/confirmation sentence."
+		user := fmt.Sprintf("to=%s, amount=%s KRW, method=%s, item=%s, memo=%s. One short line.",
+			nz(to), amt, nz(method), nz(item), nz(memo))
+		if lang == "ko" {
+			sys = "영수증 확인 문장을 한국어로 한 줄만 생성한다. 간결하게."
+			user = fmt.Sprintf("수신자=%s, 금액=%s원, 결제수단=%s, 제품=%s, 메모=%s. 한 줄만 출력.",
+				nz(to), amt, nz(method), nz(item), nz(memo))
+		}
+		if out, err := c.Chat(ctx, sys, user); err == nil && strings.TrimSpace(out) != "" {
+			return strings.TrimSpace(out)
+		}
+	}
+	// fallback
+	if lang == "ko" {
+		return fmt.Sprintf("%s님에 대한 결제 %s원(%s) 처리 완료%s.",
+			nz(to), amt, nz(method), optionalSuffix(" - "+nz(item)))
+	}
+	return fmt.Sprintf("Payment %s KRW via %s to %s completed%s.",
+		amt, nz(method), nz(to), optionalSuffix(" - "+nz(item)))
+}
+
+// ---------- shared helpers (LLM-side only) ----------
+
+func firstNonEmpty(vs ...string) string {
+	for _, v := range vs {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// normalizeBase adds /v1 for local OpenAI-compatible servers if necessary.
+func normalizeBase(u string) string {
+	s := strings.TrimRight(strings.TrimSpace(u), "/")
+	if s == "" {
+		return s
+	}
+	isLocal := strings.Contains(s, "localhost") || strings.Contains(s, "127.0.0.1")
+	if isLocal {
+		if !strings.HasSuffix(s, "/v1") && !strings.Contains(s, "/openai/v1") {
+			s += "/v1"
+		}
+	}
+	return s
+}
+
+// DetectLang returns "ko" if Hangul is detected, otherwise "en".
 func DetectLang(s string) string {
 	for _, r := range s {
 		if unicode.Is(unicode.Hangul, r) {
@@ -140,57 +253,36 @@ func DetectLang(s string) string {
 	return "en"
 }
 
-// BuildPaymentAskPromptWithLang builds a one-line follow-up question in ko/en.
-func BuildPaymentAskPromptWithLang(lang string, missing []string, original string) (system, user string) {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if lang != "ko" && lang != "en" {
-		lang = DetectLang(original)
+func nz(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
 	}
-	if lang == "en" {
-		system = "You are a helpful assistant. Ask a brief, natural follow-up question to collect the missing payment details. Prefer one sentence; a short second clause with example options is okay. Keep it conversational. Reply in English only."
-		user = fmt.Sprintf(
-			"User input: %s\nMissing fields to collect: %s\nHint: You may include short options in parentheses (e.g., recipient/card/bank/wallet), but keep it concise.",
-			strings.TrimSpace(original), strings.Join(missing, ", "),
-		)
-		return
-	}
-	// ko
-	system = "당신은 친절한 비서입니다. 부족한 결제 정보를 자연스럽게 묻는 짧은 추가 질문을 하세요. 한 문장을 권장하지만, 필요한 경우 짧은 예시(괄호)를 덧붙여도 됩니다. 한국어로만 답하세요."
-	user = fmt.Sprintf(
-		"사용자 입력: %s\n수집해야 할 필드: %s\n힌트: 괄호로 간단한 선택지(예: 지갑주소/카드/계좌)를 덧붙여도 되지만, 전반적으로 간결하게 유지하세요.",
-		strings.TrimSpace(original), strings.Join(missing, ", "),
-	)
-	return
+	return s
 }
 
-// BuildPaymentReceiptPromptWithLang builds a natural 'payment completed' line in ko/en.
-func BuildPaymentReceiptPromptWithLang(lang, to string, amountKRW int64, method, item, memo string) (system, user string) {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if lang != "ko" && lang != "en" {
-		lang = "ko"
+func optionalSuffix(s string) string {
+	if strings.TrimSpace(s) == "" || strings.TrimSpace(s) == "-" {
+		return ""
 	}
-	if lang == "en" {
-		system = "You are a payment agent. Produce a short, natural confirmation that sounds like a completed purchase. Prefer one line; emoji is optional. Include KRW amount (with thousand separators), recipient and method when available, and a short fake order ID (e.g., ORD-5F3A). No code blocks, no long explanations."
-		user = fmt.Sprintf(
-			"Recipient: %s\nAmount (KRW): %d\nMethod: %s\nItem: %s\nMemo: %s\nNote: Keep it friendly and concise; the exact phrasing is flexible.",
-			strings.TrimSpace(to), amountKRW, strings.TrimSpace(method), strings.TrimSpace(item), strings.TrimSpace(memo),
-		)
-		return
-	}
-	// ko
-	system = "당신은 결제 에이전트입니다. 결제가 완료된 듯 자연스러운 짧은 확인 문장을 출력하세요. 한 줄을 권장하되, 이모지는 선택 사항입니다. 금액은 천단위 콤마, 수신자/결제수단이 있으면 포함하고, 간단한 가짜 주문번호(예: ORD-5F3A)도 넣어주세요. 코드블록/장문 설명은 금지."
-	user = fmt.Sprintf(
-		"수신자: %s\n금액(KRW): %d\n결제수단: %s\n상품: %s\n메모: %s\n메모: 말투와 표현은 유연하게, 단 짧고 자연스럽게.",
-		strings.TrimSpace(to), amountKRW, strings.TrimSpace(method), strings.TrimSpace(item), strings.TrimSpace(memo),
-	)
-	return
+	return s
 }
 
-// Backward-compat wrappers
-func BuildPaymentAskPrompt(missing []string, original string) (string, string) {
-	return BuildPaymentAskPromptWithLang(DetectLang(original), missing, original)
-}
-
-func BuildPaymentReceiptPrompt(to string, amountKRW int64, method string, item string, memo string) (string, string) {
-	return BuildPaymentReceiptPromptWithLang("ko", to, amountKRW, method, item, memo)
+func withComma(n int64) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := fmt.Sprintf("%d", n)
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
 }

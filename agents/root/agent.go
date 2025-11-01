@@ -4,8 +4,8 @@
 //
 // 한국어 설명:
 // - 외부 서비스로의 HTTP 전송, RFC9421 서명, HPKE 암복호화를 Root가 전담합니다.
-// - 서브 에이전트(planning/ordering)는 로컬 비즈니스 로직만 수행하고, payment는 외부 서버로만 보냅니다.
-// - 외부 URL이 없을 때만 planning/ordering에 대해 로컬 fallback을 사용합니다( payment는 fallback 제거 ).
+// - 서브 에이전트(planning/medical)는 로컬 비즈니스 로직만 수행하고, payment는 외부 서버로만 보냅니다.
+// - 외부 URL이 없을 때만 planning/medical에 대해 로컬 fallback을 사용합니다( payment는 fallback 제거 ).
 package root
 
 import (
@@ -70,7 +70,7 @@ type RootAgent struct {
 	a2a         *a2aclient.A2AClient
 
 	// External base URLs per agent (routing target)
-	extBase map[string]string // key: "planning"|"ordering"|"payment" -> base URL
+	extBase map[string]string // key: "planning"|"medical"|"payment" -> base URL
 
 	// HPKE per-target state
 	hpkeStates sync.Map // key: target string -> *hpkeState
@@ -95,8 +95,8 @@ func NewRootAgent(name string, port int) *RootAgent {
 	// Resolve external URLs from env (defaults allow per-agent separation)
 	ext := map[string]string{
 		"planning": strings.TrimRight(envOr("PLANNING_EXTERNAL_URL", ""), "/"),
-		"ordering": strings.TrimRight(envOr("ORDERING_EXTERNAL_URL", ""), "/"),
-		"payment":  strings.TrimRight(envOr("PAYMENT_EXTERNAL_URL", "http://localhost:5500"), "/"),
+		"medical":  strings.TrimRight(envOr("MEDICAL_EXTERNAL_URL", ""), "/"),
+		"payment":  strings.TrimRight(envOr("PAYMENT_URL", "http://localhost:5500"), "/"),
 	}
 
 	ra := &RootAgent{
@@ -130,6 +130,7 @@ func (r *RootAgent) ensureLLM() {
 	}
 	if c, err := llm.NewFromEnv(); err == nil {
 		r.llmClient = c
+		log.Printf("[root] LLM ready")
 	} else {
 		r.logger.Printf("[root] LLM disabled: %v", err)
 	}
@@ -196,7 +197,7 @@ func (r *RootAgent) ensureResolver() error {
 		return nil
 	}
 	rpc := firstNonEmpty(os.Getenv("ETH_RPC_URL"), "http://127.0.0.1:8545")
-	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_V4_ADDRESS"), "0x5FbDB2315678afecb367f032d93F642f64180aa3")
+	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_ADDRESS"), "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")
 	priv := strings.TrimPrefix(strings.TrimSpace(os.Getenv("SAGE_EXTERNAL_KEY")), "0x")
 
 	cfgV4 := &sagedid.RegistryConfig{
@@ -207,7 +208,7 @@ func (r *RootAgent) ensureResolver() error {
 		MaxRetries:         24,
 		ConfirmationBlocks: 0,
 	}
-	ethV4, err := dideth.NewEthereumClientV4(cfgV4)
+	ethV4, err := dideth.NewEthereumClient(cfgV4)
 	if err != nil {
 		return fmt.Errorf("HPKE: init resolver: %w", err)
 	}
@@ -260,7 +261,7 @@ func (r *RootAgent) EnableHPKE(ctx context.Context, target, keysFile string) err
 		clientDID = string(r.myDID)
 	}
 	// Prefer alias "external-<target>" then fallback "external"
-	serverAlias := "external-" + target
+	serverAlias := target
 	serverDID := strings.TrimSpace(nameToDID[serverAlias])
 	if serverDID == "" {
 		serverDID = strings.TrimSpace(nameToDID["external"])
@@ -345,60 +346,38 @@ func (r *RootAgent) externalURLFor(agent string) string {
 	return ""
 }
 
+// pickAgent decides which agent to route to.
+// Returns "payment" | "medical" | "planning" | ""(chat)
 func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
-	// 1) explicit domain
-	if msg.Metadata != nil {
+	// 0) explicit metadata override
+	if msg != nil && msg.Metadata != nil {
 		if v, ok := msg.Metadata["domain"]; ok {
 			if s, ok2 := v.(string); ok2 && s != "" {
 				s = strings.ToLower(strings.TrimSpace(s))
 				switch s {
-				case "planning", "ordering", "payment":
+				case "payment", "medical", "planning":
 					return s
+				case "chat":
+					return ""
 				}
 			}
 		}
 	}
 
-	// 2) heuristic by content (Korean + English)
+	// 1) content-based intent (외부 URL 유무와 무관)
 	c := strings.ToLower(strings.TrimSpace(msg.Content))
-	switch {
-	case containsAny(c, "pay", "payment", "send", "wallet", "transfer", "crypto", "usdc", "송금", "결제", "구매", "카드", "카카오페이", "토스", "이체"):
-		if r.externalURLFor("payment") != "" {
-			return "payment"
-		}
-	case containsAny(c, "order", "주문", "buy", "purchase", "product", "catalog", "장바구니", "배송", "수량"):
-		if r.externalURLFor("ordering") != "" {
-			return "ordering"
-		}
-	default:
-		if r.externalURLFor("planning") != "" {
-			return "planning"
-		}
-	}
 
-	if r.externalURLFor("planning") != "" {
-		return "planning"
-	}
-	if r.externalURLFor("ordering") != "" {
-		return "ordering"
-	}
-	if r.externalURLFor("payment") != "" {
+	if isPaymentActionIntent(c) {
 		return "payment"
 	}
-	return ""
-}
-
-func containsAny(s string, needles ...string) bool {
-	for _, n := range needles {
-		n = strings.TrimSpace(strings.ToLower(n))
-		if n == "" {
-			continue
-		}
-		if strings.Contains(s, n) {
-			return true
-		}
+	if isMedicalInfoIntent(c) {
+		return "medical"
 	}
-	return false
+	if isPlanningActionIntent(c) {
+		return "planning"
+	}
+
+	return ""
 }
 
 // pickLang chooses language by header -> metadata -> content detection.
@@ -427,120 +406,6 @@ func pickLang(r *http.Request, msg *types.AgentMessage) string {
 	}
 	// 3) Detect by content
 	return llm.DetectLang(msg.Content)
-}
-
-// ---- [LLM] payment slot extraction ----
-
-type paySlots struct {
-	To        string // recipient wallet/name
-	AmountKRW int64
-	Method    string // card/bank/wallet/etc
-	Item      string // optional (e.g., "iPhone 15 Pro")
-	Memo      string // optional
-}
-
-func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string) {
-	// Prefer metadata keys
-	getS := func(keys ...string) string {
-		if msg.Metadata == nil {
-			return ""
-		}
-		for _, k := range keys {
-			if v, ok := msg.Metadata[k]; ok {
-				if s, ok2 := v.(string); ok2 && strings.TrimSpace(s) != "" {
-					return strings.TrimSpace(s)
-				}
-			}
-		}
-		return ""
-	}
-	getI := func(keys ...string) int64 {
-		if msg.Metadata == nil {
-			return 0
-		}
-		for _, k := range keys {
-			if v, ok := msg.Metadata[k]; ok {
-				switch t := v.(type) {
-				case float64:
-					return int64(t)
-				case int:
-					return int64(t)
-				case int64:
-					return t
-				case string:
-					if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
-						return n
-					}
-				}
-			}
-		}
-		return 0
-	}
-
-	s.To = getS("payment.to", "to", "recipient")
-	s.Method = getS("payment.method", "method")
-	s.Item = getS("item", "product", "payment.item")
-	s.Memo = getS("memo", "payment.memo")
-	s.AmountKRW = getI("payment.amountKRW", "amountKRW", "amount")
-
-	// Try naive JSON parse from content if still empty
-	if (s.To == "" || s.Method == "" || s.AmountKRW == 0) && strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
-		var m map[string]any
-		if json.Unmarshal([]byte(msg.Content), &m) == nil {
-			if s.To == "" {
-				if v, ok := m["to"].(string); ok {
-					s.To = strings.TrimSpace(v)
-				}
-			}
-			if s.Method == "" {
-				if v, ok := m["method"].(string); ok {
-					s.Method = strings.TrimSpace(v)
-				}
-			}
-			if s.AmountKRW == 0 {
-				switch v := m["amountKRW"].(type) {
-				case float64:
-					s.AmountKRW = int64(v)
-				case string:
-					if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
-						s.AmountKRW = n
-					}
-				}
-			}
-			if s.Item == "" {
-				if v, ok := m["item"].(string); ok {
-					s.Item = strings.TrimSpace(v)
-				}
-			}
-			if s.Memo == "" {
-				if v, ok := m["memo"].(string); ok {
-					s.Memo = strings.TrimSpace(v)
-				}
-			}
-		}
-	}
-
-	// Naive KRW extraction from free text like "150만원", "1,500,000원"
-	if s.AmountKRW == 0 {
-		re := regexp.MustCompile(`([0-9][0-9,\.]*)\s*원`)
-		if m := re.FindStringSubmatch(msg.Content); len(m) == 2 {
-			raw := strings.ReplaceAll(strings.ReplaceAll(m[1], ",", ""), ".", "")
-			if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
-				s.AmountKRW = n
-			}
-		}
-	}
-
-	if s.To == "" {
-		missing = append(missing, "수신자(to)")
-	}
-	if s.AmountKRW == 0 {
-		missing = append(missing, "금액(amountKRW)")
-	}
-	if s.Method == "" {
-		missing = append(missing, "결제수단(method)")
-	}
-	return
 }
 
 // ---- Outbound send (Root owns external I/O) ----
@@ -648,82 +513,35 @@ func (r *RootAgent) sendExternal(ctx context.Context, agent string, msg *types.A
 	return &out, nil
 }
 
-// ---- [LLM] ordering / planning slot extraction (minimal) ----
-
-// Ordering: require at least "item"; optionally "quantity", "address"
-type orderingSlots struct {
-	Item     string
-	Quantity int
-	Address  string
+// ---- tiny helpers used above ----
+func strFrom(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s, ok2 := v.(string); ok2 && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
 }
-
-func extractOrderingSlots(msg *types.AgentMessage) (s orderingSlots, missing []string) {
-	getS := func(keys ...string) string {
-		if msg.Metadata == nil {
-			return ""
-		}
-		for _, k := range keys {
-			if v, ok := msg.Metadata[k]; ok {
-				if str, ok2 := v.(string); ok2 && strings.TrimSpace(str) != "" {
-					return strings.TrimSpace(str)
-				}
-			}
-		}
-		return ""
-	}
-	getI := func(keys ...string) int {
-		if msg.Metadata == nil {
-			return 0
-		}
-		for _, k := range keys {
-			if v, ok := msg.Metadata[k]; ok {
-				switch t := v.(type) {
-				case float64:
-					return int(t)
-				case int:
-					return t
-				case int64:
-					return int(t)
-				case string:
-					if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
-						return n
-					}
-				}
-			}
-		}
-		return 0
-	}
-
-	// Prefer metadata
-	s.Item = getS("ordering.item", "item", "product", "상품", "아이템")
-	s.Quantity = getI("ordering.quantity", "quantity", "qty", "수량")
-	s.Address = getS("ordering.address", "address", "배송지", "주소")
-
-	// Lightweight JSON body fallback (optional)
-	if s.Item == "" && strings.HasPrefix(strings.TrimSpace(msg.Content), "{") {
-		var m map[string]any
-		if json.Unmarshal([]byte(msg.Content), &m) == nil {
-			if v, ok := m["item"].(string); ok && strings.TrimSpace(v) != "" {
-				s.Item = strings.TrimSpace(v)
-			}
-			switch v := m["quantity"].(type) {
+func intFrom(m map[string]any, keys ...string) int64 {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch t := v.(type) {
 			case float64:
-				s.Quantity = int(v)
+				return int64(t)
+			case int:
+				return int64(t)
+			case int64:
+				return t
 			case string:
-				if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
-					s.Quantity = n
+				if n, err := strconv.ParseInt(strings.TrimSpace(t), 10, 64); err == nil {
+					return n
 				}
-			}
-			if v, ok := m["address"].(string); ok && strings.TrimSpace(v) != "" {
-				s.Address = strings.TrimSpace(v)
 			}
 		}
 	}
-	if s.Item == "" {
-		missing = append(missing, "item(상품)")
-	}
-	// quantity/address는 없어도 주문 자체는 가능(디폴트 처리 가정)
-	return
+	return 0
 }
 
 // Planning: require at least "task"/"goal"
@@ -773,7 +591,6 @@ func extractPlanningSlots(msg *types.AgentMessage) (s planningSlots, missing []s
 }
 
 // ---- HTTP handlers ----
-
 func (r *RootAgent) mountRoutes() {
 	// health
 	r.mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
@@ -784,7 +601,7 @@ func (r *RootAgent) mountRoutes() {
 			"port": r.port,
 			"ext": map[string]any{
 				"planning": r.externalURLFor("planning") != "",
-				"ordering": r.externalURLFor("ordering") != "",
+				"medical":  r.externalURLFor("medical") != "",
 				"payment":  r.externalURLFor("payment") != "",
 			},
 			"sage_enabled": r.sageEnabled,
@@ -793,8 +610,7 @@ func (r *RootAgent) mountRoutes() {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// Root-level SAGE toggle (global outbound signing)
-	// POST {"enabled": true|false}
+	// Root-level SAGE toggle
 	r.mux.HandleFunc("/toggle-sage", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -814,12 +630,11 @@ func (r *RootAgent) mountRoutes() {
 	// SAGE status
 	r.mux.HandleFunc("/sage/status", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
 		resp := map[string]any{
-			"root": r.sageEnabled, // global SAGE on/off at Root
+			"root": r.sageEnabled,
 			"ext": map[string]bool{
 				"planning": r.externalURLFor("planning") != "",
-				"ordering": r.externalURLFor("ordering") != "",
+				"medical":  r.externalURLFor("medical") != "",
 				"payment":  r.externalURLFor("payment") != "",
 			},
 			"hpke": map[string]any{
@@ -827,9 +642,9 @@ func (r *RootAgent) mountRoutes() {
 					"enabled": r.IsHPKEEnabled("planning"),
 					"kid":     r.CurrentHPKEKID("planning"),
 				},
-				"ordering": map[string]any{
-					"enabled": r.IsHPKEEnabled("ordering"),
-					"kid":     r.CurrentHPKEKID("ordering"),
+				"medical": map[string]any{
+					"enabled": r.IsHPKEEnabled("medical"),
+					"kid":     r.CurrentHPKEKID("medical"),
 				},
 				"payment": map[string]any{
 					"enabled": r.IsHPKEEnabled("payment"),
@@ -838,12 +653,10 @@ func (r *RootAgent) mountRoutes() {
 			},
 			"time": time.Now().Format(time.RFC3339),
 		}
-
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
 	// HPKE runtime toggle at Root (per target)
-	// POST {"enabled":true, "target":"payment|ordering|planning", "keysFile":"merged_agent_keys.json"}
 	r.mux.HandleFunc("/hpke/config", func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -878,7 +691,7 @@ func (r *RootAgent) mountRoutes() {
 		})
 	})
 
-	// HPKE status (per target); query ?target=payment|ordering|planning (default payment)
+	// HPKE status (per target)
 	r.mux.HandleFunc("/hpke/status", func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		target := strings.ToLower(strings.TrimSpace(req.URL.Query().Get("target")))
@@ -892,58 +705,456 @@ func (r *RootAgent) mountRoutes() {
 		})
 	})
 
-	// Main in-proc processing (Client API -> Root -> external or in-proc fallback)
+	// Main in-proc processing (full handler)
 	r.mux.HandleFunc("/process", func(w http.ResponseWriter, req *http.Request) {
+		// Method guard
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		// Decode inbound message
 		var msg types.AgentMessage
 		if err := json.NewDecoder(req.Body).Decode(&msg); err != nil {
 			http.Error(w, "bad json", http.StatusBadRequest)
 			return
 		}
+		defer req.Body.Close()
+		lang := pickLang(req, &msg)
+		cid := convIDFrom(req, &msg)
+		forcePayment := false
+		if stage, _ := getStageToken(cid); stage == "await_confirm" {
+			forcePayment = true
+		}
+		// -------- Router: rules -> (optional) LLM router (controlled by ROOT_INTENT_MODE) --------
+		// ROOT_INTENT_MODE: "rules" | "hybrid"(default) | "llm"
+		agent := ""
+		if forcePayment {
+			agent = "payment"
+		} else {
+			agent = r.pickAgent(&msg)
+			mode := strings.ToLower(strings.TrimSpace(os.Getenv("ROOT_INTENT_MODE")))
+			if mode == "" {
+				mode = "hybrid"
+			}
+			if mode == "llm" || (agent == "" && mode == "hybrid") {
+				if ro, ok := r.llmRoute(req.Context(), msg.Content); ok && ro.Domain != "" {
+					agent = ro.Domain
+					if msg.Metadata == nil {
+						msg.Metadata = map[string]any{}
+					}
+					if ro.Lang != "" {
+						msg.Metadata["lang"] = ro.Lang
+					}
+				}
+			}
+		}
 
-		agent := r.pickAgent(&msg)
-		if agent == "" {
-			http.Error(w, "no agent available", http.StatusBadGateway)
+		// -------- CHAT MODE: no routing; answer with LLM directly --------
+		if agent == "" && !forcePayment {
+			r.ensureLLM()
+			reply := ""
+			if r.llmClient != nil {
+				sys := map[string]string{
+					"ko": "너는 간결한 한국어 어시스턴트야. 짧게 답해.",
+					"en": "You are a concise assistant. Reply briefly.",
+				}[lang]
+				if out, err := r.llmClient.Chat(req.Context(), sys, strings.TrimSpace(msg.Content)); err == nil {
+					reply = strings.TrimSpace(out)
+				}
+			}
+			if reply == "" {
+				if lang == "ko" {
+					reply = "이해했어요: " + strings.TrimSpace(msg.Content)
+				} else {
+					reply = "Got it: " + strings.TrimSpace(msg.Content)
+				}
+			}
+			out := types.AgentMessage{
+				ID: msg.ID + "-chat", From: "root", To: msg.From, Type: "response", Content: reply,
+				Timestamp: time.Now(), Metadata: map[string]any{"lang": lang, "mode": "chat"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(out)
 			return
 		}
 
-		// [LLM] If payment intent, check required slots; if missing, ask a single clarifying question.
-		if agent == "payment" {
-			slots, missing := extractPaymentSlots(&msg)
-			lang := pickLang(req, &msg) // "ko" or "en"
+		switch agent {
+		// -------- INTENT MODE --------
+		// ====== RootAgent: payment flow (DROP-IN REPLACEMENT with LOGS) ======
+		case "payment":
+			{
+				// ---- 공통: 진입/스테이지 로그 ----
+				stage, token := getStageToken(cid)
+				r.logger.Printf("[root][payment][enter] cid=%s stage=%s token=%s lang=%s text=%q",
+					cid, stage, token, lang, strings.TrimSpace(msg.Content))
 
-			if len(missing) > 0 {
-				r.ensureLLM()
-				// Default fallbacks per language
-				question := map[string]string{
-					"en": "Please provide the missing payment details (recipient, amount in KRW, method).",
-					"ko": "결제에 필요한 정보를 알려주세요(수신자, 금액, 결제수단).",
-				}[lang]
+				// ==== 확인 단계 처리 ====
+				if stage == "await_confirm" && token != "" {
+					yes, no := parseYesNo(msg.Content)
+					r.logger.Printf("[root][payment][confirm] parsed yes=%v no=%v", yes, no)
 
-				if r.llmClient != nil {
-					sys, usr := llm.BuildPaymentAskPromptWithLang(lang, missing, msg.Content)
-					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
-						question = strings.TrimSpace(out)
+					if !yes && !no {
+						intent := r.llmConfirmIntent(req.Context(), lang, msg.Content)
+						r.logger.Printf("[root][payment][confirm] llm intent=%s", intent)
+						switch intent {
+						case "yes":
+							yes = true
+						case "no":
+							no = true
+						}
+						if !yes && !no {
+							// 확인 단계에서도 추가 슬롯 추출 시도
+							slots := getPayCtx(cid)
+							r.logger.Printf("[root][payment][confirm] before-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
+								slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
+
+							if xo, ok := r.llmExtractPayment(req.Context(), lang, msg.Content); ok {
+
+								r.logger.Printf("[root][payment][confirm] xo: mode=%s method=%q to=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
+									xo.Fields.Mode, xo.Fields.Method, xo.Fields.To, xo.Fields.Shipping, xo.Fields.Merchant, xo.Fields.AmountKRW, xo.Fields.BudgetKRW, xo.Fields.Item, xo.Fields.Model)
+
+								// 🔧 핫픽스: To/Recipient 둘 다 병합 (이 줄이 없으면 수령자 누락 반복됨)
+								slots = mergePaySlots(slots, paySlots{
+									Mode: xo.Fields.Mode, To: xo.Fields.To,
+									AmountKRW: xo.Fields.AmountKRW, BudgetKRW: xo.Fields.BudgetKRW,
+									Method: xo.Fields.Method, Item: xo.Fields.Item, Model: xo.Fields.Model,
+									Merchant: xo.Fields.Merchant, Shipping: xo.Fields.Shipping, CardLast4: xo.Fields.CardLast4,
+								})
+								r.logger.Printf("[root][payment][confirm] after-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
+									slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
+
+								missing := computeMissingPayment(slots)
+								r.logger.Printf("[root][payment][confirm] missing=%v", missing)
+
+								if len(missing) == 0 {
+									preview := buildPaymentPreview(lang, slots)
+									putPayCtxFull(cid, slots, "await_confirm", token)
+									r.logger.Printf("[root][payment][confirm] preview-ready; await_confirm token=%s", token)
+									out := types.AgentMessage{
+										ID: msg.ID + "-preview", From: "root", To: msg.From, Type: "confirm",
+										Content:   preview + "\n" + r.buildConfirmPromptLLM(req.Context(), lang, slots),
+										Timestamp: time.Now(),
+										Metadata:  map[string]any{"await": "payment.confirm", "lang": lang, "domain": "payment", "mode": slots.Mode, "confirmToken": token},
+									}
+									w.Header().Set("Content-Type", "application/json")
+									w.WriteHeader(http.StatusOK)
+									_ = json.NewEncoder(w).Encode(out)
+									return
+								}
+
+								q := r.askForMissingPaymentWithLLM(req.Context(), lang, slots, missing, msg.Content)
+								putPayCtxFull(cid, slots, "collect", "")
+								r.logger.Printf("[root][payment][confirm] ask-missing %v q=%q", missing, q)
+								out := types.AgentMessage{
+									ID: msg.ID + "-needinfo", ContextID: cid, From: "root", To: msg.From, Type: "clarify",
+									Content: q, Timestamp: time.Now(),
+									Metadata: map[string]any{"await": "payment.slots", "missing": strings.Join(missing, ", "), "lang": lang, "domain": "payment", "mode": slots.Mode},
+								}
+								w.Header().Set("Content-Type", "application/json")
+								w.WriteHeader(http.StatusOK)
+								_ = json.NewEncoder(w).Encode(out)
+								return
+							}
+						}
+					}
+
+					if yes {
+						// 1) 최종 슬롯 로드
+						slots := getPayCtx(cid)
+						r.logger.Printf("[root][payment][send] YES; final slots: method=%q to=%q recipient=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
+							slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.AmountKRW, slots.BudgetKRW, slots.Item, slots.Model)
+
+						// 2) 필수 메타데이터 주입
+						if msg.Metadata == nil {
+							msg.Metadata = map[string]any{}
+						}
+						msg.Metadata["lang"] = lang
+
+						// amount: 명시 금액 없으면 예산으로 대체
+						amt := slots.AmountKRW
+						if amt <= 0 && slots.BudgetKRW > 0 {
+							amt = slots.BudgetKRW
+							msg.Metadata["payment.amountIsEstimated"] = true
+						}
+						if amt > 0 {
+							msg.Metadata["payment.amountKRW"] = amt
+							msg.Metadata["amountKRW"] = amt // 호환 키
+						}
+
+						// 수신자/결제수단/상품/상점/배송지/카드끝4자리
+						if v := strings.TrimSpace(firstNonEmpty(slots.Recipient, slots.To)); v != "" {
+							msg.Metadata["payment.to"] = v
+							msg.Metadata["to"] = v // 호환 키
+							msg.Metadata["recipient"] = v
+						}
+						if v := strings.TrimSpace(slots.Method); v != "" {
+							msg.Metadata["payment.method"] = v
+							msg.Metadata["method"] = v
+						}
+						if v := firstNonEmpty(strings.TrimSpace(slots.Model), strings.TrimSpace(slots.Item)); v != "" {
+							msg.Metadata["payment.item"] = v
+							msg.Metadata["item"] = v
+						}
+						if v := strings.TrimSpace(slots.Merchant); v != "" {
+							msg.Metadata["payment.merchant"] = v
+						}
+						if v := strings.TrimSpace(slots.Shipping); v != "" {
+							msg.Metadata["payment.shipping"] = v
+						}
+						if v := strings.TrimSpace(slots.CardLast4); v != "" {
+							msg.Metadata["payment.cardLast4"] = v
+						}
+						r.logger.Printf("[root][payment][send] injected meta: amount=%d method=%q to/recipient=%q shipping=%q merchant=%q",
+							amt, slots.Method, firstNonEmpty(slots.Recipient, slots.To), slots.Shipping, slots.Merchant)
+
+						// 3) per-request SAGE/HPKE 헤더 처리
+						sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
+						hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
+						r.logger.Printf("[root][payment][send] headers SAGE=%q HPKE=%q", sageRaw, hpkeRaw)
+
+						if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
+							if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
+								w.Header().Set("Content-Type", "application/json")
+								w.WriteHeader(http.StatusBadRequest)
+								_ = json.NewEncoder(w).Encode(map[string]any{
+									"error":   "bad_request",
+									"message": "HPKE requires SAGE to be enabled (X-SAGE-Enabled: true)",
+								})
+								return
+							}
+						}
+						ctx2 := req.Context()
+						if sageRaw != "" {
+							ctx2 = context.WithValue(ctx2, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
+						}
+						if hpkeRaw != "" {
+							ctx2 = context.WithValue(ctx2, ctxHPKERawKey, hpkeRaw)
+						}
+
+						// 4) 외부 전송 (실결제)
+						r.logger.Printf("[root][payment][send] -> sendExternal(payment)")
+						outPtr, err := r.sendExternal(ctx2, "payment", &msg)
+						if err != nil {
+							r.logger.Printf("[root][payment][send][error] %v", err)
+							http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
+							return
+						}
+						out := *outPtr
+						r.logger.Printf("[root][payment][send][resp] type=%s content.len=%d", out.Type, len(out.Content))
+
+						// 성공 시 컨텍스트 정리
+						if strings.EqualFold(out.Type, "response") && !strings.HasPrefix(strings.ToLower(out.Content), "external error:") {
+							r.logger.Printf("[root][payment][ctx] delPayCtx cid=%s", cid)
+							delPayCtx(cid)
+						}
+
+						// 응답
+						status := http.StatusOK
+						if code, ok := httpStatusFromAgent(&out); ok {
+							status = code
+						}
+						w.Header().Set("Content-Type", "application/json")
+						if status/100 == 2 {
+							w.Header().Set("X-SAGE-Verified", "true")
+							w.Header().Set("X-SAGE-Signature-Valid", "true")
+						} else {
+							w.Header().Set("X-SAGE-Verified", "false")
+							w.Header().Set("X-SAGE-Signature-Valid", "false")
+						}
+						w.WriteHeader(status)
+						_ = json.NewEncoder(w).Encode(out)
+						return
+					}
+
+					if no {
+						r.logger.Printf("[root][payment][confirm] NO -> back to collect")
+						putPayCtxFull(cid, getPayCtx(cid), "collect", "")
+						out := types.AgentMessage{
+							ID: msg.ID + "-cancel", ContextID: cid, From: "root", To: msg.From, Type: "response",
+							Content: map[string]string{
+								"ko": "취소했어요. 무엇을 바꿀까요? (제품/배송지/결제수단/수신자/예산 등)",
+								"en": "Cancelled. What should I change? (item/shipping/method/recipient/budget)",
+							}[lang],
+							Timestamp: time.Now(),
+							Metadata:  map[string]any{"await": "payment.slots", "lang": lang, "domain": "payment"},
+						}
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusOK)
+						_ = json.NewEncoder(w).Encode(out)
+						return
+					}
+
+					r.logger.Printf("[root][payment][confirm] ambiguous -> ask confirm again")
+					out := types.AgentMessage{
+						ID: msg.ID + "-confirm", From: "root", To: msg.From, Type: "clarify",
+						Content:   r.buildConfirmPromptLLM(req.Context(), lang, getPayCtx(cid)),
+						Timestamp: time.Now(),
+						Metadata:  map[string]any{"await": "payment.confirm", "lang": lang, "domain": "payment"},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(out)
+					return
+				}
+
+				// ==== 수집 단계 (collect) ====
+				slots := getPayCtx(cid)
+				r.logger.Printf("[root][payment][collect] before-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
+					slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
+
+				// LLM 추출 → 수동 추출 보완
+				if xo, ok := r.llmExtractPayment(req.Context(), lang, msg.Content); ok {
+
+					r.logger.Printf("[root][payment][collect] xo: mode=%s method=%q to=%q shipping=%q merchant=%q amount=%d budget=%d item=%q model=%q",
+						xo.Fields.Mode, xo.Fields.Method, xo.Fields.To, xo.Fields.Shipping, xo.Fields.Merchant, xo.Fields.AmountKRW, xo.Fields.BudgetKRW, xo.Fields.Item, xo.Fields.Model)
+
+					// 🔧 핫픽스: To/Recipient 둘 다 병합
+					slots = mergePaySlots(slots, paySlots{
+						Mode: xo.Fields.Mode, To: xo.Fields.To,
+						AmountKRW: xo.Fields.AmountKRW, BudgetKRW: xo.Fields.BudgetKRW,
+						Method: xo.Fields.Method, Item: xo.Fields.Item, Model: xo.Fields.Model,
+						Merchant: xo.Fields.Merchant, Shipping: xo.Fields.Shipping,
+					})
+				} else {
+					if s2, _, _ := extractPaymentSlots(&msg); true {
+						if s2.To == "" && strings.TrimSpace(s2.Recipient) != "" {
+							s2.To = s2.Recipient
+						}
+						if s2.Recipient == "" && strings.TrimSpace(s2.To) != "" {
+							s2.Recipient = s2.To
+						}
+						slots = mergePaySlots(slots, s2)
 					}
 				}
+
+				if strings.TrimSpace(slots.Mode) == "" {
+					slots.Mode = classifyPaymentMode(msg.Content, slots)
+				}
+				r.logger.Printf("[root][payment][collect] after-merge slots: method=%q to=%q recipient=%q shipping=%q merchant=%q budget=%d amount=%d item=%q model=%q",
+					slots.Method, slots.To, slots.Recipient, slots.Shipping, slots.Merchant, slots.BudgetKRW, slots.AmountKRW, slots.Item, slots.Model)
+
+				missing := computeMissingPayment(slots) // To/Method/Amount or Budget 등 규칙 반영
+				r.logger.Printf("[root][payment][collect] missing=%v", missing)
+
+				if len(missing) > 0 {
+					q := r.askForMissingPaymentWithLLM(req.Context(), lang, slots, missing, msg.Content)
+					putPayCtxFull(cid, slots, "collect", "")
+					r.logger.Printf("[root][payment][collect] ask-missing %v q=%q", missing, q)
+					out := types.AgentMessage{
+						ID: msg.ID + "-needinfo", From: "root", To: msg.From, Type: "clarify",
+						Content:   strings.TrimSpace(q),
+						Timestamp: time.Now(),
+						Metadata:  map[string]any{"await": "payment.slots", "missing": strings.Join(missing, ", "), "lang": lang, "domain": "payment", "mode": slots.Mode},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(out)
+					return
+				}
+
+				// ==== 미리보기 + 확인 ====
+				preview := buildPaymentPreview(lang, slots)
+				token2 := uuid.NewString()
+				putPayCtxFull(cid, slots, "await_confirm", token2)
+				r.logger.Printf("[root][payment][collect] preview-ready; await_confirm token=%s", token2)
+				out := types.AgentMessage{
+					ID: msg.ID + "-preview", ContextID: cid, From: "root", To: msg.From, Type: "confirm",
+					Content:   preview + "\n" + r.buildConfirmPromptLLM(req.Context(), lang, slots),
+					Timestamp: time.Now(),
+					Metadata:  map[string]any{"await": "payment.confirm", "lang": lang, "domain": "payment", "mode": slots.Mode, "confirmToken": token2},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(out)
+				return
+			}
+
+		// ===== MEDICAL =====
+		case "medical":
+			lang := pickLang(req, &msg)
+
+			// 1) Try LLM slot-extractor first
+			if xo, ok := r.llmExtractMedical(req.Context(), lang, msg.Content); ok {
+				if len(xo.Missing) > 0 {
+					clar := types.AgentMessage{
+						ID:        msg.ID + "-needinfo",
+						From:      "root",
+						To:        msg.From,
+						Type:      "clarify",
+						Content:   strings.TrimSpace(xo.Ask),
+						Timestamp: time.Now(),
+						Metadata: map[string]any{
+							"await":   "medical.slots",
+							"missing": strings.Join(xo.Missing, ", "),
+							"lang":    lang,
+							"hint": map[string]string{
+								"ko": `예: {"medical.condition":"당뇨병","medical.topic":"식단","audience":"본인","duration":"2주"}`,
+								"en": `Ex: {"medical.condition":"diabetes","medical.topic":"diet","audience":"self","duration":"2 weeks"}`,
+							}[lang],
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(clar)
+					return
+				}
+				// Merge extracted fields
+				fillMsgMetaFromMedical(&msg, xo.Fields, lang)
+
+				// External if configured; else answer locally with LLM
+				if r.externalURLFor("medical") != "" {
+					outPtr, err := r.sendExternal(req.Context(), "medical", &msg)
+					if err != nil {
+						http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
+						return
+					}
+					out := *outPtr
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(out)
+					return
+				}
+
+				// Local medical answer via LLM
+				r.ensureLLM()
+				s, _ := extractMedicalSlots(&msg)
+				answer := r.llmMedicalAnswer(req.Context(), lang, msg.Content, s)
+				out := types.AgentMessage{
+					ID:        msg.ID + "-medical",
+					From:      "root",
+					To:        msg.From,
+					Type:      "response",
+					Content:   answer,
+					Timestamp: time.Now(),
+					Metadata:  map[string]any{"lang": lang, "mode": "medical", "domain": "medical"},
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(out)
+				return
+			}
+
+			// 2) Fallback to existing rule-based path
+			slots, missing := extractMedicalSlots(&msg)
+			if len(missing) > 0 {
+				q := r.askForMissingMedicalWithLLM(req.Context(), lang, missing, msg.Content)
 				clar := types.AgentMessage{
 					ID:        msg.ID + "-needinfo",
 					From:      "root",
 					To:        msg.From,
 					Type:      "clarify",
-					Content:   question,
+					Content:   q,
 					Timestamp: time.Now(),
 					Metadata: map[string]any{
-						"await":   "payment.slots",
+						"await":   "medical.slots",
 						"missing": strings.Join(missing, ", "),
+						"lang":    lang,
 						"hint": map[string]string{
-							"ko": "예: {\"to\":\"Hacker Wallet\",\"amountKRW\":1500000,\"method\":\"card\",\"item\":\"iPhone 15 Pro\"}",
-							"en": "Ex: {\"to\":\"Hacker Wallet\",\"amountKRW\":1500000,\"method\":\"card\",\"item\":\"iPhone 15 Pro\"}",
+							"ko": `예: {"medical.condition":"당뇨병","medical.topic":"식단","audience":"본인","duration":"2주"}`,
+							"en": `Ex: {"medical.condition":"diabetes","medical.topic":"diet","audience":"self","duration":"2 weeks"}`,
 						}[lang],
-						"lang": lang,
 					},
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -951,139 +1162,168 @@ func (r *RootAgent) mountRoutes() {
 				_ = json.NewEncoder(w).Encode(clar)
 				return
 			}
-
-			// ensure backfill into metadata so downstream payment can rely on it
 			if msg.Metadata == nil {
 				msg.Metadata = map[string]any{}
 			}
-			msg.Metadata["payment.to"] = slots.To
-			msg.Metadata["payment.amountKRW"] = slots.AmountKRW
-			msg.Metadata["payment.method"] = slots.Method
-			if slots.Item != "" {
-				msg.Metadata["item"] = slots.Item
+			msg.Metadata["medical.condition"] = slots.Condition
+			msg.Metadata["medical.topic"] = slots.Topic
+			if slots.Audience != "" {
+				msg.Metadata["medical.audience"] = slots.Audience
 			}
-			if slots.Memo != "" {
-				msg.Metadata["memo"] = slots.Memo
+			if slots.Duration != "" {
+				msg.Metadata["medical.duration"] = slots.Duration
 			}
-			// pass language downstream so Payment can render in the same language
+			if slots.Age != "" {
+				msg.Metadata["medical.age"] = slots.Age
+			}
+			if slots.Medications != "" {
+				msg.Metadata["medical.meds"] = slots.Medications
+			}
 			msg.Metadata["lang"] = lang
-		} else if agent == "ordering" {
-			// --- NEW: ORDERING flow (ask missing info, else dispatch)
-			slots, missing := extractOrderingSlots(&msg)
-			lang := pickLang(req, &msg) // "ko" or "en"
 
-			if len(missing) > 0 {
-				r.ensureLLM()
-				// Default question by language
-				question := map[string]string{
-					"en": "To place the order, please provide the missing info (e.g., item).",
-					"ko": "주문을 진행하려면 필요한 정보(예: 상품명)를 알려주세요.",
-				}[lang]
-
-				// Try to refine with LLM (if available)
-				if r.llmClient != nil {
-					sys := "You are an assistant collecting missing information to place an order. Ask ONE concise question in the user's language."
-					usr := fmt.Sprintf("Language=%s\nMissing=%s\nUser said: %s", lang, strings.Join(missing, ", "), msg.Content)
-					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
-						question = strings.TrimSpace(out)
-					}
+			if r.externalURLFor("medical") != "" {
+				outPtr, err := r.sendExternal(req.Context(), "medical", &msg)
+				if err != nil {
+					http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
+					return
 				}
-				clar := types.AgentMessage{
-					ID:        msg.ID + "-needinfo",
+				out := *outPtr
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(out)
+				return
+			}
+			r.ensureLLM()
+			answer := r.llmMedicalAnswer(req.Context(), lang, msg.Content, slots)
+			out := types.AgentMessage{
+				ID:        msg.ID + "-medical",
+				ContextID: cid,
+				From:      "root",
+				To:        msg.From,
+				Type:      "response",
+				Content:   answer,
+				Timestamp: time.Now(),
+				Metadata:  map[string]any{"lang": lang, "mode": "medical", "domain": "medical"},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(out)
+			return
+
+		// ===== PLANNING =====
+		case "planning":
+			lang := pickLang(req, &msg)
+
+			// 1) Try LLM slot-extractor first
+			if xo, ok := r.llmExtractPlanning(req.Context(), lang, msg.Content); ok {
+				if len(xo.Missing) > 0 {
+					clar := types.AgentMessage{
+						ID:        msg.ID + "-needinfo",
+						From:      "root",
+						To:        msg.From,
+						Type:      "clarify",
+						Content:   strings.TrimSpace(xo.Ask),
+						Timestamp: time.Now(),
+						Metadata: map[string]any{
+							"await":   "planning.slots",
+							"missing": strings.Join(xo.Missing, ", "),
+							"hint": map[string]string{
+								"ko": `예: {"task":"출장 일정 수립","timeframe":"다음 주","context":"회의 장소는 판교"}`,
+								"en": `Ex: {"task":"Plan a business trip","timeframe":"next week","context":"meeting in Pangyo"}`,
+							}[lang],
+							"lang": lang,
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(clar)
+					return
+				}
+				fillMsgMetaFromPlanning(&msg, xo.Fields, lang)
+			} else {
+				// 2) Fallback to rule-based extractor
+				slots, missing := extractPlanningSlots(&msg)
+				if len(missing) > 0 {
+					q := r.askForMissingPlanningWithLLM(req.Context(), lang, missing, msg.Content)
+					clar := types.AgentMessage{
+						ID:        msg.ID + "-needinfo",
+						From:      "root",
+						To:        msg.From,
+						Type:      "clarify",
+						Content:   q,
+						Timestamp: time.Now(),
+						Metadata: map[string]any{
+							"await":   "planning.slots",
+							"missing": strings.Join(missing, ", "),
+							"hint": map[string]string{
+								"ko": `예: {"task":"출장 일정 수립","timeframe":"다음 주","context":"회의 장소는 판교"}`,
+								"en": `Ex: {"task":"Plan a business trip","timeframe":"next week","context":"meeting in Pangyo"}`,
+							}[lang],
+							"lang": lang,
+						},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(clar)
+					return
+				}
+				if msg.Metadata == nil {
+					msg.Metadata = map[string]any{}
+				}
+				msg.Metadata["planning.task"] = slots.Task
+				if slots.Timeframe != "" {
+					msg.Metadata["planning.timeframe"] = slots.Timeframe
+				}
+				if slots.Context != "" {
+					msg.Metadata["planning.context"] = slots.Context
+				}
+				msg.Metadata["lang"] = lang
+			}
+
+			// 외부 URL 없으면 로컬 LLM로 요약
+			if r.externalURLFor("planning") == "" {
+				r.ensureLLM()
+				if r.llmClient == nil {
+					out := types.AgentMessage{
+						ID:        msg.ID + "-planning",
+						From:      "root",
+						To:        msg.From,
+						Type:      "response",
+						Content:   map[string]string{"ko": "계획 요약을 생성하려면 LLM 설정이 필요해요.", "en": "LLM is required to generate a planning summary."}[lang],
+						Timestamp: time.Now(),
+						Metadata:  map[string]any{"lang": lang, "mode": "planning", "domain": "planning"},
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(out)
+					return
+				}
+				ps := planningSlots{
+					Task:      strFrom(msg.Metadata, "planning.task", "task", "goal"),
+					Timeframe: strFrom(msg.Metadata, "planning.timeframe", "timeframe"),
+					Context:   strFrom(msg.Metadata, "planning.context", "context"),
+				}
+				answer := r.llmPlanningAnswer(req.Context(), lang, msg.Content, ps)
+
+				out := types.AgentMessage{
+					ID:        msg.ID + "-planning",
 					From:      "root",
 					To:        msg.From,
-					Type:      "clarify",
-					Content:   question,
+					Type:      "response",
+					Content:   answer,
 					Timestamp: time.Now(),
-					Metadata: map[string]any{
-						"await":   "ordering.slots",
-						"missing": strings.Join(missing, ", "),
-						"hint": map[string]string{
-							"ko": `예: {"item":"iPhone 15 Pro","quantity":1,"address":"서울시 ..."}`,
-							"en": `Ex: {"item":"iPhone 15 Pro","quantity":1,"address":"..."} `,
-						}[lang],
-						"lang": lang,
-					},
+					Metadata:  map[string]any{"lang": lang, "mode": "planning", "domain": "planning"},
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(clar)
+				_ = json.NewEncoder(w).Encode(out)
 				return
 			}
-
-			if msg.Metadata == nil {
-				msg.Metadata = map[string]any{}
-			}
-			msg.Metadata["ordering.item"] = slots.Item
-			if slots.Quantity > 0 {
-				msg.Metadata["ordering.quantity"] = slots.Quantity
-			}
-			if slots.Address != "" {
-				msg.Metadata["ordering.address"] = slots.Address
-			}
-			msg.Metadata["lang"] = lang // keep same language downstream
-
-		} else if agent == "planning" {
-			// --- NEW: PLANNING flow (ask missing info, else dispatch)
-			slots, missing := extractPlanningSlots(&msg)
-			lang := pickLang(req, &msg) // "ko" or "en"
-
-			if len(missing) > 0 {
-				r.ensureLLM()
-				// Default question by language
-				question := map[string]string{
-					"en": "To plan properly, please tell me what you want to plan (task/goal).",
-					"ko": "계획을 세우기 위해 무엇을 계획할지(task/goal)를 알려주세요.",
-				}[lang]
-
-				// Try to refine with LLM
-				if r.llmClient != nil {
-					sys := "You are an assistant collecting missing information to create a plan. Ask ONE concise question in the user's language."
-					usr := fmt.Sprintf("Language=%s\nMissing=%s\nUser said: %s", lang, strings.Join(missing, ", "), msg.Content)
-					if out, err := r.llmClient.Chat(req.Context(), sys, usr); err == nil && strings.TrimSpace(out) != "" {
-						question = strings.TrimSpace(out)
-					}
-				}
-				clar := types.AgentMessage{
-					ID:        msg.ID + "-needinfo",
-					From:      "root",
-					To:        msg.From,
-					Type:      "clarify",
-					Content:   question,
-					Timestamp: time.Now(),
-					Metadata: map[string]any{
-						"await":   "planning.slots",
-						"missing": strings.Join(missing, ", "),
-						"hint": map[string]string{
-							"ko": `예: {"task":"출장 일정 수립","timeframe":"다음 주","context":"회의 장소는 판교"}`,
-							"en": `Ex: {"task":"Plan a business trip","timeframe":"next week","context":"meeting in Pangyo"}`,
-						}[lang],
-						"lang": lang,
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(clar)
-				return
-			}
-
-			if msg.Metadata == nil {
-				msg.Metadata = map[string]any{}
-			}
-			msg.Metadata["planning.task"] = slots.Task
-			if slots.Timeframe != "" {
-				msg.Metadata["planning.timeframe"] = slots.Timeframe
-			}
-			if slots.Context != "" {
-				msg.Metadata["planning.context"] = slots.Context
-			}
-			msg.Metadata["lang"] = lang
 		}
 
-		// Per-request toggles from headers
+		// -------- Per-request toggles (SAGE/HPKE) --------
 		sageRaw := strings.TrimSpace(req.Header.Get("X-SAGE-Enabled"))
 		hpkeRaw := strings.TrimSpace(req.Header.Get("X-HPKE-Enabled"))
-
 		if hpkeRaw != "" && strings.EqualFold(hpkeRaw, "true") {
 			if sageRaw != "" && !strings.EqualFold(sageRaw, "true") {
 				w.Header().Set("Content-Type", "application/json")
@@ -1095,15 +1335,15 @@ func (r *RootAgent) mountRoutes() {
 				return
 			}
 		}
-
 		ctx := req.Context()
 		if sageRaw != "" {
 			ctx = context.WithValue(ctx, ctxUseSAGEKey, strings.EqualFold(sageRaw, "true"))
 		}
 		if hpkeRaw != "" {
-			ctx = context.WithValue(ctx, ctxHPKERawKey, hpkeRaw) // "true"/"false"
+			ctx = context.WithValue(ctx, ctxHPKERawKey, hpkeRaw)
 		}
 
+		// -------- External send through Root (signing/HPKE handled inside) --------
 		outPtr, err := r.sendExternal(ctx, agent, &msg)
 		if err != nil {
 			http.Error(w, "agent error: "+err.Error(), http.StatusBadGateway)
@@ -1115,7 +1355,6 @@ func (r *RootAgent) mountRoutes() {
 		if code, ok := httpStatusFromAgent(&out); ok {
 			status = code
 		}
-
 		w.Header().Set("Content-Type", "application/json")
 		if status/100 == 2 {
 			w.Header().Set("X-SAGE-Verified", "true")
@@ -1124,10 +1363,10 @@ func (r *RootAgent) mountRoutes() {
 			w.Header().Set("X-SAGE-Verified", "false")
 			w.Header().Set("X-SAGE-Signature-Valid", "false")
 		}
-
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(out)
 	})
+
 }
 
 // ---- Status helpers ----
@@ -1199,20 +1438,6 @@ func envBool(k string, d bool) bool {
 	return d
 }
 
-func parseBoolLike(v any, def bool) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	case string:
-		low := strings.ToLower(strings.TrimSpace(t))
-		return low == "1" || low == "true" || low == "on" || low == "yes"
-	case float64:
-		return t != 0
-	default:
-		return def
-	}
-}
-
 func hpkeKeysPath() string {
 	if v := strings.TrimSpace(os.Getenv("HPKE_KEYS")); v != "" {
 		return v
@@ -1256,4 +1481,177 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+func classifyPaymentMode(text string, s paySlots) string {
+	c := strings.ToLower(strings.TrimSpace(text))
+	if s.AmountKRW > 0 || containsAny(c, "송금", "이체", "보내", "send", "transfer", "지불") {
+		return "transfer"
+	}
+	return "purchase"
+}
+
+// ===== Planning: fill helper =====
+
+func fillMsgMetaFromPlanning(msg *types.AgentMessage, s planningSlots, lang string) {
+	if msg.Metadata == nil {
+		msg.Metadata = map[string]any{}
+	}
+	if s.Task != "" {
+		msg.Metadata["planning.task"] = s.Task
+	}
+	if s.Timeframe != "" {
+		msg.Metadata["planning.timeframe"] = s.Timeframe
+	}
+	if s.Context != "" {
+		msg.Metadata["planning.context"] = s.Context
+	}
+	msg.Metadata["lang"] = lang
+}
+
+// ---- [LLM] intent router ----
+
+func (r *RootAgent) llmPlanningAnswer(ctx context.Context, lang string, userText string, s planningSlots) string {
+	r.ensureLLM()
+	if r.llmClient == nil {
+		if lang == "ko" {
+			return "계획 요약을 생성하려면 LLM 설정이 필요해요."
+		}
+		return "LLM is required to generate a plan."
+	}
+
+	sys := map[string]string{
+		"ko": `너는 일정/계획 요약 도우미야.
+- 불릿 없이 4~6줄로 간결히.
+- "목표, 기간, 핵심 단계, 리스크/준비물" 순서로 정리.
+- 명령형 대신 제안형 어조.
+- 날짜/시간 표현은 모호하면 상대가 알아듣게 중립적으로.`,
+		"en": `You are a planning assistant.
+- 4~6 short lines, no bullets.
+- Cover: goal, timeframe, key steps, risks/prep.
+- Use suggestive tone, avoid hard commitments.`,
+	}[langOrDefault(lang)]
+
+	usr := fmt.Sprintf(
+		"Language=%s\nTask=%s\nTimeframe=%s\nContext=%s\nUserText=%s",
+		langOrDefault(lang), s.Task, s.Timeframe, s.Context, strings.TrimSpace(userText),
+	)
+	out, err := r.llmClient.Chat(ctx, sys, usr)
+	if err != nil || strings.TrimSpace(out) == "" {
+		if lang == "ko" {
+			return "요청하신 계획을 정리하지 못했어요. 핵심 목표/기간/제약을 한 번 더 알려주세요."
+		}
+		return "I couldn't generate the plan. Please share goal/timeframe/constraints again."
+	}
+	return strings.TrimSpace(out)
+}
+
+// ---- intent & cues ----
+
+var amountRe = regexp.MustCompile(`(?i)(\d[\d,\.]*)\s*(원|krw|만원|usd|usdc|eth|btc)`)
+
+func isPaymentActionIntent(c string) bool {
+	// 질문투면 라우팅 보류(강한 지시어 있으면 허용)
+	if isQuestionLike(c) && !isOrderish(c) && !containsAny(c, "보내", "송금", "이체", "지불해", "pay", "send", "transfer") {
+		return false
+	}
+	if isOrderish(c) || containsAny(c, "보내", "송금", "이체", "결제해", "지불해", "pay", "send", "transfer") {
+		return true
+	}
+	// 슬롯 힌트 2개 이상이면 결제 의도
+	hits := 0
+	if amountRe.FindStringIndex(c) != nil {
+		hits++
+	}
+	if hasMethodCue(c) {
+		hits++
+	}
+	if hasRecipientCue(c) {
+		hits++
+	}
+	return hits >= 2
+}
+
+func isMedicalInfoIntent(c string) bool {
+	c = strings.ToLower(strings.TrimSpace(c))
+
+	// 대표 질환/영역
+	if containsAny(c,
+		"당뇨", "혈당", "고혈당", "저혈당", "당화혈색소", "insulin", "metformin",
+		"정신", "우울", "불안", "조현", "bipolar", "adhd", "치매", "수면",
+		"우울증", "공황", "강박", "ptsd",
+		"hypertension", "고혈압", "고지혈", "cholesterol",
+	) {
+		return true
+	}
+
+	// 의료정보 톤
+	if containsAny(c,
+		"증상", "원인", "치료", "약", "복용", "부작용", "관리", "생활습관",
+		"가이드라인", "권고안", "주의사항", "금기", "진단", "검사",
+		"symptom", "treatment", "side effect", "guideline", "diagnosis",
+	) && containsAny(c, "알려줘", "설명", "정보", "방법", "how", "what", "guide") {
+		return true
+	}
+
+	// "~~ 먹어도 돼?" 같은 질문
+	if containsAny(c, "먹어도 돼", "괜찮아", "해도 돼", "해도돼", "임신", "모유", "술", "운동") &&
+		containsAny(c, "약", "복용", "병", "질환", "증상") {
+		return true
+	}
+
+	return false
+}
+
+func isPlanningActionIntent(c string) bool {
+	if containsAny(c, "계획해", "플랜 짜줘", "일정 짜줘", "plan", "schedule", "스케줄 만들어", "할일 정리") {
+		return true
+	}
+	// '계획/일정' 키워드가 있고 질문투가 아니면 라우팅
+	return containsAny(c, "계획", "일정", "플랜", "todo") && !isQuestionLike(c)
+}
+
+// helper cues
+
+func isQuestionLike(s string) bool {
+	return strings.HasSuffix(strings.TrimSpace(s), "?") ||
+		containsAny(strings.ToLower(s), "인가", "인가요", "일까", "일까요", "what", "how", "why", "when", "where", "which", "can ", "could ", "should ")
+}
+
+func isOrderish(s string) bool {
+	return containsAny(strings.ToLower(s),
+		"해줘", "해주세요", "해라", "please", "make", "create", "구매해", "사줘", "결제해", "order", "buy for me", "보내", "송금", "이체",
+	)
+}
+
+func blankOr(s, d string) string {
+	if strings.TrimSpace(s) == "" {
+		return d
+	}
+	return s
+}
+
+func convIDFrom(r *http.Request, msg *types.AgentMessage) string {
+	if v := strings.TrimSpace(r.Header.Get("X-SAGE-Context-Id")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Conversation-Id")); v != "" {
+		return v
+	}
+	if msg != nil && strings.TrimSpace(msg.ContextID) != "" {
+		return strings.TrimSpace(msg.ContextID)
+	}
+	return "ctx-default"
+}
+
+func sanitizeConvID(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.ToLower(s)
+	// replace spaces and unsafe chars
+	repl := strings.NewReplacer(" ", "-", "\t", "-", "\n", "-", ":", "-", "/", "-", "\\", "-", "@", "-", "#", "-")
+	s = repl.Replace(s)
+	if s == "" {
+		return "default"
+	}
+	return s
 }

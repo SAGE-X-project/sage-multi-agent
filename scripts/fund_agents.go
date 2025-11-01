@@ -104,7 +104,7 @@ func main() {
 	amountFloat.Int(amountWei)
 
 	// Find all agent key files
-	agents := []string{"root", "ordering", "planning", "payment"}
+	agents := []string{"root", "medical", "planning", "payment"}
 	totalFunded := 0
 
 	for _, agentType := range agents {

@@ -8,7 +8,14 @@
     "type": {
       "type": "string",
       "description": "The type of agent",
-      "enum": ["root", "orchestrator", "ordering", "planning", "specialist", "utility"]
+      "enum": [
+        "root",
+        "orchestrator",
+        "medical",
+        "planning",
+        "specialist",
+        "utility"
+      ]
     },
     "version": {
       "type": "string",
@@ -49,7 +56,7 @@
     },
     "supported_vendors": {
       "type": "array",
-      "description": "List of supported vendors (for ordering agents)",
+      "description": "List of supported vendors (for medical agents)",
       "items": {
         "type": "string"
       }

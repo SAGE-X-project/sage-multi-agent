@@ -1,221 +1,217 @@
 // tools/registration/build_combined_from_signing.go
-// SPDX-License-Identifier: MIT
 package main
 
 import (
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 )
 
-/********** input types **********/
-
 type SigningRow struct {
 	Name       string `json:"name"`
-	DID        string `json:"did"`
+	DID        string `json:"did,omitempty"`
 	PublicKey  string `json:"publicKey"`
 	PrivateKey string `json:"privateKey"`
 	Address    string `json:"address"`
 }
 
-type KemAgentRow struct {
+type KemRow struct {
 	Name          string `json:"name"`
-	DID           string `json:"did"`
-	Address       string `json:"address"`
-	X25519Private string `json:"x25519Private"`
-	X25519Public  string `json:"x25519Public"`
+	DID           string `json:"did,omitempty"`
+	Address       string `json:"address,omitempty"`
+	X25519PrivHex string `json:"x25519Private,omitempty"`
+	X25519PubHex  string `json:"x25519Public,omitempty"`
 }
 
-type kemFile struct {
-	Agents []KemAgentRow `json:"agents"`
+type kemWrapper struct {
+	Agents []KemRow `json:"agents"`
 }
 
 type CombinedRow struct {
 	Name          string `json:"name"`
 	DID           string `json:"did"`
-	PublicKey     string `json:"publicKey"`  // ECDSA (signing JSON)
-	PrivateKey    string `json:"privateKey"` // ECDSA (signing JSON)
-	Address       string `json:"address"`    // from KEM JSON (preferred)
-	X25519Private string `json:"x25519Private"`
-	X25519Public  string `json:"x25519Public"`
+	PublicKey     string `json:"publicKey"`
+	PrivateKey    string `json:"privateKey"`
+	Address       string `json:"address"`
+	X25519PrivHex string `json:"x25519Private"`
+	X25519PubHex  string `json:"x25519Public"`
 }
 
-/********** main **********/
-
-func main() {
-	signingPath := flag.String("signing", "generated_agent_keys.json", "Signing keys JSON (array)")
-	kemPath := flag.String("kem", "keys/kem/generated_kem_keys.json", "KEM keys JSON (object with agents[] or top-level array)")
-	out := flag.String("out", "merged_agent_keys.json", "Output merged JSON file")
-	agents := flag.String("agents", "", "Comma-separated agent names to include (default: all)")
-	flag.Parse()
-
-	// load signing rows
-	sRows, err := loadSigning(*signingPath)
+func readFile(p string) ([]byte, error) {
+	b, err := os.ReadFile(p)
 	if err != nil {
-		fatalf("read signing: %v", err)
+		return nil, fmt.Errorf("read %s: %w", p, err)
 	}
-
-	// load KEM rows
-	kRows, err := loadKEM(*kemPath)
-	if err != nil {
-		fatalf("read kem: %v", err)
+	if len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+		return b[3:], nil
 	}
-
-	// build map[name]KemAgentRow
-	kemByName := make(map[string]KemAgentRow, len(kRows))
-	for _, kr := range kRows {
-		kemByName[strings.TrimSpace(kr.Name)] = kr
-	}
-
-	// filter
-	filter := parseFilter(*agents)
-
-	var outRows []CombinedRow
-	for _, r := range sRows {
-		name := strings.TrimSpace(r.Name)
-		if name == "" {
-			continue
-		}
-		if len(filter) > 0 {
-			if _, ok := filter[name]; !ok {
-				continue
-			}
-		}
-		kr, ok := kemByName[name]
-        if !ok {
-            // Enforced: skip if KEM entry is missing (per requirement)
-            fmt.Printf(" - %s: missing KEM entry in %s -> skip\n", name, shortPath(*kemPath))
-            continue
-        }
-
-        // Prefer DID/Address from KEM JSON
-        addr := ensure0x(strings.TrimSpace(kr.Address))
-        did := strings.TrimSpace(kr.DID)
-        if did == "" {
-            // Fallback: construct DID from address
-            if addr == "" {
-                did = strings.TrimSpace(r.DID)
-            } else {
-                did = "did:sage:ethereum:" + addr
-            }
-        }
-
-        // x25519 fields: must be read from KEM JSON (do not generate)
-        xpriv := ensure0x(kr.X25519Private)
-        xpub := ensure0x(kr.X25519Public)
-
-        // Simple validation (optional)
-        if err := mustBeHex32(xpub); err != nil {
-            fatalf("%s: invalid x25519Public: %v", name, err)
-        }
-        if err := mustBeHex32(xpriv); err != nil {
-            // Private may only be needed for deploy/test, but enforce check per requirement
-            fatalf("%s: invalid x25519Private: %v", name, err)
-        }
-
-		combined := CombinedRow{
-			Name:          name,
-			DID:           did,
-			PublicKey:     ensure0x(r.PublicKey),
-			PrivateKey:    ensure0x(r.PrivateKey),
-			Address:       addr,
-			X25519Private: xpriv,
-			X25519Public:  xpub,
-		}
-		outRows = append(outRows, combined)
-	}
-
-	// ensure output dir exists
-	if dir := filepath.Dir(*out); dir != "." && dir != "" {
-		_ = os.MkdirAll(dir, 0o755)
-	}
-
-	b, err := json.MarshalIndent(outRows, "", "  ")
-	if err != nil {
-		fatalf("marshal out: %v", err)
-	}
-	if err := ioutil.WriteFile(*out, b, 0o644); err != nil {
-		fatalf("write out: %v", err)
-	}
-	fmt.Printf("Merged JSON written: %s (rows=%d)\n", *out, len(outRows))
+	return b, nil
 }
 
-/********** helpers **********/
-
-func loadSigning(path string) ([]SigningRow, error) {
-	b, err := ioutil.ReadFile(path)
+func loadSigningJSON(path string) ([]SigningRow, error) {
+	b, err := readFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var rows []SigningRow
-	if err := json.Unmarshal(b, &rows); err != nil {
-		return nil, err
+	var arr []SigningRow
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return nil, fmt.Errorf("signing json must be a top-level array: %w", err)
 	}
-	return rows, nil
+	if len(arr) == 0 {
+		return nil, errors.New("signing json: empty array")
+	}
+	for i, r := range arr {
+		if r.Name == "" || r.Address == "" || r.PublicKey == "" || r.PrivateKey == "" {
+			return nil, fmt.Errorf("signing json: row %d missing required fields (need name,address,publicKey,privateKey)", i)
+		}
+	}
+	return arr, nil
 }
 
-func loadKEM(path string) ([]KemAgentRow, error) {
-	b, err := ioutil.ReadFile(path)
+func tryLoadKemArray(b []byte) ([]KemRow, error) {
+	var arr []KemRow
+	if err := json.Unmarshal(b, &arr); err != nil {
+		return nil, err
+	}
+	return arr, nil
+}
+
+func tryLoadKemWrapper(b []byte) ([]KemRow, error) {
+	var w kemWrapper
+	if err := json.Unmarshal(b, &w); err != nil {
+		return nil, err
+	}
+	return w.Agents, nil
+}
+
+func loadKEMJSON(path string) ([]KemRow, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	b, err := readFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// primary: {"agents":[...]}
-	var obj kemFile
-	if json.Unmarshal(b, &obj) == nil && len(obj.Agents) > 0 {
-		return obj.Agents, nil
+	if rows, err := tryLoadKemArray(b); err == nil {
+		return rows, nil
 	}
-	// fallback: top-level array
-	var arr []KemAgentRow
-	if json.Unmarshal(b, &arr) == nil && len(arr) > 0 {
-		return arr, nil
+	if rows, err := tryLoadKemWrapper(b); err == nil {
+		return rows, nil
 	}
-	return nil, fmt.Errorf("unrecognized KEM json (need object with agents[] or top-level array)")
+	return nil, fmt.Errorf("kem json not recognized: %s (need {\"agents\":[]} or top-level array)", path)
 }
 
-func parseFilter(csv string) map[string]struct{} {
-	csv = strings.TrimSpace(csv)
-	if csv == "" {
+func toSet(csv string) map[string]struct{} {
+	if strings.TrimSpace(csv) == "" {
 		return nil
 	}
-	out := make(map[string]struct{})
-	for _, p := range strings.Split(csv, ",") {
-		q := strings.TrimSpace(p)
-		if q != "" {
-			out[q] = struct{}{}
+	S := map[string]struct{}{}
+	for _, t := range strings.Split(csv, ",") {
+		n := strings.TrimSpace(t)
+		if n != "" {
+			S[n] = struct{}{}
+		}
+	}
+	return S
+}
+
+func filterSigning(in []SigningRow, allow map[string]struct{}) []SigningRow {
+	if allow == nil {
+		return in
+	}
+	out := make([]SigningRow, 0, len(in))
+	for _, r := range in {
+		if _, ok := allow[r.Name]; ok {
+			out = append(out, r)
 		}
 	}
 	return out
 }
 
-func ensure0x(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return s
+func indexKem(rows []KemRow) map[string]KemRow {
+	m := make(map[string]KemRow, len(rows))
+	for _, r := range rows {
+		m[r.Name] = r
 	}
-	if strings.HasPrefix(s, "0x") || strings.HasPrefix(s, "0X") {
-		return s
-	}
-	return "0x" + s
+	return m
 }
 
-func mustBeHex32(h string) error {
-	h = strings.TrimPrefix(strings.TrimSpace(h), "0x")
-    // 32 bytes (64 hex chars)
-    if len(h) != 64 {
-        return fmt.Errorf("want 32 bytes (64 hex), got %d", len(h))
-    }
-	_, err := hex.DecodeString(h)
-	return err
+func chooseDID(sign SigningRow, kem KemRow) string {
+	if sign.DID != "" {
+		return sign.DID
+	}
+	if kem.DID != "" {
+		return kem.DID
+	}
+	return "did:sage:ethereum:" + sign.Address
 }
 
-func shortPath(p string) string { return filepath.Clean(p) }
+func merge(signing []SigningRow, kemIdx map[string]KemRow) []CombinedRow {
+	out := make([]CombinedRow, 0, len(signing))
+	for _, s := range signing {
+		k := kemIdx[s.Name]
+		cr := CombinedRow{
+			Name:          s.Name,
+			DID:           chooseDID(s, k),
+			PublicKey:     s.PublicKey,
+			PrivateKey:    s.PrivateKey,
+			Address:       s.Address,
+			X25519PrivHex: k.X25519PrivHex, // may be ""
+			X25519PubHex:  k.X25519PubHex,  // may be ""
+		}
+		out = append(out, cr)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
 
-func fatalf(f string, a ...interface{}) {
-	fmt.Fprintf(os.Stderr, "Error: "+f+"\n", a...)
-	os.Exit(1)
+func main() {
+	var (
+		signingPath string
+		kemPath     string
+		outPath     string
+		agentsCSV   string
+	)
+	flag.StringVar(&signingPath, "signing", "", "path to signing keys JSON (top-level array)")
+	flag.StringVar(&kemPath, "kem", "", "optional path to KEM keys JSON (top-level array or {\"agents\":[]})")
+	flag.StringVar(&outPath, "out", "", "path to write merged JSON")
+	flag.StringVar(&agentsCSV, "agents", "", "optional filter: comma-separated agent names")
+	flag.Parse()
+
+	if signingPath == "" || outPath == "" {
+		fmt.Fprintln(os.Stderr, "usage: -signing <file.json> [-kem <file.json>] -out <merged.json> [-agents \"a,b,c\"]")
+		os.Exit(2)
+	}
+
+	signRows, err := loadSigningJSON(signingPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load signing:", err)
+		os.Exit(1)
+	}
+
+	filter := toSet(agentsCSV)
+	signRows = filterSigning(signRows, filter)
+
+	kemRows, err := loadKEMJSON(kemPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	merged := merge(signRows, indexKem(kemRows))
+
+	b, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "marshal merged:", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(outPath, b, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "write merged:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Merged %d agents -> %s\n", len(merged), outPath)
 }

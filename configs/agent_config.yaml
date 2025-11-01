@@ -16,18 +16,18 @@ agents:
         - "request_analysis"
       version: "1.0.0"
       subagents:
-        - "ordering"
+        - "medical"
         - "planning"
     key_file: "keys/root.key"
 
-  ordering:
-    did: "did:sage:ethereum:ordering_agent_001"
-    name: "Ordering Agent"
+  medical:
+    did: "did:sage:ethereum:medical_agent_001"
+    name: "Medical Agent"
     description: "Specialized agent for handling orders and purchases"
     endpoint: "http://localhost:8082"
     type: "specialist"
     capabilities:
-      type: "ordering"
+      type: "medical"
       skills:
         - "order_processing"
         - "purchase_management"
@@ -37,7 +37,7 @@ agents:
         - "amazon"
         - "ebay"
         - "local_stores"
-    key_file: "keys/ordering.key"
+    key_file: "keys/medical.key"
 
   planning:
     did: "did:sage:ethereum:planning_agent_001"
@@ -94,6 +94,6 @@ agents:
 
 # Network Configuration
 network:
-  chain: "local"  # local, ethereum, sepolia, kaia, kairos
+  chain: "local" # local, ethereum, sepolia, kaia, kairos
   confirmation_blocks: 3
   gas_limit: 500000

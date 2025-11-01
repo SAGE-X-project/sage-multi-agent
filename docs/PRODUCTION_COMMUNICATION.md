@@ -9,6 +9,7 @@ This document describes the enhanced production-grade communication system betwe
 ### 1. Enhanced Client Server (`client/enhanced_main.go`)
 
 Production-grade HTTP server with:
+
 - **SAGE Protocol Integration**: Full RFC-9421 message signature support
 - **Request/Response Caching**: 5-minute TTL cache for non-SAGE requests
 - **Comprehensive Metrics**: Request counts, response times, success rates
@@ -20,6 +21,7 @@ Production-grade HTTP server with:
 ### 2. Enhanced WebSocket Server (`websocket/enhanced_server.go`)
 
 Real-time communication system with:
+
 - **Message Types**: Structured messages (log, error, status, heartbeat, connection)
 - **Log Buffering**: 100-message buffer for new clients
 - **Client Management**: Track connected clients with metadata
@@ -31,6 +33,7 @@ Real-time communication system with:
 ### 3. Message Types (`types/messages.go`)
 
 Comprehensive type definitions:
+
 - **PromptRequest/Response**: Structured request/response with metadata
 - **AgentLog**: Detailed logging with levels and types
 - **SAGEVerificationResult**: Cryptographic verification status
@@ -43,9 +46,11 @@ Comprehensive type definitions:
 ### Client Server (Port 8086)
 
 #### POST `/send/prompt`
+
 Main endpoint for processing prompts.
 
 **Request**:
+
 ```json
 {
   "prompt": "Book a hotel in Tokyo",
@@ -59,12 +64,14 @@ Main endpoint for processing prompts.
 ```
 
 **Headers**:
+
 ```
 X-SAGE-Enabled: true
 X-Scenario: accommodation
 ```
 
 **Response**:
+
 ```json
 {
   "response": "I found 3 hotels in Tokyo...",
@@ -84,9 +91,11 @@ X-Scenario: accommodation
 ```
 
 #### GET `/health`
+
 Health check endpoint.
 
 **Response**:
+
 ```json
 {
   "status": "healthy",
@@ -107,9 +116,11 @@ Health check endpoint.
 ```
 
 #### GET `/metrics`
+
 Metrics endpoint for monitoring.
 
 **Response**:
+
 ```json
 {
   "http_metrics": {
@@ -131,9 +142,11 @@ Metrics endpoint for monitoring.
 ### WebSocket Server (Port 8085)
 
 #### WS `/ws`
+
 WebSocket endpoint for real-time logs.
 
 **Message Format**:
+
 ```json
 {
   "type": "log",
@@ -152,9 +165,11 @@ WebSocket endpoint for real-time logs.
 ```
 
 #### GET `/health`
+
 WebSocket server health check.
 
 #### GET `/stats`
+
 WebSocket server statistics.
 
 ## SAGE Protocol Implementation
@@ -188,13 +203,14 @@ go run client/enhanced_main.go \
 go run root/main.go --ws-port 8085
 
 # Start sub-agents
-go run ordering/main.go --port 8083
+go run medical/main.go --port 8083
 go run planning/main.go --port 8084
 ```
 
 ### 2. Environment Variables
 
 Create `.env` file:
+
 ```env
 # API Configuration
 ROOT_AGENT_URL=http://localhost:8080
@@ -207,13 +223,14 @@ ETH_CONTRACT_ADDRESS=0x...
 ETH_RPC_ENDPOINT=https://...
 
 # Agent Ports
-ORDERING_AGENT_PORT=8083
+MEDICAL_AGENT_PORT=8083
 PLANNING_AGENT_PORT=8084
 ```
 
 ### 3. Frontend Integration
 
 The frontend should:
+
 1. Connect to WebSocket at `ws://localhost:8085/ws`
 2. Send POST requests to `http://localhost:8086/send/prompt`
 3. Handle structured responses with verification data
@@ -222,30 +239,35 @@ The frontend should:
 ## Production Features
 
 ### 1. Reliability
+
 - **Retry Logic**: Automatic retry with exponential backoff
 - **Circuit Breaker**: Prevent cascading failures
 - **Health Monitoring**: Continuous service health checks
 - **Graceful Degradation**: Fallback to cached responses
 
 ### 2. Performance
+
 - **Response Caching**: 5-minute TTL for repeated requests
 - **Connection Pooling**: Reuse HTTP connections
 - **Parallel Processing**: Concurrent request handling
 - **Resource Limits**: Configured timeouts and buffer sizes
 
 ### 3. Security
+
 - **CORS Configuration**: Proper cross-origin headers
 - **Request Validation**: Input sanitization and validation
 - **Rate Limiting**: (Ready for implementation)
 - **SAGE Protocol**: Cryptographic message verification
 
 ### 4. Observability
+
 - **Structured Logging**: Consistent log format with levels
 - **Metrics Collection**: Request metrics and performance data
 - **Health Endpoints**: Service health monitoring
 - **Real-time Logs**: WebSocket-based log streaming
 
 ### 5. Maintainability
+
 - **Clean Architecture**: Separation of concerns
 - **Configuration Management**: Environment-based config
 - **Error Handling**: Comprehensive error types
@@ -254,6 +276,7 @@ The frontend should:
 ## Testing the System
 
 ### 1. Test SAGE Enabled Mode
+
 ```bash
 curl -X POST http://localhost:8086/send/prompt \
   -H "Content-Type: application/json" \
@@ -262,6 +285,7 @@ curl -X POST http://localhost:8086/send/prompt \
 ```
 
 ### 2. Test SAGE Disabled Mode
+
 ```bash
 curl -X POST http://localhost:8086/send/prompt \
   -H "Content-Type: application/json" \
@@ -271,22 +295,25 @@ curl -X POST http://localhost:8086/send/prompt \
 ```
 
 ### 3. Test Health Check
+
 ```bash
 curl http://localhost:8086/health
 ```
 
 ### 4. Test WebSocket Connection
+
 ```javascript
-const ws = new WebSocket('ws://localhost:8085/ws');
+const ws = new WebSocket("ws://localhost:8085/ws");
 ws.onmessage = (event) => {
   const message = JSON.parse(event.data);
-  console.log('Received:', message);
+  console.log("Received:", message);
 };
 ```
 
 ## Monitoring and Alerts
 
 ### Key Metrics to Monitor
+
 1. **Request Rate**: Requests per second
 2. **Error Rate**: Failed requests percentage
 3. **Response Time**: P50, P95, P99 latencies
@@ -294,6 +321,7 @@ ws.onmessage = (event) => {
 5. **Cache Hit Rate**: Percentage of cached responses
 
 ### Alert Thresholds
+
 - Error rate > 5%
 - Response time P95 > 1000ms
 - WebSocket connections drop > 50%
@@ -315,16 +343,19 @@ ws.onmessage = (event) => {
 ### Common Issues
 
 1. **WebSocket Connection Failed**
+
    - Check if port 8085 is available
    - Verify CORS settings
    - Check firewall rules
 
 2. **SAGE Verification Failed**
+
    - Verify agent registration on blockchain
    - Check key file permissions
    - Validate DID configuration
 
 3. **High Response Times**
+
    - Check network latency
    - Monitor agent processing times
    - Review cache configuration

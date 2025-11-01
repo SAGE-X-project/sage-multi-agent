@@ -9,7 +9,7 @@ Frontend
   ↓ HTTP POST (/api/request)
 Client API (:8086)
   ↓ HTTP POST (/process)
-Root (:18080, in‑proc Planning/Ordering/Payment)
+Root (:18080, in‑proc Planning/Medical/Payment)
   ↓ HTTP POST
 Gateway (:5500, tamper/pass)
   ↓ HTTP POST
@@ -46,11 +46,12 @@ NEXT_PUBLIC_ENABLE_REALTIME_LOGS=false
 ### 3) SAGE 프로토콜 통합
 
 #### 요청 바디 + 헤더
+
 ```typescript
 interface PromptRequest {
   prompt: string;
-  sageEnabled?: boolean;  // (선택) 클라에서 관리 시 사용. 권장: 헤더로 제어
-  scenario?: "planning" | "ordering" | "payment";
+  sageEnabled?: boolean; // (선택) 클라에서 관리 시 사용. 권장: 헤더로 제어
+  scenario?: "planning" | "medical" | "payment";
   metadata?: Record<string, string>;
 }
 ```
@@ -69,16 +70,18 @@ interface PromptRequest {
 
 - 백엔드 미실행 시 사용자에게 명확한 오류 표시
 - (선택) WebSocket 사용 시 자동 재연결/하트비트/상태 표시
-- 서버 로그는 `logs/*.log` 확인(external-payment, gateway, root, client)
+- 서버 로그는 `logs/*.log` 확인(payment, gateway, root, client)
 
 ## 🔌 데모 토글 및 효과
 
 실행 스크립트(`demo_SAGE.sh`, `scripts/06_start_all.sh`)로 다음을 제어할 수 있습니다.
 
 - SAGE ON/OFF (요청 단위)
+
   - 헤더 `X-SAGE-Enabled: true|false` (기본: ON)
 
 - Gateway tamper/pass (프로세스 시작 시)
+
   - `--tamper`(기본) 또는 `--pass`
   - tamper일 때 게이트웨이는 JSON 바디를 변조하거나 HPKE ciphertext의 1바이트를 flip합니다.
 
@@ -88,6 +91,7 @@ interface PromptRequest {
   - 본 데모에서 HPKE는 SAGE가 ON일 때만 유효하게 사용됩니다.
 
 효과 요약:
+
 - HPKE ON + tamper → 게이트웨이가 ciphertext를 변조하면 External에서 복호화 오류(검출)
 - HPKE OFF + SAGE ON + tamper → External DID 미들웨어가 RFC9421 서명 불일치로 거부(4xx)
 - HPKE OFF + SAGE OFF + tamper → 변조가 통과(보안 위험 데모)
@@ -102,7 +106,7 @@ interface PromptRequest {
 
 - A2A 서명: `github.com/sage-x-project/sage-a2a-go` 클라이언트를 사용해 RFC9421 서명을 생성/첨부
 - DID 검증: External Payment에서 a2a-go 미들웨어가 검증
-- HPKE: Payment→External 간 초기화/세션(`agents/payment/hpke_wrap.go`, `cmd/external-payment/main.go`)
+- HPKE: Payment→External 간 초기화/세션(`agents/payment/hpke_wrap.go`, `cmd/payment/main.go`)
 
 ### 4. Gateway 모드 처리
 
@@ -126,6 +130,7 @@ if !sageEnabled && scenario != "" {
 ## 데이터 흐름
 
 ### 1. 사용자 요청 (SAGE ON)
+
 ```
 User Input → Frontend → Client API
     ↓
@@ -137,6 +142,7 @@ Response (검증 성공) → Frontend
 ```
 
 ### 2. 사용자 요청 (SAGE OFF)
+
 ```
 User Input → Frontend → Client API
     ↓
@@ -164,10 +170,10 @@ Response (위험 경고 없음) → Frontend
 
 ### 수동 실행(그대로)
 
-1) External Payment: `scripts/02_start_external_payment_agent.sh`
-2) Gateway: `scripts/03_start_gateway_tamper.sh` 또는 `scripts/03_start_gateway_pass.sh`
-3) Root: `go run ./cmd/root/main.go -port 18080 [-hpke -hpke-keys ...]`
-4) Client API: `go run ./cmd/client/main.go -port 8086 -root http://localhost:18080`
+1. External Payment: `scripts/02_start_external_payment_agent.sh`
+2. Gateway: `scripts/03_start_gateway_tamper.sh` 또는 `scripts/03_start_gateway_pass.sh`
+3. Root: `go run ./cmd/root/main.go -port 18080 [-hpke -hpke-keys ...]`
+4. Client API: `go run ./cmd/client/main.go -port 8086 -root http://localhost:18080`
 
 ## 프론트엔드에서 호출 예시
 

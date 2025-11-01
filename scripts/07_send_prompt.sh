@@ -12,23 +12,41 @@
 # - SAGE/HPKE headers are per-request and preserved across turns.
 # - If jq is available, we auto-detect "need more info" and "routed to payment".
 
+[ -n "$BASH_VERSION" ] || exec bash "$0" "$@"
 set -Eeuo pipefail
 
+# ---------- helpers ----------
+strip_cr() { printf '%s' "$1" | tr -d '\r'; }
+trim_ws()  { awk '{$1=$1; print}' <<<"$1"; }
+
+# ---------- env & defaults ----------
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 [[ -f .env ]] && source .env
 
-HOST="${HOST:-localhost}"
-CLIENT_PORT="${CLIENT_PORT:-8086}"
-GATEWAY_PORT="${GATEWAY_PORT:-5500}"
-ROOT_PORT="${ROOT_AGENT_PORT:-18080}"
+# Hard defaults for set -u safety
+: "${PROMPT:=}"
+: "${PROMPT_FILE:=}"
+: "${INTERACTIVE:=0}"
+: "${SAGE:=off}"
+: "${HPKE:=off}"
+: "${SCENARIO:=user}"
+: "${HOST:=localhost}"
+: "${CLIENT_PORT:=8086}"
+: "${ROOT_AGENT_PORT:=18080}"
+: "${GATEWAY_PORT:=5500}"
+: "${CID_FILE:=.cid}"
 
-SAGE="off"
-HPKE="off"
-PROMPT=""
-PROMPT_FILE=""
-SCENARIO="user"
-INTERACTIVE=0   # NEW
+# Normalize env values (remove CR/LF, trim)
+HOST="$(trim_ws "$(strip_cr "${HOST}")")"
+CLIENT_PORT="$(trim_ws "$(strip_cr "${CLIENT_PORT}")")"
+ROOT_PORT="$(trim_ws "$(strip_cr "${ROOT_AGENT_PORT}")")"
+GATEWAY_PORT="$(trim_ws "$(strip_cr "${GATEWAY_PORT}")")"
+
+SAGE="$(trim_ws "$(strip_cr "${SAGE}")")"
+HPKE="$(trim_ws "$(strip_cr "${HPKE}")")"
+SCENARIO="$(trim_ws "$(strip_cr "${SCENARIO}")")"
+CID_FILE="$(trim_ws "$(strip_cr "${CID_FILE}")")"
 
 usage() {
   cat <<EOF
@@ -37,6 +55,7 @@ If no --prompt/--prompt-file given, reads stdin.
 EOF
 }
 
+# ---------- args ----------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sage=*)      SAGE="${1#*=}"; shift ;;
@@ -54,19 +73,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---------- prompt ----------
 if [[ -z "$PROMPT" ]]; then
-  if [[ -n "$PROMPT_FILE" ]]; then
+  if [[ -n "${PROMPT_FILE}" ]]; then
     PROMPT="$(cat "$PROMPT_FILE")"
   elif ! tty -s; then
     PROMPT="$(cat -)"
   fi
 fi
-
-# Default prompt targets payment so HPKE/SAGE path is visible
+# default prompt to exercise payment path
 if [[ -z "$PROMPT" ]]; then
   PROMPT="send 10 USDC to merchant"
 fi
 
+# ---------- headers ----------
 SAGE_HDR="false"
 case "$(echo "$SAGE" | tr '[:upper:]' '[:lower:]')" in
   on|true|1|yes) SAGE_HDR="true" ;;
@@ -85,27 +105,40 @@ if [[ "$SAGE_HDR" == "false" && "$HPKE_HDR" == "true" ]]; then
   HPKE_HDR="false"
 fi
 
+# ---------- temp files ----------
 REQ_PAYLOAD="$(mktemp -t prompt.req.XXXX.json)"
 RESP_PAYLOAD="$(mktemp -t prompt.resp.XXXX.json)"
 
+# ---------- logs ----------
 GW_LOG="logs/gateway.log"
 ROOT_LOG="logs/root.log"
 PAY_LOG="logs/payment.log"
-
-# Track log offsets across turns
 get_lines() { [[ -f "$1" ]] && wc -l < "$1" || echo 0; }
 PRE_GW=$(get_lines "$GW_LOG")
 PRE_ROOT=$(get_lines "$ROOT_LOG")
 PRE_PAY=$(get_lines "$PAY_LOG")
 
+# ---------- conversation id ----------
+if [[ -s "$CID_FILE" ]]; then
+  CID="$(cat "$CID_FILE")"
+else
+  CID="cid-$(date +%s%N)"
+  echo "$CID" > "$CID_FILE"
+fi
+
+
+# ---------- send once ----------
 send_once() {
   local text="$1"
-  # write request JSON (use jq if available)
+
+  # Write JSON body (with conversationId)
   if command -v jq >/dev/null 2>&1; then
-    printf '{"prompt": %s}\n' "$(jq -Rsa . <<<"$text")" > "$REQ_PAYLOAD"
+    printf '{"prompt": %s, "conversationId": %s}\n' \
+      "$(jq -Rsa . <<<"$text")" \
+      "$(jq -R . <<<"$CID")" > "$REQ_PAYLOAD"
   else
     local esc=${text//\\/\\\\}; esc=${esc//\"/\\\"}
-    printf '{"prompt":"%s"}\n' "$esc" > "$REQ_PAYLOAD"
+    printf '{"prompt":"%s","conversationId":"%s"}\n' "$esc" "$CID" > "$REQ_PAYLOAD"
   fi
 
   echo "[REQ] POST /api/request  X-SAGE-Enabled: $SAGE_HDR  X-HPKE-Enabled: $HPKE_HDR  X-Scenario: $SCENARIO"
@@ -115,6 +148,8 @@ send_once() {
     -H "X-SAGE-Enabled: $SAGE_HDR" \
     -H "X-HPKE-Enabled: $HPKE_HDR" \
     -H "X-Scenario: $SCENARIO" \
+    -H "X-Conversation-ID: $CID" \
+    -H "X-SAGE-Context-ID: $CID"\
     -X POST "http://${HOST}:${CLIENT_PORT}/api/request" \
     --data-binary @"$REQ_PAYLOAD" || true)
   echo "[HTTP] client-api status: $code"
@@ -160,12 +195,12 @@ send_once() {
   fi
 }
 
+# ---------- interactive guard ----------
 should_continue() {
   # returns 0 to continue (need more info), 1 to stop
   if ! command -v jq >/dev/null 2>&1; then
-    # Without jq, ask user manually
     read -r -p "[NEXT] Provide more info (empty = stop): " NEXT
-    if [[ -z "$NEXT" ]]; then
+    if [[ -z "${NEXT}" ]]; then
       return 1
     else
       PROMPT="$NEXT"
@@ -173,7 +208,6 @@ should_continue() {
     fi
   fi
 
-  # With jq: detect "need more info" and "payment routed"
   local need_more routed final stage done_flag
   need_more=$(jq -r '(.metadata.requiresMoreInfo // .metadata.needMore // .metadata.need_input // false)' "$RESP_PAYLOAD" 2>/dev/null || echo "false")
   routed=$(jq -r '(.metadata.route // .metadata.nextAgent // .metadata.routed_to // .metadata.target // "")' "$RESP_PAYLOAD" 2>/dev/null || echo "")
@@ -181,7 +215,6 @@ should_continue() {
   stage=$(jq -r '(.metadata.stage // "")' "$RESP_PAYLOAD" 2>/dev/null || echo "")
   done_flag=$(jq -r '(.metadata.done // false)' "$RESP_PAYLOAD" 2>/dev/null || echo "false")
 
-  # If clearly routed to payment or finished, stop
   case ",${routed},${final},${stage}," in
     *",payment,"*|*",done,"*|*",final,"*|*",completed,"*)
       echo "[ROUTED] metadata indicates Payment/done. Ending interaction."
@@ -194,10 +227,8 @@ should_continue() {
     return 1
   fi
 
-  # If need_more is true, ask user for more info
   case "$(echo "$need_more" | tr '[:upper:]' '[:lower:]')" in
     true|1|yes|on)
-      # If server provided explicit questions, show them
       local qcount
       qcount=$(jq -r '(.metadata.questions // .metadata.missing // []) | length' "$RESP_PAYLOAD" 2>/dev/null || echo 0)
       if [[ "$qcount" -gt 0 ]]; then
@@ -209,7 +240,7 @@ should_continue() {
       PROMPT="$NEXT"
       [[ -z "$PROMPT" ]] && return 1 || return 0
       ;;
-    *) # otherwise stop unless user wants to continue
+    *)
       read -r -p "[NEXT] Continue with another message? (leave empty to stop): " NEXT
       if [[ -z "$NEXT" ]]; then
         return 1
@@ -221,8 +252,8 @@ should_continue() {
   esac
 }
 
-# --------- Run (single or interactive) ---------
-if [[ "$INTERACTIVE" -eq 1 ]]; then
+# ---------- run ----------
+if [[ "${INTERACTIVE:-0}" -eq 1 ]]; then
   turn=1
   while : ; do
     echo

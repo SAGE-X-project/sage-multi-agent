@@ -2,29 +2,10 @@
 // +build reg_kem
 
 // tools/registration/register_kem_agents.go
-// SPDX-License-Identifier: MIT
-//
-// Register agents (self-signed) and include an extra X25519 (HPKE) KEM key
-// in the same Register() call.
-//  - ECDSA key: from signing-keys JSON (required; self-signed flow)
-//  - X25519 key: from kem-keys JSON (32 bytes public key; no signature)
-//
-// Changes:
-//  - Use the DID from the KEM JSON (not signing-keys) for Register.
-//  - If the DID already exists on-chain, add the X25519 key via addKey(X25519).
-//    (owner requirement: the tx sender must be the same ECDSA key used at registration)
-//
-// Usage:
-//   go run -tags=reg_kem tools/registration/register_kem_agents.go \
-//     -contract 0x... \
-//     -rpc http://127.0.0.1:8545 \
-//     -signing-keys ./generated_agent_keys.json \
-//     -kem-keys ./keys/kem/generated_kem_keys.json \
-//     -agents "ordering,planing,payment,external"
-
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
@@ -38,39 +19,22 @@ import (
 	"strings"
 	"time"
 
-	// go-ethereum
-	"github.com/ethereum/go-ethereum/accounts/abi"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 
-	// SAGE packages
 	"github.com/sage-x-project/sage/pkg/agent/did"
-	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	agentcard "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
-
-/********** input & meta types **********/
 
 type signingRow struct {
 	Name       string `json:"name"`
 	DID        string `json:"did"`
-	PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... recommended; 33B compressed allowed)
-	PrivateKey string `json:"privateKey"` // agent EOA (self-signed tx sender)
+	PublicKey  string `json:"publicKey"`
+	PrivateKey string `json:"privateKey"`
 	Address    string `json:"address"`
 }
-
-type kemAgentRow struct {
-	Name          string `json:"name"`
-	DID           string `json:"did,omitempty"` // used (DID for Register/AddKey)
-	X25519Public  string `json:"x25519Public"`  // 32B (hex)
-	X25519Private string `json:"x25519Private,omitempty"`
-}
-
-type kemFile struct {
-	Agents []kemAgentRow `json:"agents"`
-}
-
 type DemoAgent struct {
 	Name     string `json:"name"`
 	DID      string `json:"did"`
@@ -85,31 +49,21 @@ type DemoAgent struct {
 	} `json:"metadata"`
 }
 
-/********** main **********/
-
 func main() {
-	// Flags (similar style to register_agents.go)
-	contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
-	rpcURL := flag.String("rpc", "", "RPC URL (env ETH_RPC_URL or default)")
-
-	signingPath := flag.String("signing-keys", "generated_agent_keys.json", "Signing summary JSON (array)")
-	kemPath := flag.String("kem-keys", "keys/kem/generated_kem_keys.json", "KEM JSON (object with agents[] OR top-level array)")
-
-	agentsFilter := flag.String("agents", "", "Comma-separated agent names to process (default: ALL)")
-
-	// Client config
-	confirmationBlocks := flag.Int("confirm", 0, "Blocks to wait for confirmation (default 0)")
-	maxRetries := flag.Int("retries", 24, "Max polling attempts while waiting for receipts")
-	gasPriceWei := flag.Uint64("gas-price-wei", 0, "Static gas price in wei (0 = node suggestion)")
-
+	contract := flag.String("contract", "", "AgentCardRegistry address")
+	rpcURL := flag.String("rpc", "", "RPC URL")
+	signingPath := flag.String("signing-keys", "generated_agent_keys.json", "Signing keys JSON")
+	kemPath := flag.String("kem-keys", "keys/kem/generated_kem_keys.json", "KEM keys JSON")
+	agentsFilter := flag.String("agents", "", "Comma-separated agent names")
+	waitSeconds := flag.Int("wait-seconds", 65, "Seconds between commit and reveal (>=60)")
+	tryActivate := flag.Bool("try-activate", true, "Try activation if allowed")
 	flag.Parse()
 
-	// Defaults from env if empty
 	if strings.TrimSpace(*contract) == "" {
 		if v := strings.TrimSpace(os.Getenv("SAGE_REGISTRY_V4_ADDRESS")); v != "" {
 			*contract = v
 		} else {
-			*contract = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+			*contract = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 		}
 	}
 	if strings.TrimSpace(*rpcURL) == "" {
@@ -120,27 +74,22 @@ func main() {
 		}
 	}
 
-	// Load inputs
 	signingRows, err := loadSigning(*signingPath)
 	if err != nil {
 		fatalf("load signing keys: %v", err)
 	}
-	kemRows, err := loadKEM(*kemPath)
+	kemRows, err := loadKEMRows(*kemPath)
 	if err != nil {
 		fatalf("load KEM keys: %v", err)
 	}
-
-	// Resolve agent filter
 	selected := parseAgentsFilter(*agentsFilter)
 	if len(selected) == 0 {
 		selected = parseAgentsFilter(os.Getenv("SAGE_AGENTS"))
 	}
-
-	// Build agent metas (fill metadata from env)
 	agents := buildAgentsFromSigning(signingRows, selected)
 
 	fmt.Println("======================================")
-	fmt.Println(" SAGE V4 Agent Registration (ECDSA + X25519 via Register/AddKey, KEM DID)")
+	fmt.Println(" SAGE AgentCard Registration (ECDSA + X25519)")
 	fmt.Println("======================================")
 	fmt.Printf(" RPC:      %s\n", *rpcURL)
 	fmt.Printf(" Contract: %s\n", *contract)
@@ -149,56 +98,65 @@ func main() {
 	if *agentsFilter != "" {
 		fmt.Printf(" Agents:   %s\n", *agentsFilter)
 	} else if os.Getenv("SAGE_AGENTS") != "" {
-		fmt.Printf(" Agents:   %s (from env SAGE_AGENTS)\n", os.Getenv("SAGE_AGENTS"))
+		fmt.Printf(" Agents:   %s (from env)\n", os.Getenv("SAGE_AGENTS"))
 	} else {
 		fmt.Println(" Agents:   ALL (from signing-keys)")
 	}
 	fmt.Println("======================================")
 
-	// View-only client for pre-check & verification
-	viewCfg := &did.RegistryConfig{
-		RPCEndpoint:     *rpcURL,
-		ContractAddress: *contract,
-		PrivateKey:      "",
-	}
-	viewClient, err := dideth.NewEthereumClientV4(viewCfg)
+	viewCfg := &did.RegistryConfig{RPCEndpoint: *rpcURL, ContractAddress: *contract}
+	viewClient, err := agentcard.NewAgentCardClient(viewCfg)
 	if err != nil {
-		fatalf("init view client: %v", err)
+		fatalf("init view client: %v")
 	}
 
-	// Register per agent (self-signed) or add X25519 to existing DID
+	// chainId & registry address for signing
+	cli, err := ethclient.Dial(*rpcURL)
+	if err != nil {
+		fatalf("rpc dial: %v")
+	}
+	defer cli.Close()
+	chainID, err := cli.NetworkID(context.Background())
+	if err != nil {
+		fatalf("network id: %v")
+	}
+	registryAddr := common.HexToAddress(*contract)
+
+	ctx := context.Background()
+
+	ownerCli, err := agentcard.NewAgentCardClient(&did.RegistryConfig{
+		RPCEndpoint:     *rpcURL,
+		ContractAddress: *contract,
+		PrivateKey:      "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // 컨트랙트 배포자/오너 키
+	})
+	if err == nil {
+		if err := ownerCli.SetActivationDelay(ctx, 0); err != nil {
+			fmt.Printf("SetActivationDelay(0) failed: %v\n", err)
+		} else {
+			fmt.Println("activationDelay set to 0s (for subsequent registrations)")
+		}
+	} else {
+		fmt.Printf("owner client init failed: %v\n", err)
+	}
+
+	// (옵션) 지금 체인의 activationDelay를 로깅
+	if d, err := viewClient.GetActivationDelay(ctx); err == nil {
+		fmt.Printf(" Current activationDelay = %s\n", d)
+	}
 	for _, a := range agents {
-		// 1) find signing row
 		sk := findSigning(signingRows, a.Name)
 		if sk == nil || strings.TrimSpace(sk.PrivateKey) == "" {
 			fmt.Printf(" - %s: missing signing privateKey -> skip\n", a.Name)
 			continue
 		}
-
-		// 2) normalize ECDSA pubkey (65B uncompressed)
-		if normHex(a.Metadata.PublicKey) != normHex(sk.PublicKey) {
-			fmt.Printf("   notice: metadata publicKey != keyfile publicKey for %s; replacing\n", a.Name)
-			a.Metadata.PublicKey = sk.PublicKey
-		}
-		pubBytes, err := ensureUncompressed(a.Metadata.PublicKey)
+		pubBytes, err := ensureUncompressed(sk.PublicKey)
 		if err != nil || len(pubBytes) != 65 || pubBytes[0] != 0x04 {
 			fmt.Printf("   Invalid ECDSA public key for %s: %v\n", a.Name, err)
 			continue
 		}
-
-		// 3) find KEM row (required) + DID from KEM JSON
 		kr := findKEM(kemRows, a.Name)
-		if kr == nil {
-			fmt.Printf(" - %s: missing KEM row -> skip\n", a.Name)
-			continue
-		}
-		if strings.TrimSpace(kr.X25519Public) == "" {
-			fmt.Printf(" - %s: missing x25519Public -> skip\n", a.Name)
-			continue
-		}
-		targetDID := strings.TrimSpace(kr.DID)
-		if targetDID == "" {
-			fmt.Printf(" - %s: KEM JSON has empty DID -> skip (set agents[].did)\n", a.Name)
+		if kr == nil || strings.TrimSpace(kr.X25519Public) == "" || strings.TrimSpace(kr.DID) == "" {
+			fmt.Printf(" - %s: missing KEM row or DID -> skip\n", a.Name)
 			continue
 		}
 		xpub, err := hexDecode32(kr.X25519Public)
@@ -207,98 +165,73 @@ func main() {
 			continue
 		}
 
-		// 4) agent private key (sender = agent EOA / owner)
 		agentPriv, err := gethcrypto.HexToECDSA(normHex(sk.PrivateKey))
 		if err != nil {
 			fmt.Printf("   Agent key parse failed for %s: %v\n", a.Name, err)
 			continue
 		}
+		ownerAddr := gethcrypto.PubkeyToAddress(agentPriv.PublicKey)
 
-		// 5) per-agent tx client
-		perAgentCfg := &did.RegistryConfig{
-			RPCEndpoint:        *rpcURL,
-			ContractAddress:    *contract,
-			PrivateKey:         normHex(sk.PrivateKey),
-			GasPrice:           *gasPriceWei,
-			MaxRetries:         *maxRetries,
-			ConfirmationBlocks: *confirmationBlocks,
+		// FIX: signatures that contract expects
+		ecdsaSig, err := signECDSAOwnership(agentPriv, chainID, registryAddr, ownerAddr)
+		if err != nil {
+			fmt.Printf("   sign ECDSA failed: %v\n", err)
+			continue
 		}
-		client, err := dideth.NewEthereumClientV4(perAgentCfg)
+		xSig, err := signX25519Ownership(agentPriv, xpub, chainID, registryAddr, ownerAddr)
+		if err != nil {
+			fmt.Printf("   sign X25519 failed: %v\n", err)
+			continue
+		}
+
+		perAgentCfg := &did.RegistryConfig{RPCEndpoint: *rpcURL, ContractAddress: *contract, PrivateKey: normHex(sk.PrivateKey)}
+		client, err := agentcard.NewAgentCardClient(perAgentCfg)
 		if err != nil {
 			fmt.Printf("   init client failed for %s: %v\n", a.Name, err)
 			continue
 		}
 
-		// 6) pre-check: DID already registered?
-		if _, err := viewClient.Resolve(context.Background(), did.AgentDID(targetDID)); err == nil {
-			// Already registered → addKey(X25519)
-			agentID, err := computeAgentID(targetDID, pubBytes)
-			if err != nil {
-				fmt.Printf("   compute agentId failed for %s: %v\n", a.Name, err)
-				continue
-			}
-			if err := addKEMKey(
-				context.Background(),
-				*rpcURL,
-				*contract,
-				normHex(sk.PrivateKey),
-				uint64(*gasPriceWei),
-				agentID,
-				xpub,
-			); err != nil {
-				fmt.Printf("   addKey(X25519) failed for %s: %v\n", a.Name, err)
-				continue
-			}
-			fmt.Printf(" - %s: DID found; performed addKey(X25519) ✅\n", a.Name)
-			// Small delay for UI/log readability
-			time.Sleep(900 * time.Millisecond)
-			continue
-		}
-
-		// 7) New registration: self-signed signature (ECDSA first key)
-		sig, err := signSelfRegistrationMessage(agentPriv, targetDID, pubBytes)
+		// Build params with BOTH keys + BOTH signatures
+		params, err := buildRegParamsECDSAPlusKEM(a, strings.TrimSpace(kr.DID), pubBytes, ecdsaSig, xpub, xSig)
 		if err != nil {
-			fmt.Printf("   Failed to sign message for %s: %v\n", a.Name, err)
+			fmt.Printf("   Build params failed for %s: %v\n", a.Name, err)
 			continue
 		}
 
-		// 8) Build Register request: Keys[0]=ECDSA(with signature), Keys[1]=X25519(no signature)
-		req := &did.RegistrationRequest{
-			DID:         did.AgentDID(targetDID),
-			Name:        a.Metadata.Name,
-			Description: a.Metadata.Description,
-			Endpoint:    a.Metadata.Endpoint,
-			Capabilities: func(m map[string]interface{}) map[string]interface{} {
-				if m == nil {
-					return map[string]interface{}{}
-				}
-				return m
-			}(a.Metadata.Capabilities),
-			Keys: []did.AgentKey{
-				{
-					Type:      did.KeyTypeECDSA,
-					KeyData:   pubBytes,
-					Signature: sig, // signed by agentPriv (msg.sender = agent)
-				},
-				{
-					Type:    did.KeyTypeX25519,
-					KeyData: xpub, // no signature needed
-				},
-			},
+		if _, err := viewClient.GetAgentByDID(ctx, strings.TrimSpace(kr.DID)); err == nil {
+			fmt.Printf(" - %s: DID already registered; skip\n", a.Name)
+			continue
 		}
 
-		// 9) Register
-		fmt.Printf("\n Registering %s as DID=%s (ECDSA+X25519)...\n", a.Name, targetDID)
-		res, err := client.Register(context.Background(), req)
+		fmt.Printf("\n Register (commit→reveal) %s as DID=%s …\n", a.Name, strings.TrimSpace(kr.DID))
+		status, err := client.CommitRegistration(ctx, params)
 		if err != nil {
-			fmt.Printf("   Failed: %v\n", err)
+			fmt.Printf("   Commit failed: %v\n", err)
 			continue
 		}
-		fmt.Printf("   TX: %s | Block: %d | GasUsed: %d\n", res.TransactionHash, res.BlockNumber, res.GasUsed)
-		time.Sleep(1200 * time.Millisecond)
+		fmt.Printf("   Commit hash: 0x%x — waiting %ds\n", status.CommitHash, *waitSeconds)
+		time.Sleep(time.Duration(*waitSeconds) * time.Second)
+
+		status, err = client.RegisterAgent(ctx, status)
+		if err != nil {
+			fmt.Printf("   Register failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("   Registered. AgentID: 0x%x — activate at %s\n", status.AgentID, status.CanActivateAt.Format(time.RFC3339))
+		if wait := time.Until(status.CanActivateAt); wait > 0 {
+			time.Sleep(wait + 800*time.Millisecond)
+		}
+		if *tryActivate {
+			fmt.Println("   Activating…")
+			if err := client.ActivateAgent(ctx, status); err != nil {
+				fmt.Printf("   Activate failed: %v\n", err)
+			} else {
+				fmt.Println("   Activated ✅")
+			}
+		}
+
 	}
 
-	// Verify
 	fmt.Println("\nVerification:")
 	for _, a := range agents {
 		kr := findKEM(kemRows, a.Name)
@@ -306,15 +239,19 @@ func main() {
 			fmt.Printf(" - %s: (no KEM DID) skip verify\n", a.Name)
 			continue
 		}
-		if _, err := viewClient.Resolve(context.Background(), did.AgentDID(strings.TrimSpace(kr.DID))); err == nil {
-			fmt.Printf(" - %s: Registered (DID=%s)\n", a.Name, strings.TrimSpace(kr.DID))
+		if ag, err := viewClient.GetAgentByDID(context.Background(), strings.TrimSpace(kr.DID)); err == nil {
+			state := "Registered"
+			if ag.IsActive {
+				state = "Active"
+			}
+			fmt.Printf(" - %s: %s (owner=%s, DID=%s)\n", a.Name, state, ag.Owner, ag.DID)
 		} else {
 			fmt.Printf(" - %s: Not found (%v)\n", a.Name, err)
 		}
 	}
 }
 
-/********** helpers (mostly from register_agents.go) **********/
+/* === io & small helpers === */
 
 func loadSigning(path string) ([]signingRow, error) {
 	b, err := ioutil.ReadFile(path)
@@ -328,22 +265,48 @@ func loadSigning(path string) ([]signingRow, error) {
 	return rows, nil
 }
 
-func loadKEM(path string) ([]kemAgentRow, error) {
-	b, err := ioutil.ReadFile(path)
+// === KEM JSON loader (top-level array OR {"agents":[]}) ===
+// 같은 파일 안에 두기 때문에 go run -tags=reg_kem tools/registration/register_kem_agents.go 만으로 동작
+
+type KemRow struct {
+	Name          string `json:"name"`
+	DID           string `json:"did,omitempty"`
+	Address       string `json:"address,omitempty"`
+	X25519Public  string `json:"x25519Public"`            // ← JSON과 동일
+	X25519Private string `json:"x25519Private,omitempty"` // ← JSON과 동일
+}
+type kemWrapper struct {
+	Agents []KemRow `json:"agents"`
+}
+
+func readAll(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// Primary shape: {"agents":[...]}
-	var k kemFile
-	if json.Unmarshal(b, &k) == nil && len(k.Agents) > 0 {
-		return k.Agents, nil
+	if len(b) >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF {
+		b = b[3:]
 	}
-	// Fallback: top-level array
-	var arr []kemAgentRow
-	if json.Unmarshal(b, &arr) == nil && len(arr) > 0 {
+	return b, nil
+}
+
+func loadKEMRows(path string) ([]KemRow, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	b, err := readAll(path)
+	if err != nil {
+		return nil, err
+	}
+	var arr []KemRow
+	if err := json.Unmarshal(b, &arr); err == nil {
 		return arr, nil
 	}
-	return nil, fmt.Errorf("unrecognized KEM json (need object with agents[])")
+	var w kemWrapper
+	if err := json.Unmarshal(b, &w); err == nil {
+		return w.Agents, nil
+	}
+	return nil, fmt.Errorf("kem json not recognized: %s (need {\"agents\":[]} or top-level array)", path)
 }
 
 func parseAgentsFilter(csv string) []string {
@@ -354,24 +317,21 @@ func parseAgentsFilter(csv string) []string {
 	parts := strings.Split(csv, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		q := strings.TrimSpace(p)
-		if q != "" {
+		if q := strings.TrimSpace(p); q != "" {
 			out = append(out, q)
 		}
 	}
 	return out
 }
-
 func findSigning(all []signingRow, name string) *signingRow {
 	for i := range all {
-		if all[i].Name == name { // same as register_agents.go (case-sensitive)
+		if all[i].Name == name {
 			return &all[i]
 		}
 	}
 	return nil
 }
-
-func findKEM(all []kemAgentRow, name string) *kemAgentRow {
+func findKEM(all []KemRow, name string) *KemRow {
 	for i := range all {
 		if all[i].Name == name {
 			return &all[i]
@@ -381,17 +341,14 @@ func findKEM(all []kemAgentRow, name string) *kemAgentRow {
 }
 
 func normHex(s string) string { return strings.TrimPrefix(strings.TrimSpace(s), "0x") }
-
 func ensureUncompressed(pubHex string) ([]byte, error) {
 	raw, err := hex.DecodeString(normHex(pubHex))
 	if err != nil {
 		return nil, err
 	}
-	// Uncompressed (0x04 + X + Y)
 	if len(raw) == 65 && raw[0] == 0x04 {
 		return raw, nil
 	}
-	// Compressed → decompress
 	if len(raw) == 33 && (raw[0] == 0x02 || raw[0] == 0x03) {
 		pk, err := gethcrypto.DecompressPubkey(raw)
 		if err != nil {
@@ -399,13 +356,11 @@ func ensureUncompressed(pubHex string) ([]byte, error) {
 		}
 		return gethcrypto.FromECDSAPub(pk), nil
 	}
-	// Raw 64B (X||Y) → add prefix 0x04
 	if len(raw) == 64 {
 		return append([]byte{0x04}, raw...), nil
 	}
 	return nil, fmt.Errorf("unexpected public key length %d", len(raw))
 }
-
 func hexDecode32(h string) ([]byte, error) {
 	b, err := hex.DecodeString(normHex(h))
 	if err != nil {
@@ -416,130 +371,39 @@ func hexDecode32(h string) ([]byte, error) {
 	}
 	return b, nil
 }
+func shortPath(p string) string         { return filepath.Clean(p) }
+func fatalf(f string, a ...interface{}) { fmt.Printf("Error: "+f+"\n", a...); os.Exit(1) }
 
-// signSelfRegistrationMessage builds the exact Solidity-encoded message the contract verifies
-// using the AGENT'S own ECDSA key, and returns an Ethereum-compatible signature (v in {27,28}).
-func signSelfRegistrationMessage(agentPriv *ecdsa.PrivateKey, didStr string, firstKey []byte) ([]byte, error) {
-	// agentId = keccak256(abi.encode(did, firstKey))
-	stringType, _ := abi.NewType("string", "", nil)
-	bytesType, _ := abi.NewType("bytes", "", nil)
-	args := abi.Arguments{
-		{Type: stringType},
-		{Type: bytesType},
+func buildAgentsFromSigning(keys []signingRow, filter []string) []DemoAgent {
+	allowAll := len(filter) == 0
+	allowed := make(map[string]struct{})
+	for _, n := range filter {
+		allowed[n] = struct{}{}
 	}
-	agentIdPacked, err := args.Pack(didStr, firstKey)
-	if err != nil {
-		return nil, err
+	var out []DemoAgent
+	for _, k := range keys {
+		if !allowAll {
+			if _, ok := allowed[k.Name]; !ok {
+				continue
+			}
+		}
+		var a DemoAgent
+		a.Name = k.Name
+		a.DID = k.DID
+		a.Metadata.Name = k.Name
+		a.Metadata.Description = os.Getenv("SAGE_AGENT_" + toEnvKey(k.Name) + "_DESC")
+		if a.Metadata.Description == "" {
+			a.Metadata.Description = "SAGE Agent " + k.Name
+		}
+		a.Metadata.Version = "0.1.0"
+		a.Metadata.Type = ""
+		a.Metadata.Endpoint = ""
+		a.Metadata.PublicKey = k.PublicKey
+		a.Metadata.Capabilities = map[string]interface{}{}
+		out = append(out, a)
 	}
-	agentId := gethcrypto.Keccak256Hash(agentIdPacked)
-
-	// msg.sender = agent address (tx sender = agent EOA)
-	sender := gethcrypto.PubkeyToAddress(agentPriv.PublicKey)
-
-	// messageHash = keccak256(abi.encode(agentId, keyBytes, msg.sender, nonce=0))
-	bytes32Type, _ := abi.NewType("bytes32", "", nil)
-	addressType, _ := abi.NewType("address", "", nil)
-	uint256Type, _ := abi.NewType("uint256", "", nil)
-
-	msgArgs := abi.Arguments{
-		{Type: bytes32Type},
-		{Type: bytesType},
-		{Type: addressType},
-		{Type: uint256Type},
-	}
-	msgPacked, err := msgArgs.Pack(agentId, firstKey, sender, big.NewInt(0))
-	if err != nil {
-		return nil, err
-	}
-	msgHash := gethcrypto.Keccak256Hash(msgPacked)
-
-	// Ethereum personal sign prefix
-	prefix := []byte("\x19Ethereum Signed Message:\n32")
-	ethSigned := gethcrypto.Keccak256Hash(append(prefix, msgHash.Bytes()...))
-
-	sig, err := gethcrypto.Sign(ethSigned.Bytes(), agentPriv)
-	if err != nil {
-		return nil, err
-	}
-	if sig[64] < 27 {
-		sig[64] += 27
-	}
-	return sig, nil
+	return out
 }
-
-/********** new helpers for addKey path **********/
-
-// computeAgentID replicates _generateAgentId(did, firstKey) = keccak256(abi.encode(did, firstKey))
-func computeAgentID(didStr string, firstKey []byte) ([32]byte, error) {
-	stringType, _ := abi.NewType("string", "", nil)
-	bytesType, _ := abi.NewType("bytes", "", nil)
-	args := abi.Arguments{
-		{Type: stringType},
-		{Type: bytesType},
-	}
-	packed, err := args.Pack(didStr, firstKey)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	h := gethcrypto.Keccak256Hash(packed)
-	return [32]byte(h), nil
-}
-
-// addKEMKey calls registry.addKey(agentId, X25519, xpub, emptySig)
-// Usage requirement: msg.sender must be the owner of agentId (the EOA used at registration)
-func addKEMKey(ctx context.Context, rpcURL, contractAddr, privHex string, gasPriceWei uint64, agentID [32]byte, x25519Pub []byte) error {
-	if len(x25519Pub) != 32 {
-		return fmt.Errorf("x25519 pub must be 32 bytes")
-	}
-
-	// Prepare client & transactor
-	cli, err := ethclient.DialContext(ctx, rpcURL)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-	defer cli.Close()
-
-	chainID, err := cli.NetworkID(ctx)
-	if err != nil {
-		return fmt.Errorf("network id: %w", err)
-	}
-
-	priv, err := gethcrypto.HexToECDSA(strings.TrimPrefix(privHex, "0x"))
-	if err != nil {
-		return fmt.Errorf("priv parse: %w", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(priv, chainID)
-	if err != nil {
-		return fmt.Errorf("transactor: %w", err)
-	}
-	if gasPriceWei > 0 {
-		auth.GasPrice = new(big.Int).SetUint64(gasPriceWei)
-	}
-
-	// Minimal ABI for addKey(bytes32,uint8,bytes,bytes)
-	const registryABI = `[{"inputs":[{"internalType":"bytes32","name":"agentId","type":"bytes32"},{"internalType":"uint8","name":"keyType","type":"uint8"},{"internalType":"bytes","name":"keyData","type":"bytes"},{"internalType":"bytes","name":"signature","type":"bytes"}],"name":"addKey","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"nonpayable","type":"function"}]`
-
-	parsed, err := abi.JSON(strings.NewReader(registryABI))
-	if err != nil {
-		return fmt.Errorf("parse abi: %w", err)
-	}
-	addr := common.HexToAddress(contractAddr)
-	contract := bind.NewBoundContract(addr, parsed, cli, cli, cli)
-
-	// enum KeyType.X25519 == 2 (assume contract and SDK agree). If using SDK types, cast accordingly.
-	keyType := uint8(did.KeyTypeX25519) // usually 2
-
-	// signature must be empty bytes
-	tx, err := contract.Transact(auth, "addKey", agentID, keyType, x25519Pub, []byte{})
-	if err != nil {
-		return fmt.Errorf("addKey tx: %w", err)
-	}
-	fmt.Printf("   addKey(X25519) tx: %s\n", tx.Hash().Hex())
-	return nil
-}
-
-/********** env/metadata helpers (same semantics as register_agents.go) **********/
-
 func toEnvKey(name string) string {
 	up := strings.ToUpper(name)
 	b := make([]rune, 0, len(up))
@@ -553,62 +417,101 @@ func toEnvKey(name string) string {
 	return string(b)
 }
 
-func getEnvPerAgent(name, field, def string) string {
-	key := "SAGE_AGENT_" + toEnvKey(name) + "_" + field
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		return v
-	}
-	return def
+/* ==== params & signatures ==== */
+
+func buildRegParamsECDSAPlusKEM(a DemoAgent, didStr string, ecdsaPub, ecdsaSig, x25519Pub, x25519Sig []byte) (*did.RegistrationParams, error) {
+	capsJSON := "{}"
+	keys := [][]byte{ecdsaPub, x25519Pub}
+	keyTypes := []did.KeyType{did.KeyTypeECDSA, did.KeyTypeX25519}
+	sigs := [][]byte{ecdsaSig, x25519Sig}
+	return &did.RegistrationParams{
+		DID:          didStr,
+		Name:         a.Metadata.Name,
+		Description:  a.Metadata.Description,
+		Endpoint:     a.Metadata.Endpoint,
+		Capabilities: capsJSON,
+		Keys:         keys,
+		KeyTypes:     keyTypes,
+		Signatures:   sigs,
+	}, nil
 }
 
-func parseCapabilitiesEnv(name string) map[string]interface{} {
-	key := "SAGE_AGENT_" + toEnvKey(name) + "_CAPABILITIES"
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		return map[string]interface{}{}
-	}
-	dec := json.NewDecoder(strings.NewReader(v))
-	dec.UseNumber()
-	var m map[string]interface{}
-	if err := dec.Decode(&m); err != nil {
-		fmt.Printf("   warning: CAPABILITIES for %s is not valid JSON, ignoring\n", name)
-		return map[string]interface{}{}
-	}
-	return m
+func pad32BigEndian(n *big.Int) []byte {
+	var out [32]byte
+	b := n.Bytes()
+	copy(out[32-len(b):], b)
+	return out[:]
 }
 
-func buildAgentsFromSigning(keys []signingRow, filter []string) []DemoAgent {
-	allowAll := len(filter) == 0
-	allowed := make(map[string]struct{})
-	for _, n := range filter {
-		allowed[n] = struct{}{}
+func signECDSAOwnership(priv *ecdsa.PrivateKey, chainID *big.Int, registry common.Address, owner common.Address) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("SAGE Agent Registration:")
+	buf.Write(pad32BigEndian(chainID))
+	buf.Write(registry.Bytes())
+	buf.Write(owner.Bytes())
+	msgHash := gethcrypto.Keccak256Hash(buf.Bytes())
+	prefix := []byte("\x19Ethereum Signed Message:\n32")
+	ethSigned := gethcrypto.Keccak256Hash(append(prefix, msgHash.Bytes()...))
+	sig, err := gethcrypto.Sign(ethSigned.Bytes(), priv)
+	if err != nil {
+		return nil, err
 	}
-
-	var out []DemoAgent
-	for _, k := range keys {
-		if !allowAll {
-			if _, ok := allowed[k.Name]; !ok {
-				continue
-			}
-		}
-		var a DemoAgent
-		a.Name = k.Name
-		a.DID = k.DID // populate metadata (actual Register/add uses DID from KEM JSON)
-		a.Metadata.Name = k.Name
-		a.Metadata.Description = getEnvPerAgent(k.Name, "DESC", "SAGE Agent "+k.Name)
-		a.Metadata.Version = getEnvPerAgent(k.Name, "VERSION", "0.1.0")
-		a.Metadata.Type = getEnvPerAgent(k.Name, "TYPE", "")
-		a.Metadata.Endpoint = getEnvPerAgent(k.Name, "ENDPOINT", "")
-		a.Metadata.PublicKey = k.PublicKey
-		a.Metadata.Capabilities = parseCapabilitiesEnv(k.Name)
-		out = append(out, a)
+	if sig[64] < 27 {
+		sig[64] += 27
 	}
-	return out
+	return sig, nil
 }
 
-func shortPath(p string) string { return filepath.Clean(p) }
+func signX25519Ownership(priv *ecdsa.PrivateKey, x25519Pub32 []byte, chainID *big.Int, registry common.Address, owner common.Address) ([]byte, error) {
+	if len(x25519Pub32) != 32 {
+		return nil, fmt.Errorf("x25519 pub must be 32 bytes")
+	}
+	var buf bytes.Buffer
+	buf.WriteString("SAGE X25519 Ownership:")
+	buf.Write(x25519Pub32)
+	buf.Write(pad32BigEndian(chainID))
+	buf.Write(registry.Bytes())
+	buf.Write(owner.Bytes())
+	msgHash := gethcrypto.Keccak256Hash(buf.Bytes())
+	prefix := []byte("\x19Ethereum Signed Message:\n32")
+	ethSigned := gethcrypto.Keccak256Hash(append(prefix, msgHash.Bytes()...))
+	sig, err := gethcrypto.Sign(ethSigned.Bytes(), priv)
+	if err != nil {
+		return nil, err
+	}
+	if sig[64] < 27 {
+		sig[64] += 27
+	}
+	return sig, nil
+}
 
-func fatalf(f string, a ...interface{}) {
-	fmt.Printf("Error: "+f+"\n", a...)
-	os.Exit(1)
+func devWarpTo(ctx context.Context, rpcURL string, target time.Time) error {
+	c, err := rpc.DialContext(ctx, rpcURL)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+
+	// 1) 시각 고정형 시도 (하드햇/아나빌 공통)
+	ts := target.Unix()
+	var dummy any
+	if err := c.CallContext(ctx, &dummy, "evm_setNextBlockTimestamp", ts); err == nil {
+		_ = c.CallContext(ctx, &dummy, "evm_mine")
+		return nil
+	}
+	if err := c.CallContext(ctx, &dummy, "anvil_setNextBlockTimestamp", ts); err == nil {
+		_ = c.CallContext(ctx, &dummy, "anvil_mine", 1)
+		return nil
+	}
+
+	// 2) 증가형(하드햇/가나슈)
+	delta := time.Until(target).Seconds()
+	if delta < 0 {
+		delta = 0
+	}
+	if err := c.CallContext(ctx, &dummy, "evm_increaseTime", int64(delta)+2); err == nil {
+		_ = c.CallContext(ctx, &dummy, "evm_mine")
+		return nil
+	}
+	return fmt.Errorf("dev time-warp RPC not supported on this node")
 }

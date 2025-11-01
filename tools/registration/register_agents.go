@@ -2,20 +2,10 @@
 // +build reg_agent
 
 // tools/registration/register_agents.go
-// SPDX-License-Identifier: MIT
-//
-// This CLI registers agents to a deployed SageRegistryV4 contract using the
-// Ethereum V4 client. Flow:
-// 1) (optional) Fund agent EOAs with --funding-key
-// 2) For each agent:
-//    - Build the V4 message (abi.encode(...))
-//    - Sign with the agent's own ECDSA private key (personal_sign style, v in {27,28})
-//    - Create a per-agent client (tx sender = that agent EOA)
-//    - Call Register (self-signed)
-
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
@@ -31,25 +21,20 @@ import (
 	"strings"
 	"time"
 
-	// go-ethereum
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	// SAGE packages
 	"github.com/sage-x-project/sage/pkg/agent/did"
-	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	agentcard "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 )
-
-// ---------- Input formats (compatible with existing keys JSON) ----------
 
 type AgentKeyData struct {
 	Name       string `json:"name"`
 	DID        string `json:"did"`
-	PublicKey  string `json:"publicKey"`  // secp256k1 hex (65B 0x04... recommended; 33B compressed allowed)
-	PrivateKey string `json:"privateKey"` // hex (agent EOA; REQUIRED for self-signed tx)
+	PublicKey  string `json:"publicKey"`
+	PrivateKey string `json:"privateKey"`
 	Address    string `json:"address"`
 }
 
@@ -68,33 +53,26 @@ type DemoAgent struct {
 }
 
 func main() {
-	// Flags
-	contract := flag.String("contract", "", "SageRegistryV4 (proxy) address (env SAGE_REGISTRY_V4_ADDRESS or default)")
-	rpcURL := flag.String("rpc", "", "RPC URL (env ETH_RPC_URL or default)")
-
-	// Keys file
-	keysFile := flag.String("keys", "generated_agent_keys.json", "Path to generated agent keys file")
-
-	// Agent filter
-	agentsFlag := flag.String("agents", "", "Comma-separated agent names to register (overrides env SAGE_AGENTS). Default: all in keys file")
-
-	// Funding
-	fundingKeyHex := flag.String("funding-key", "", "Funder private key (hex, with or without 0x) — optional")
+	contract := flag.String("contract", "", "AgentCardRegistry address")
+	rpcURL := flag.String("rpc", "", "RPC URL")
+	keysFile := flag.String("keys", "generated_agent_keys.json", "Agent keys JSON")
+	agentsFlag := flag.String("agents", "", "Comma-separated agent names to register")
+	fundingKeyHex := flag.String("funding-key", "", "Funder private key (optional)")
 	fundingAmountWei := flag.String("funding-amount-wei", "10000000000000000", "Wei to fund per agent (default 0.01 ETH)")
+	tryActivate := flag.Bool("try-activate", false, "Try activation if allowed")
+	waitSeconds := flag.Int("wait-seconds", 65, "Seconds between commit and reveal (>=60)")
 
-	// Client config
-	confirmationBlocks := flag.Int("confirm", 0, "Blocks to wait for confirmation (default 0)")
-	maxRetries := flag.Int("retries", 24, "Max polling attempts while waiting for receipts")
-	gasPriceWei := flag.Uint64("gas-price-wei", 0, "Static gas price in wei (0 = use node suggestion)")
-
+	confirmationBlocks := flag.Int("confirm", 0, "")
+	maxRetries := flag.Int("retries", 24, "")
+	gasPriceWei := flag.Uint64("gas-price-wei", 0, "")
 	flag.Parse()
+	_, _, _ = confirmationBlocks, maxRetries, gasPriceWei
 
-	// Fill with env/defaults if empty
 	if strings.TrimSpace(*contract) == "" {
 		if v := strings.TrimSpace(os.Getenv("SAGE_REGISTRY_V4_ADDRESS")); v != "" {
 			*contract = v
 		} else {
-			*contract = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+			*contract = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 		}
 	}
 	if strings.TrimSpace(*rpcURL) == "" {
@@ -105,27 +83,23 @@ func main() {
 		}
 	}
 
-	// Load keys JSON
 	keys, err := loadKeys(*keysFile)
 	if err != nil {
 		log.Fatalf("load keys: %v", err)
 	}
-
-	// Resolve agent filter
 	selected := parseAgentsFilter(*agentsFlag)
 	if len(selected) == 0 {
 		selected = parseAgentsFilter(os.Getenv("SAGE_AGENTS"))
 	}
 
 	fmt.Println("======================================")
-	fmt.Println(" SAGE V4 Agent Registration (self-signed)")
+	fmt.Println(" SAGE AgentCard Registration (ECDSA)")
 	fmt.Println("======================================")
 	fmt.Printf(" RPC:      %s\n", *rpcURL)
 	fmt.Printf(" Contract: %s\n", *contract)
 	fmt.Printf(" Keys:     %s\n", filepath.Base(*keysFile))
 	fmt.Println("======================================")
 
-	// 1) (optional) Fund agent EOAs so they can pay gas
 	if fk := strings.TrimSpace(*fundingKeyHex); fk != "" {
 		if err := fundAgentsIfNeeded(*rpcURL, fk, keys, *fundingAmountWei); err != nil {
 			log.Fatalf("funding error: %v", err)
@@ -135,123 +109,125 @@ func main() {
 		fmt.Println("No funding key provided; agents must already have gas.")
 	}
 
-	// 2) Build agents from keys (+ env overrides)
 	agents := buildAgentsFromKeys(keys, selected)
 
-	// 3) View-only client for verification (no private key needed)
 	viewCfg := &did.RegistryConfig{
 		RPCEndpoint:     *rpcURL,
 		ContractAddress: *contract,
 		PrivateKey:      "",
 	}
-	viewClient, err := dideth.NewEthereumClientV4(viewCfg)
+	viewClient, err := agentcard.NewAgentCardClient(viewCfg)
 	if err != nil {
 		log.Fatalf("init view client: %v", err)
 	}
 
-	// 4) Register each agent using a per-agent client/private key
+	// chainId & registry address for signing
+	cli, err := ethclient.Dial(*rpcURL)
+	if err != nil {
+		log.Fatalf("rpc dial: %v", err)
+	}
+	defer cli.Close()
+	chainID, err := cli.NetworkID(context.Background())
+	if err != nil {
+		log.Fatalf("network id: %v", err)
+	}
+	registryAddr := common.HexToAddress(*contract)
+
 	for _, a := range agents {
 		k := findKey(keys, a.Name)
-		if k == nil {
-			fmt.Printf(" - %s: no matching key, skip\n", a.Name)
-			continue
-		}
-		if strings.TrimSpace(k.PrivateKey) == "" {
-			fmt.Printf(" - %s: missing privateKey in keys file, skip (required for self-signed)\n", a.Name)
+		if k == nil || strings.TrimSpace(k.PrivateKey) == "" {
+			fmt.Printf(" - %s: missing key -> skip\n", a.Name)
 			continue
 		}
 
-		// Normalize metadata public key
-		if normHex(a.Metadata.PublicKey) != normHex(k.PublicKey) {
-			fmt.Printf("   notice: metadata publicKey != keyfile publicKey for %s; replacing\n", a.Name)
-			a.Metadata.PublicKey = k.PublicKey
-		}
-
-		// Uncompressed 65B pubkey
-		pubBytes, err := ensureUncompressed(a.Metadata.PublicKey)
-		if err != nil {
-			fmt.Printf("   Failed to parse public key for %s: %v\n", a.Name, err)
-			continue
-		}
-		if len(pubBytes) != 65 || pubBytes[0] != 0x04 {
-			fmt.Printf("   Invalid public key for %s: must be 65B uncompressed\n", a.Name)
+		pubBytes, err := ensureUncompressed(k.PublicKey)
+		if err != nil || len(pubBytes) != 65 || pubBytes[0] != 0x04 {
+			fmt.Printf("   Invalid public key for %s: %v\n", a.Name, err)
 			continue
 		}
 
-		// Agent private key
 		agentPriv, err := gethcrypto.HexToECDSA(normHex(k.PrivateKey))
 		if err != nil {
 			fmt.Printf("   Agent key parse failed for %s: %v\n", a.Name, err)
 			continue
 		}
-		agentAddr := gethcrypto.PubkeyToAddress(agentPriv.PublicKey)
+		ownerAddr := gethcrypto.PubkeyToAddress(agentPriv.PublicKey)
 
-		// Build self-signed signature per contract logic
-		sig, err := signSelfRegistrationMessage(agentPriv, a.DID, pubBytes)
+		// FIX: sign exactly what the contract expects
+		sig, err := signECDSAOwnership(agentPriv, chainID, registryAddr, ownerAddr)
 		if err != nil {
-			fmt.Printf("   Failed to sign message for %s: %v\n", a.Name, err)
+			fmt.Printf("   sign failed for %s: %v\n", a.Name, err)
 			continue
 		}
 
-		// Per-agent tx client (sender = agent EOA)
-		perAgentCfg := &did.RegistryConfig{
-			RPCEndpoint:        *rpcURL,
-			ContractAddress:    *contract,
-			PrivateKey:         normHex(k.PrivateKey),
-			GasPrice:           *gasPriceWei,
-			MaxRetries:         *maxRetries,
-			ConfirmationBlocks: *confirmationBlocks,
+		params, err := buildRegParamsECDSA(a, pubBytes, sig)
+		if err != nil {
+			fmt.Printf("   Build params failed for %s: %v\n", a.Name, err)
+			continue
 		}
-		client, err := dideth.NewEthereumClientV4(perAgentCfg)
+
+		perAgentCfg := &did.RegistryConfig{
+			RPCEndpoint:     *rpcURL,
+			ContractAddress: *contract,
+			PrivateKey:      normHex(k.PrivateKey),
+		}
+		client, err := agentcard.NewAgentCardClient(perAgentCfg)
 		if err != nil {
 			fmt.Printf("   init client failed for %s: %v\n", a.Name, err)
 			continue
 		}
 
-		// Build request with pre-signed ECDSA key
-		req := &did.RegistrationRequest{
-			DID:         did.AgentDID(a.DID),
-			Name:        a.Metadata.Name,
-			Description: a.Metadata.Description,
-			Endpoint:    a.Metadata.Endpoint,
-			Capabilities: func(m map[string]interface{}) map[string]interface{} {
-				if m == nil {
-					return map[string]interface{}{}
-				}
-				return m
-			}(a.Metadata.Capabilities),
-			Keys: []did.AgentKey{
-				{
-					Type:      did.KeyTypeECDSA,
-					KeyData:   pubBytes,
-					Signature: sig, // signed by agentPriv
-				},
-			},
-		}
+		ctx := context.Background()
 
-		fmt.Printf("\n Registering %s (agent=%s)...\n", a.Name, agentAddr.Hex())
-		res, err := client.Register(context.Background(), req)
-		if err != nil {
-			fmt.Printf("   Failed: %v\n", err)
+		if _, err := viewClient.GetAgentByDID(ctx, a.DID); err == nil {
+			fmt.Printf(" - %s: already registered (DID=%s)\n", a.Name, a.DID)
 			continue
 		}
-		fmt.Printf("   TX: %s | Block: %d | GasUsed: %d\n", res.TransactionHash, res.BlockNumber, res.GasUsed)
-		time.Sleep(1200 * time.Millisecond)
+
+		fmt.Printf("\n Committing %s (DID=%s)…\n", a.Name, a.DID)
+		status, err := client.CommitRegistration(ctx, params)
+		if err != nil {
+			fmt.Printf("   Commit failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("   Commit hash: 0x%x — waiting %ds\n", status.CommitHash, *waitSeconds)
+		time.Sleep(time.Duration(*waitSeconds) * time.Second)
+
+		fmt.Println("   Revealing…")
+		status, err = client.RegisterAgent(ctx, status)
+		if err != nil {
+			fmt.Printf("   Register failed: %v\n", err)
+			continue
+		}
+		fmt.Printf("   Registered. AgentID: 0x%x\n", status.AgentID)
+		fmt.Printf("   Can activate at: %s\n", status.CanActivateAt.Format(time.RFC3339))
+
+		if *tryActivate && time.Now().After(status.CanActivateAt) {
+			fmt.Println("   Activating…")
+			if err := client.ActivateAgent(ctx, status); err != nil {
+				fmt.Printf("   Activate failed: %v\n", err)
+			} else {
+				fmt.Println("   Activated ✅")
+			}
+		}
+		time.Sleep(800 * time.Millisecond)
 	}
 
-	// 5) Verify
 	fmt.Println("\nVerification:")
 	for _, a := range agents {
-		_, err := viewClient.Resolve(context.Background(), did.AgentDID(a.DID))
-		if err == nil {
-			fmt.Printf(" - %s: Registered\n", a.Name)
+		if ag, err := viewClient.GetAgentByDID(context.Background(), a.DID); err == nil {
+			state := "Registered"
+			if ag.IsActive {
+				state = "Active"
+			}
+			fmt.Printf(" - %s: %s (owner=%s)\n", a.Name, state, ag.Owner)
 		} else {
 			fmt.Printf(" - %s: Not found (%v)\n", a.Name, err)
 		}
 	}
 }
 
-// ---------- Helpers (env, keys, crypto) ----------
+/* === helpers === */
 
 func loadKeys(p string) ([]AgentKeyData, error) {
 	b, err := ioutil.ReadFile(p)
@@ -281,11 +257,9 @@ func ensureUncompressed(pubHex string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Uncompressed (0x04 + X + Y)
 	if len(raw) == 65 && raw[0] == 0x04 {
 		return raw, nil
 	}
-	// Compressed → decompress
 	if len(raw) == 33 && (raw[0] == 0x02 || raw[0] == 0x03) {
 		pk, err := gethcrypto.DecompressPubkey(raw)
 		if err != nil {
@@ -293,7 +267,6 @@ func ensureUncompressed(pubHex string) ([]byte, error) {
 		}
 		return gethcrypto.FromECDSAPub(pk), nil
 	}
-	// Raw 64B (X||Y) → add prefix 0x04
 	if len(raw) == 64 {
 		return append([]byte{0x04}, raw...), nil
 	}
@@ -308,8 +281,7 @@ func parseAgentsFilter(csv string) []string {
 	parts := strings.Split(csv, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		q := strings.TrimSpace(p)
-		if q != "" {
+		if q := strings.TrimSpace(p); q != "" {
 			out = append(out, q)
 		}
 	}
@@ -359,7 +331,6 @@ func buildAgentsFromKeys(keys []AgentKeyData, filter []string) []DemoAgent {
 	for _, n := range filter {
 		allowed[n] = struct{}{}
 	}
-
 	var out []DemoAgent
 	for _, k := range keys {
 		if !allowAll {
@@ -382,57 +353,28 @@ func buildAgentsFromKeys(keys []AgentKeyData, filter []string) []DemoAgent {
 	return out
 }
 
-// signSelfRegistrationMessage builds the exact Solidity-encoded message the contract verifies
-// using the AGENT'S own ECDSA key, and returns an Ethereum-compatible signature (v in {27,28}).
-func signSelfRegistrationMessage(agentPriv *ecdsa.PrivateKey, didStr string, firstKey []byte) ([]byte, error) {
-	// agentId = keccak256(abi.encode(did, firstKey))
-	stringType, _ := abi.NewType("string", "", nil)
-	bytesType, _ := abi.NewType("bytes", "", nil)
-	args := abi.Arguments{
-		{Type: stringType},
-		{Type: bytesType},
+func buildRegParamsECDSA(a DemoAgent, ecdsaPub []byte, ecdsaSig []byte) (*did.RegistrationParams, error) {
+	capsJSON := "{}"
+	if a.Metadata.Capabilities != nil {
+		if b, err := json.Marshal(a.Metadata.Capabilities); err == nil {
+			capsJSON = string(b)
+		}
 	}
-	agentIdPacked, err := args.Pack(didStr, firstKey)
-	if err != nil {
-		return nil, err
-	}
-	agentId := gethcrypto.Keccak256Hash(agentIdPacked)
-
-	// msg.sender = agent address (tx sender)
-	sender := gethcrypto.PubkeyToAddress(agentPriv.PublicKey)
-
-	// messageHash = keccak256(abi.encode(agentId, keyBytes, msg.sender, nonce=0))
-	bytes32Type, _ := abi.NewType("bytes32", "", nil)
-	addressType, _ := abi.NewType("address", "", nil)
-	uint256Type, _ := abi.NewType("uint256", "", nil)
-
-	msgArgs := abi.Arguments{
-		{Type: bytes32Type},
-		{Type: bytesType},
-		{Type: addressType},
-		{Type: uint256Type},
-	}
-	msgPacked, err := msgArgs.Pack(agentId, firstKey, sender, big.NewInt(0))
-	if err != nil {
-		return nil, err
-	}
-	msgHash := gethcrypto.Keccak256Hash(msgPacked)
-
-	// Ethereum personal sign prefix
-	prefix := []byte("\x19Ethereum Signed Message:\n32")
-	ethSigned := gethcrypto.Keccak256Hash(append(prefix, msgHash.Bytes()...))
-
-	sig, err := gethcrypto.Sign(ethSigned.Bytes(), agentPriv)
-	if err != nil {
-		return nil, err
-	}
-	if sig[64] < 27 {
-		sig[64] += 27
-	}
-	return sig, nil
+	keys := [][]byte{ecdsaPub}
+	keyTypes := []did.KeyType{did.KeyTypeECDSA}
+	sigs := [][]byte{ecdsaSig}
+	return &did.RegistrationParams{
+		DID:          a.DID,
+		Name:         a.Metadata.Name,
+		Description:  a.Metadata.Description,
+		Endpoint:     a.Metadata.Endpoint,
+		Capabilities: capsJSON,
+		Keys:         keys,
+		KeyTypes:     keyTypes,
+		Signatures:   sigs,
+	}, nil
 }
 
-// fundAgentsIfNeeded sends plain ETH to agent EOAs if below target amount.
 func fundAgentsIfNeeded(rpcURL, funderKeyHex string, ks []AgentKeyData, amountWei string) error {
 	cli, err := ethclient.Dial(rpcURL)
 	if err != nil {
@@ -455,7 +397,6 @@ func fundAgentsIfNeeded(rpcURL, funderKeyHex string, ks []AgentKeyData, amountWe
 	if err != nil {
 		return err
 	}
-
 	nonce, err := cli.PendingNonceAt(context.Background(), from)
 	if err != nil {
 		return err
@@ -484,4 +425,37 @@ func fundAgentsIfNeeded(rpcURL, funderKeyHex string, ks []AgentKeyData, amountWe
 		nonce++
 	}
 	return nil
+}
+
+/* ==== exact message builders that match the contract ==== */
+
+func pad32BigEndian(n *big.Int) []byte {
+	var out [32]byte
+	b := n.Bytes()
+	copy(out[32-len(b):], b)
+	return out[:]
+}
+
+func signECDSAOwnership(priv *ecdsa.PrivateKey, chainID *big.Int, registry common.Address, owner common.Address) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteString("SAGE Agent Registration:")
+	buf.Write(pad32BigEndian(chainID))
+	buf.Write(registry.Bytes()) // 20B
+	buf.Write(owner.Bytes())    // 20B
+	msgHash := gethcrypto.Keccak256Hash(buf.Bytes())
+	prefix := []byte("\x19Ethereum Signed Message:\n32")
+	ethSigned := gethcrypto.Keccak256Hash(append(prefix, msgHash.Bytes()...))
+	sig, err := gethcrypto.Sign(ethSigned.Bytes(), priv)
+	if err != nil {
+		return nil, err
+	}
+	if sig[64] < 27 {
+		sig[64] += 27
+	}
+	return sig, nil
+}
+
+// legacy (no longer used, kept for reference)
+func signSelfRegistrationMessage(_ *ecdsa.PrivateKey, _ string, _ []byte) ([]byte, error) {
+	return nil, fmt.Errorf("unused")
 }

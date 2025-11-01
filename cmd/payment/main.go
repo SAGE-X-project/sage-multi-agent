@@ -1,6 +1,6 @@
 // cmd/payment/main.go
 // Boot a payment HTTP server module (was cmd/payment). It exposes /status and /process.
-// HPKE enables automatically if EXTERNAL_JWK_FILE and EXTERNAL_KEM_JWK_FILE are set.
+// HPKE enables automatically if PAYMENT_JWK_FILE and PAYMENT_KEM_JWK_FILE are set.
 //
 
 package main
@@ -69,8 +69,8 @@ func main() {
 	// flags (ENV as defaults)
 	port := flag.Int("port", getenvInt("EXTERNAL_PAYMENT_PORT", 19083), "HTTP port for payment server")
 	requireSig := flag.Bool("require", getenvBool("PAYMENT_REQUIRE_SIGNATURE", true), "require RFC9421 signature")
-	signJWK := flag.String("sign-jwk", getenvStr("EXTERNAL_JWK_FILE", ""), "Ed25519 signing JWK path (enables HPKE server)")
-	kemJWK := flag.String("kem-jwk", getenvStr("EXTERNAL_KEM_JWK_FILE", ""), "X25519 KEM JWK path (enables HPKE server)")
+	signJWK := flag.String("sign-jwk", getenvStr("PAYMENT_JWK_FILE", ""), "Ed25519 signing JWK path (enables HPKE server)")
+	kemJWK := flag.String("kem-jwk", getenvStr("PAYMENT_KEM_JWK_FILE", ""), "X25519 KEM JWK path (enables HPKE server)")
 	keysFile := flag.String("keys", getenvStr("HPKE_KEYS_FILE", ""), "DID mapping file (merged_agent_keys.json/generated_agent_keys.json)")
 
 	// === LLM config (added) ===
@@ -79,7 +79,7 @@ func main() {
 	llmKey := flag.String("llm-key", getenvStr("LLM_API_KEY", ""), "LLM API key (if required)")
 	llmModel := flag.String("llm-model", getenvStr("LLM_MODEL", "gemma2:2b"), "LLM model name/id")
 	llmLang := flag.String("llm-lang", getenvStr("LLM_LANG_DEFAULT", "auto"), "default language (auto|ko|en)")
-	llmTimeout := flag.Int("llm-timeout", getenvInt("LLM_TIMEOUT_MS", 8000), "LLM timeout in milliseconds")
+	llmTimeout := flag.Int("llm-timeout", getenvInt("LLM_TIMEOUT_MS", 80000), "LLM timeout in milliseconds")
 
 	flag.Parse()
 
@@ -96,10 +96,10 @@ func main() {
 
 	// ---- Export envs so the agent (lazy enable) can always find them ----
 	if *signJWK != "" {
-		_ = os.Setenv("EXTERNAL_JWK_FILE", *signJWK)
+		_ = os.Setenv("PAYMENT_JWK_FILE", *signJWK)
 	}
 	if *kemJWK != "" {
-		_ = os.Setenv("EXTERNAL_KEM_JWK_FILE", *kemJWK)
+		_ = os.Setenv("PAYMENT_KEM_JWK_FILE", *kemJWK)
 	}
 	if *keysFile != "" {
 		_ = os.Setenv("HPKE_KEYS_FILE", *keysFile)
@@ -122,7 +122,7 @@ func main() {
 	_ = os.Setenv("LLM_TIMEOUT_MS", strconv.Itoa(*llmTimeout))
 
 	log.Printf("[boot] requireSig=%v  sign-jwk=%q  kem-jwk=%q  keys=%q  llm={enable:%v url:%q model:%q lang:%q timeout:%dms}",
-		*requireSig, os.Getenv("EXTERNAL_JWK_FILE"), os.Getenv("EXTERNAL_KEM_JWK_FILE"), os.Getenv("HPKE_KEYS_FILE"),
+		*requireSig, os.Getenv("PAYMENT_JWK_FILE"), os.Getenv("PAYMENT_KEM_JWK_FILE"), os.Getenv("HPKE_KEYS_FILE"),
 		*llmEnable, os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout)
 
 	agent, err := payment.NewPaymentAgent(*requireSig)

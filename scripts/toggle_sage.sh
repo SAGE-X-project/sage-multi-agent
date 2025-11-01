@@ -23,12 +23,12 @@ if [[ "${1:-}" == "--include-root" ]]; then INCLUDE_ROOT=true; fi
 # Ports from .env (with sane defaults)
 ROOT_PORT="${ROOT_AGENT_PORT:-18080}"
 PLANNING_PORT="${PLANNING_AGENT_PORT:-18081}"
-ORDERING_PORT="${ORDERING_AGENT_PORT:-18082}"
+MEDICAL_PORT="${MEDICAL_AGENT_PORT:-18082}"
 PAYMENT_PORT="${PAYMENT_AGENT_PORT:-18083}"
 
 declare -a AGENTS
 $INCLUDE_ROOT && AGENTS+=("root:$ROOT_PORT")
-AGENTS+=("planning:$PLANNING_PORT" "ordering:$ORDERING_PORT" "payment:$PAYMENT_PORT")
+AGENTS+=("planning:$PLANNING_PORT" "medical:$MEDICAL_PORT" "payment:$PAYMENT_PORT")
 
 want_enabled=true
 [[ "$MODE" == "off" ]] && want_enabled=false

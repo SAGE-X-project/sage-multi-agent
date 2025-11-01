@@ -22,7 +22,7 @@ import (
 //   - Body: {"prompt": "..."}
 //
 // ClientAPI forwards the prompt to Root and passes SAGE/HPKE flags via headers only (no body metadata).
-// Root does in‑proc routing to sub‑agents (planning/ordering/payment).
+// Root does in‑proc routing to sub‑agents (planning/medical/payment).
 // NOTE: For backward compatibility, this API also hits Root /toggle-sage to reflect the header
 //
 //	into the legacy global toggle; per‑request behavior is still driven by message metadata.
