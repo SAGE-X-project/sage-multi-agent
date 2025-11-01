@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
+	"github.com/sage-x-project/sage-multi-agent/internal/agentmux"
 	"github.com/sage-x-project/sage-multi-agent/llm"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
@@ -104,7 +105,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 
 	// ===== Protected mux: /process =====
 	protected := http.NewServeMux()
-	protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+	protected.HandleFunc("/payment/process", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
 
@@ -201,7 +202,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 		_, _ = w.Write(resp.Data)
 	})
 	agent.protMux = protected
-
+	agent.handler = agentmux.BuildAgentHandler("payment", open, protected, agent.mw)
 	// ===== Compose final handler =====
 	var h http.Handler = open
 	if agent.mw != nil {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
+	"github.com/sage-x-project/sage-multi-agent/internal/agentmux"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
 	// DID / Resolver
@@ -103,7 +104,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 
 	// ===== Protected mux: /process =====
 	protected := http.NewServeMux()
-	protected.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+	protected.HandleFunc("/medical/process", func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
 
@@ -199,7 +200,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 		_, _ = w.Write(resp.Data)
 	})
 	agent.protMux = protected
-
+	agent.handler = agentmux.BuildAgentHandler("medical", open, protected, agent.mw)
 	// ===== Compose final handler =====
 	var h http.Handler = open
 	if agent.mw != nil {
@@ -225,6 +226,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 	// [LLM] lazy: only init when used
 	if c, err := llm.NewFromEnv(); err == nil {
 		agent.llmClient = c
+		agent.logger.Printf("[medical] LLM ready")
 	} else {
 		agent.logger.Printf("[medical] LLM disabled: %v", err)
 	}
@@ -387,9 +389,20 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 	// LLM 호출 (없거나 실패 시 보수적 폴백)
 	text := ""
 	if e.llmClient != nil {
-		if out, err := e.llmClient.Chat(ctx, sys, usr); err == nil && strings.TrimSpace(out) != "" {
-			text = strings.TrimSpace(out)
+		out, err := e.llmClient.Chat(ctx, sys, usr)
+		if err != nil {
+			e.logger.Printf("[medical][llm] chat error: %v", err)
+		} else {
+			trimmed := strings.TrimSpace(out)
+			if trimmed == "" {
+				e.logger.Printf("[medical][llm] chat returned empty text")
+			} else {
+				e.logger.Printf("[medical][llm] chat ok bytes=%d", len(trimmed))
+				text = trimmed
+			}
 		}
+	} else {
+		e.logger.Printf("[medical][llm] client not initialized (using fallback)")
 	}
 	if text == "" {
 		if lang == "en" {

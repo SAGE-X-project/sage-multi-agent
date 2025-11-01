@@ -30,45 +30,43 @@ type llmPaymentExtract struct {
 	} `json:"fields"`
 }
 
+// llmExtractPayment.go (교체)
 func (r *RootAgent) llmExtractPayment(ctx context.Context, lang, text string) (*llmPaymentExtract, bool) {
 	r.ensureLLM()
 	xo := &llmPaymentExtract{}
 
-	if r.llmClient != nil {
+	// 1) LLM JSON 우선 추출
+	if r.llmClient != nil && strings.TrimSpace(text) != "" {
 		sys := map[string]string{
 			"ko": `역할: 결제/구매 정보 추출기.
-출력은 JSON 하나({ ... })만. 코드블록/설명 금지.
-필드:
-- fields.mode: "buy"/"transfer" 등 (구매 맥락이면 buy)
-- fields.method: 국민카드/신한카드/카카오페이/계좌이체/현금 등 (원문 보존)
-- fields.shipping: 주소/지역(자유형)
-- fields.recipient 또는 to: 수령자 이름
-- fields.merchant: 쿠팡/네이버/11번가/지마켓/SSG/애플스토어 등
-- fields.item, fields.model: 상품명/모델명 (자유 추출, 어떤 상품이든)
-- fields.amountKRW, fields.budgetKRW: 정수 KRW. "150만 원" → 1500000.
+출력은 JSON "하나"({ ... })만. 코드블록/설명 금지.
+스키마:
+{"fields":{"mode":"","method":"","shipping":"","to":"","merchant":"","item":"","model":"","amountKRW":0,"budgetKRW":0,"cardLast4":""}}
 규칙:
-- 억=100000000, 만=10000. 쉼표 제거. 소수점 버림.
-- "구매/주문/결제" 맥락이면 budgetKRW 우선, "송금"이면 amountKRW 우선.
-- 모르는 건 0 또는 "".`,
-			"en": `Role: payment info extractor. Output exactly one JSON. Fields: mode, method, shipping, recipient|to, merchant, item, model, amountKRW, budgetKRW. Korean units OK.`,
-		}[lang]
-		if out, err := r.llmClient.Chat(ctx, sys, text); err == nil {
-			if js := extractFirstJSONObject(out); js != "" {
+- "recipient"를 반환한다면 "to"로 넣어라.
+- 금액 단위: "150만 원" => 1500000, 억=100000000, 만=10000, 쉼표 제거, 소수점 버림.
+- 구매/주문/결제 맥락이면 budgetKRW 우선, 송금/이체면 amountKRW 우선.
+모르면 0 또는 ""로.`,
+			"en": `Role: extract payment info. Output exactly ONE JSON only:
+{"fields":{"mode":"","method":"","shipping":"","to":"","merchant":"","item":"","model":"","amountKRW":0,"budgetKRW":0,"cardLast4":""}}
+If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
+		}[langOrDefault(lang)]
+
+		if out, err := r.llmClient.Chat(ctx, sys, strings.TrimSpace(text)); err == nil && strings.TrimSpace(out) != "" {
+			js := extractFirstJSONObject(out)
+			if js != "" {
+				// recipient -> to 보정 허용
+				js = strings.ReplaceAll(js, `"recipient"`, `"to"`)
 				_ = json.Unmarshal([]byte(js), xo)
+			} else {
+				r.logger.Printf("[llm][slots][warn] no json found")
 			}
+		} else if err != nil {
+			r.logger.Printf("[llm][err] %v", err)
 		}
 	}
 
-	// 금액 보정
-	if xo.Fields.AmountKRW <= 0 && xo.Fields.BudgetKRW <= 0 {
-		if n := parseKRWFromText(text); n > 0 {
-			if looksLikeTransfer(text) {
-				xo.Fields.AmountKRW = n
-			} else {
-				xo.Fields.BudgetKRW = n
-			}
-		}
-	}
+	// 2) 규칙 폴백/보강 (LLM이 비운 필드만 채움)
 	if strings.TrimSpace(xo.Fields.Method) == "" {
 		if m := pickMethod(text); m != "" {
 			xo.Fields.Method = m
@@ -89,23 +87,36 @@ func (r *RootAgent) llmExtractPayment(ctx context.Context, lang, text string) (*
 			xo.Fields.Merchant = m
 		}
 	}
-	if strings.TrimSpace(xo.Fields.Mode) == "" {
-		ps := paySlots{}
-		xo.Fields.Mode = classifyPaymentMode(text, ps)
-		if xo.Fields.Mode == "" {
-			xo.Fields.Mode = "buy"
-		}
-	}
-	// item/model: 일반화 (예: “맥북 프로 16”, “아이폰 15 프로”, “에어팟 프로 2” 등 자유 추출)
-	if strings.TrimSpace(xo.Fields.Item) == "" {
+	if strings.TrimSpace(xo.Fields.Item) == "" || strings.TrimSpace(xo.Fields.Model) == "" {
 		if it, md := pickItemAndModel(text, xo.Fields.Merchant, xo.Fields.Shipping); it != "" {
-			xo.Fields.Item = it
+			if xo.Fields.Item == "" {
+				xo.Fields.Item = it
+			}
 			if xo.Fields.Model == "" {
 				xo.Fields.Model = md
 			}
 		}
 	}
+	// 금액/예산 보강
+	if xo.Fields.AmountKRW <= 0 && xo.Fields.BudgetKRW <= 0 {
+		if n := parseKRWFromText(text); n > 0 {
+			if looksLikeTransfer(text) {
+				xo.Fields.AmountKRW = n
+			} else {
+				xo.Fields.BudgetKRW = n
+			}
+		}
+	}
+	// 모드 보정
+	if strings.TrimSpace(xo.Fields.Mode) == "" {
+		ps := paySlots{} // 네 내부 타입
+		xo.Fields.Mode = classifyPaymentMode(text, ps)
+		if xo.Fields.Mode == "" {
+			xo.Fields.Mode = "buy"
+		}
+	}
 
+	// 아무 것도 못 뽑았으면 실패
 	if strings.TrimSpace(xo.Fields.Method) == "" &&
 		strings.TrimSpace(xo.Fields.Shipping) == "" &&
 		strings.TrimSpace(xo.Fields.To) == "" &&
@@ -119,73 +130,87 @@ func (r *RootAgent) llmExtractPayment(ctx context.Context, lang, text string) (*
 
 /* ------------------------- MEDICAL ------------------------- */
 
-type medicalExtractOut struct {
-	Fields  medicalSlots
-	Missing []string
-	Ask     string
+// llmExtractMedical: 입력에서 medicalSlots를 뽑고, 부족하면 한 문장 질문까지 생성
+type medicalXO struct {
+	Fields  medicalSlots `json:"fields"`
+	Missing []string     `json:"missing,omitempty"`
+	Ask     string       `json:"ask,omitempty"`
 }
 
-func (r *RootAgent) llmExtractMedical(ctx context.Context, lang, text string) (medicalExtractOut, bool) {
-	out := medicalExtractOut{}
-	// JSON
-	if strings.HasPrefix(strings.TrimSpace(text), "{") {
-		var m map[string]any
-		if json.Unmarshal([]byte(text), &m) == nil {
-			s := medicalSlots{}
-			for k, ptr := range map[string]*string{
-				"medical.condition": &s.Condition,
-				"condition":         &s.Condition,
-				"medical.topic":     &s.Topic,
-				"topic":             &s.Topic,
-				"medical.audience":  &s.Audience,
-				"audience":          &s.Audience,
-				"medical.duration":  &s.Duration,
-				"duration":          &s.Duration,
-				"medical.age":       &s.Age,
-				"age":               &s.Age,
-				"medical.meds":      &s.Medications,
-				"meds":              &s.Medications,
-				"medications":       &s.Medications,
-			} {
-				if v, ok := m[k].(string); ok && strings.TrimSpace(v) != "" {
-					*ptr = strings.TrimSpace(v)
-				}
-			}
-			out.Fields = s
-			out.Missing = []string{}
-			if s.Condition == "" {
-				out.Missing = append(out.Missing, "condition(질환)")
-			}
-			if s.Topic == "" {
-				out.Missing = append(out.Missing, "topic(주제)")
-			}
-			if len(out.Missing) > 0 {
-				out.Ask = r.askForMissingMedicalWithLLM(ctx, lang, out.Missing, text)
-			}
-			return out, true
+func (r *RootAgent) llmExtractMedical(ctx context.Context, lang, text string) (medicalXO, bool) {
+	r.ensureLLM()
+	var zero medicalXO
+	if r.llmClient == nil || strings.TrimSpace(text) == "" {
+		return zero, false
+	}
+
+	sys := map[string]string{
+		"ko": `너는 의료 의도 추출기야. 아래 JSON "하나"만 출력해.
+{
+  "fields": {
+    "condition": "",   // 질환명(예: 당뇨병, 우울증 등)
+    "symptoms": "",    // 사용자가 기술한 개인 증상(자유서술)
+    "topic": "",       // 예: 증상, 검사/진단, 약물/복용, 부작용, 식단, 운동, 관리
+    "audience": "",    // 예: 본인, 가족, 임산부, 아동, 노인
+    "duration": "",    // 예: 2주, 어제부터
+    "age": "",         // 선택
+    "medications": ""  // 선택
+  },
+  "missing": [],       // 최소: condition, topic (없으면 포함)
+  "ask": ""            // 누락 항목을 한 번에 물어보는 한국어 한 문장
+}
+설명/코드블록/리스트 금지. JSON만.`,
+		"en": `Extract medical intent. Output ONE JSON only:
+{
+  "fields":{
+    "condition":"","symptoms":"",
+    "topic":"","audience":"",
+    "duration":"","age":"","medications":""
+  },
+  "missing":[],
+  "ask":""
+}
+Minimum required: condition, topic. "ask" is ONE sentence to request all missing items. No code fences, no lists.`,
+	}[langOrDefault(lang)]
+
+	out, err := r.llmClient.Chat(ctx, sys, strings.TrimSpace(text))
+	if err != nil || strings.TrimSpace(out) == "" {
+		return zero, false
+	}
+
+	raw := routerJSONRe.FindString(out)
+	if raw == "" {
+		// JSON 탐지 실패 시 전체를 시도 (LLM이 JSON만 돌려준 경우)
+		raw = strings.TrimSpace(out)
+	}
+
+	var xo medicalXO
+	if err := json.Unmarshal([]byte(raw), &xo); err != nil {
+		return zero, false
+	}
+
+	trim := func(s string) string { return strings.TrimSpace(s) }
+	xo.Fields.Condition = trim(xo.Fields.Condition)
+	xo.Fields.Symptoms = trim(xo.Fields.Symptoms) // ★ 추가
+	xo.Fields.Topic = trim(xo.Fields.Topic)
+	xo.Fields.Audience = trim(xo.Fields.Audience)
+	xo.Fields.Duration = trim(xo.Fields.Duration)
+	xo.Fields.Age = trim(xo.Fields.Age)
+	xo.Fields.Medications = trim(xo.Fields.Medications)
+
+	// 최소 요건 보정 + ask 자동 생성
+	if len(xo.Missing) == 0 {
+		if xo.Fields.Condition == "" {
+			xo.Missing = append(xo.Missing, "condition(질환)")
+		}
+		if xo.Fields.Topic == "" {
+			xo.Missing = append(xo.Missing, "topic(주제)")
 		}
 	}
-	// Heuristics (very light)
-	s := medicalSlots{}
-	t := strings.ToLower(strings.TrimSpace(text))
-	if containsAny(t, "당뇨", "diabetes") {
-		s.Condition = "당뇨병"
+	if xo.Ask == "" && len(xo.Missing) > 0 {
+		xo.Ask = r.askForMissingMedicalWithLLM(ctx, lang, xo.Missing, text)
 	}
-	if containsAny(t, "식단", "diet") {
-		s.Topic = "식단"
-	}
-	out.Fields = s
-	out.Missing = []string{}
-	if s.Condition == "" {
-		out.Missing = append(out.Missing, "condition(질환)")
-	}
-	if s.Topic == "" {
-		out.Missing = append(out.Missing, "topic(주제)")
-	}
-	if len(out.Missing) > 0 {
-		out.Ask = r.askForMissingMedicalWithLLM(ctx, lang, out.Missing, text)
-	}
-	return out, s.Condition != "" || s.Topic != ""
+	return xo, true
 }
 
 /* ------------------------- PLANNING ------------------------- */

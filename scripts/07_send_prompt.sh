@@ -68,6 +68,10 @@ while [[ $# -gt 0 ]]; do
     --scenario)    SCENARIO="${2:-user}"; shift 2 ;;
     --payment)     PROMPT="send 10 USDC to merchant"; shift ;;
     --interactive|-i) INTERACTIVE=1; shift ;;
+    --new-cid)
+      CID="cid-$(date +%s%N)"
+      echo "$CID" > "$CID_FILE"
+      shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
   esac

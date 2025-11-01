@@ -64,37 +64,6 @@ Pick the most likely domain.`
 	return routeOut{}, false
 }
 
-func normalizeDomain(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	switch s {
-	case "payment", "medical", "planning", "chat":
-		return s
-	case "pay", "purchase", "order", "checkout", "결제", "구매", "주문":
-		return "payment"
-	case "health", "doctor", "med", "의료", "건강":
-		return "medical"
-	case "plan", "schedule", "todo", "계획", "일정":
-		return "planning"
-	default:
-		return "chat"
-	}
-}
-
-// --- keyword helpers used only by router ---
-func hasProductCue(s string) bool {
-	return containsAny(s,
-		"아이폰", "iphone", "맥북", "macbook", "아이패드", "ipad", "airpods", "apple watch",
-		"갤럭시", "galaxy", "s24", "zflip", "zfold",
-		"노트북", "laptop", "데스크탑", "desktop", "모니터", "monitor", "키보드", "keyboard",
-		"마우스", "mouse", "tv", "텔레비전", "pro", "ultra", "max", "m2", "m3", "m4",
-	)
-}
-func hasShippingCue(s string) bool {
-	return containsAny(s, "배송", "배송지", "주소", "수령", "shipping", "deliver", "delivery", "address", "ship")
-}
-func hasAmountCue(s string) bool {
-	return containsAny(s, "만원", "원 ", " krw", "가격", "price", "cost")
-}
 func hasRecipientCue(s string) bool {
 	return containsAny(s, "받는사람", "수신자", "recipient", "to ")
 }

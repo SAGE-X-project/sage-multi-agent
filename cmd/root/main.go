@@ -49,8 +49,8 @@ func main() {
 
 	// External URLs (Root routes by keyword; leave empty to use in-proc fallback for planning/medical)
 	planningExternal := flag.String("planning-external", getenvStr("PLANNINGL_URL", ""), "external planning base (optional)")
-	MEDICALExternal := flag.String("medical-external", getenvStr("MEDICAL_URL", ""), "external medical base (optional)")
-	paymentExternal := flag.String("payment-external", getenvStr("PAYMENT_URL", "http://localhost:5500"), "external payment base (gateway)")
+	MEDICALExternal := flag.String("medical-external", getenvStr("MEDICAL_URL", "http://localhost:5500/medical"), "external medical base (optional)")
+	paymentExternal := flag.String("payment-external", getenvStr("PAYMENT_URL", "http://localhost:5500/payment"), "external payment base (gateway)")
 
 	// Root signing (RFC 9421 via A2A)
 	rootJWK := flag.String("jwk", getenvStr("ROOT_JWK_FILE", ""), "private JWK for outbound signing (root)")
@@ -77,7 +77,7 @@ func main() {
 		_ = os.Setenv("PLANNING_EXTERNAL_URL", *planningExternal)
 	}
 	if *MEDICALExternal != "" {
-		_ = os.Setenv("MEDICAL_EXTERNAL_URL", *MEDICALExternal)
+		_ = os.Setenv("MEDICAL_URL", *MEDICALExternal)
 	}
 	if *paymentExternal != "" {
 		_ = os.Setenv("PAYMENT_URL", *paymentExternal)
@@ -132,7 +132,7 @@ func main() {
 		"[boot] root:%d  ext{planning=%s medical=%s payment=%s}  SAGE=%v  llm={enable:%v url:%q model:%q lang:%q timeout:%dms}",
 		*rootPort,
 		os.Getenv("PLANNING_EXTERNAL_URL"),
-		os.Getenv("MEDICAL_EXTERNAL_URL"),
+		os.Getenv("MEDICAL_URL"),
 		os.Getenv("PAYMENT_URL"),
 		*sage,
 		*llmEnable, os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout,

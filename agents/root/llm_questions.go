@@ -5,6 +5,7 @@ package root
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -114,13 +115,12 @@ Rules:
 	if r.llmClient != nil {
 		if s, err := r.llmClient.Chat(ctx, sys, b.String()); err == nil {
 			out = s
+		} else {
+			log.Println("[llm][err]", err)
 		}
 	}
 	out = strings.TrimSpace(out)
-	out = strings.Trim(out, "`\"'")
-	if i := strings.IndexAny(out, "\r\n"); i >= 0 {
-		out = strings.TrimSpace(out[:i])
-	}
+
 	if out == "" {
 		if lang == "ko" {
 			out = "가능하시다면 " + strings.Join(humanMissing, "·") + "을(를) 한 번에 알려주시면 바로 이어서 진행할게요."

@@ -85,9 +85,9 @@ func main() {
 
 	// LLM config (bridged into env for llm.NewFromEnv)
 	llmEnable := flag.Bool("llm", getenvBool([]string{"LLM_ENABLED"}, true), "enable LLM prompts")
-	llmURL := flag.String("llm-url", getenvStr([]string{"LLM_BASE_URL", "JAMINAI_API_URL"}, "http://localhost:11434"), "LLM base URL (OpenAI-compatible)")
-	llmKey := flag.String("llm-key", getenvStr([]string{"LLM_API_KEY", "JAMINAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, ""), "LLM API key (if required)")
-	llmModel := flag.String("llm-model", getenvStr([]string{"LLM_MODEL", "JAMINAI_MODEL"}, "gemma2:2b"), "LLM model name/id")
+	llmURL := flag.String("llm-url", getenvStr([]string{"LLM_BASE_URL", "GEMINI_API_URL"}, "http://localhost:11434"), "LLM base URL (OpenAI-compatible)")
+	llmKey := flag.String("llm-key", getenvStr([]string{"LLM_API_KEY", "GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENAI_API_KEY"}, ""), "LLM API key (if required)")
+	llmModel := flag.String("llm-model", getenvStr([]string{"LLM_MODEL", "GEMINI_MODEL"}, "gemma2:2b"), "LLM model name/id")
 	llmLang := flag.String("llm-lang", getenvStr([]string{"LLM_LANG_DEFAULT"}, "auto"), "default language (auto|ko|en)")
 	llmTimeout := flag.Int("llm-timeout", getenvInt([]string{"LLM_TIMEOUT_MS"}, 8000), "LLM timeout in milliseconds")
 

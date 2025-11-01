@@ -1,6 +1,6 @@
 // Package llm provides a small, pluggable OpenAI-compatible chat client
 // with sane env defaults and local (no-key) allowance.
-// Only LLM-related code lives here. Non-LLM parts are not touched.
+// Default provider: OpenAI (ChatGPT).
 package llm
 
 import (
@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -19,13 +20,13 @@ import (
 
 var ErrLLMDisabled = errors.New("llm client disabled (missing key or base url)")
 
-// Client is the minimal interface used by RootAgent/PaymentAgent.
+// Client is the minimal interface used by RootAgent/PaymentAgent/MedicalAgent.
 type Client interface {
 	Chat(ctx context.Context, system, user string) (string, error)
 }
 
-// JaminAIClient is an OpenAI-compatible HTTP client.
-type JaminAIClient struct {
+// OpenAI-like client
+type OpenAIClient struct {
 	BaseURL string
 	APIKey  string
 	Model   string
@@ -62,46 +63,91 @@ type chatChoice struct {
 	Message      chatMessage `json:"message"`
 }
 
-// NewFromEnv creates a client using relaxed env precedence.
-// Base URL precedence: JAMINAI_API_URL > LLM_BASE_URL > LLM_URL > default Google OpenAI-compatible.
-// Key precedence: JAMINAI_API_KEY > LLM_API_KEY > GEMINI_API_KEY > GOOGLE_API_KEY > OPENAI_API_KEY.
-// Local hosts (localhost/127.0.0.1) allow empty key or LLM_ALLOW_NO_KEY=true.
+// NewFromEnv creates a client with OpenAI defaults.
+// Provider selection (optional):
+//
+//	LLM_PROVIDER=openai|gemini
+//
+// OpenAI (default):
+//
+//	Base URL: OPENAI_BASE_URL > LLM_BASE_URL > LLM_URL > https://api.openai.com/v1
+//	Key:      OPENAI_API_KEY > LLM_API_KEY
+//	Model:    OPENAI_MODEL > LLM_MODEL > gpt-4o-mini
+//
+// Gemini (fallback):
+//
+//	Base URL: GEMINI_API_URL > LLM_BASE_URL > LLM_URL > https://generativelanguage.googleapis.com/v1beta/openai
+//	Key:      GEMINI_API_KEY > GOOGLE_API_KEY > LLM_API_KEY
+//	Model:    GEMINI_MODEL > LLM_MODEL > gemini-2.5-flash
+//
+// Localhost/127.* base allows no key or LLM_ALLOW_NO_KEY=true.
 func NewFromEnv() (Client, error) {
-	base := firstNonEmpty(
-		os.Getenv("JAMINAI_API_URL"),
-		os.Getenv("LLM_BASE_URL"),
-		os.Getenv("LLM_URL"),
-	)
-	if base == "" {
-		base = "https://generativelanguage.googleapis.com/v1beta/openai"
-	}
-	base = normalizeBase(base)
-
-	key := firstNonEmpty(
-		os.Getenv("JAMINAI_API_KEY"),
-		os.Getenv("LLM_API_KEY"),
-		os.Getenv("GEMINI_API_KEY"),
-		os.Getenv("GOOGLE_API_KEY"),
-		os.Getenv("OPENAI_API_KEY"),
-	)
-
-	model := firstNonEmpty(
-		os.Getenv("JAMINAI_MODEL"),
-		os.Getenv("LLM_MODEL"),
-	)
-	if model == "" {
-		model = "gemini-2.5-flash"
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("LLM_PROVIDER")))
+	if provider == "" {
+		provider = "openai"
 	}
 
-	// Allow converting LLM_TIMEOUT_MS → JAMINAI_TIMEOUT seconds.
-	if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT_MS")); v != "" {
-		if d, err := time.ParseDuration(v + "ms"); err == nil {
-			_ = os.Setenv("JAMINAI_TIMEOUT", fmt.Sprintf("%.0fs", d.Seconds()))
+	var base, key, model string
+
+	switch provider {
+	case "gemini":
+		base = firstNonEmpty(
+			os.Getenv("GEMINI_API_URL"),
+			os.Getenv("LLM_BASE_URL"),
+			os.Getenv("LLM_URL"),
+		)
+		if base == "" {
+			base = "https://generativelanguage.googleapis.com/v1beta/openai"
+		}
+		base = normalizeBase(base)
+
+		key = firstNonEmpty(
+			os.Getenv("GEMINI_API_KEY"),
+			os.Getenv("GOOGLE_API_KEY"),
+			os.Getenv("LLM_API_KEY"),
+		)
+
+		model = firstNonEmpty(
+			os.Getenv("GEMINI_MODEL"),
+			os.Getenv("LLM_MODEL"),
+		)
+		if model == "" {
+			model = "gemini-2.5-flash"
+		}
+
+	default: // "openai"
+		base = firstNonEmpty(
+			os.Getenv("OPENAI_BASE_URL"),
+			os.Getenv("LLM_BASE_URL"),
+			os.Getenv("LLM_URL"),
+		)
+		if base == "" {
+			base = "https://api.openai.com/v1"
+		}
+		base = normalizeBase(base)
+
+		key = firstNonEmpty(
+			os.Getenv("OPENAI_API_KEY"),
+			os.Getenv("LLM_API_KEY"),
+		)
+
+		model = firstNonEmpty(
+			os.Getenv("OPENAI_MODEL"),
+			os.Getenv("LLM_MODEL"),
+		)
+		if model == "" {
+			model = "gpt-4o-mini"
 		}
 	}
+
+	// Timeout: prefer seconds string in LLM_TIMEOUT or millis in LLM_TIMEOUT_MS
 	timeout := 12 * time.Second
-	if v := strings.TrimSpace(os.Getenv("JAMINAI_TIMEOUT")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT")); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
+			timeout = d
+		}
+	} else if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT_MS")); v != "" {
+		if d, err := time.ParseDuration(v + "ms"); err == nil {
 			timeout = d
 		}
 	}
@@ -113,7 +159,7 @@ func NewFromEnv() (Client, error) {
 		return nil, ErrLLMDisabled
 	}
 
-	return &JaminAIClient{
+	return &OpenAIClient{
 		BaseURL: strings.TrimRight(base, "/"),
 		APIKey:  key,
 		Model:   model,
@@ -122,48 +168,87 @@ func NewFromEnv() (Client, error) {
 }
 
 // Chat sends a synchronous chat.completions request.
-func (c *JaminAIClient) Chat(ctx context.Context, system, user string) (string, error) {
+func (c *OpenAIClient) Chat(ctx context.Context, system, user string) (string, error) {
 	reqBody := chatReq{
 		Model:       c.Model,
 		Messages:    []chatMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
-		MaxTokens:   320,
+		MaxTokens:   128, // 320 -> 128 (요청량 축소)
 		Temperature: 0.7,
 	}
 	b, _ := json.Marshal(reqBody)
 
 	endpoint := c.BaseURL + "/chat/completions"
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
-	httpReq.Header.Set("Content-Type", "application/json")
-	if strings.TrimSpace(c.APIKey) != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
-	}
 
-	res, err := c.HTTP.Do(httpReq)
-	if err != nil {
-		return "", err
-	}
-	defer res.Body.Close()
+	// --- 최대 1회 재시도 루프 ---
+	for attempt := 0; attempt < 2; attempt++ {
+		httpReq, _ := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(b))
+		httpReq.Header.Set("Content-Type", "application/json")
+		if strings.TrimSpace(c.APIKey) != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
 
-	body, _ := io.ReadAll(res.Body)
-	var out chatResp
-	if err := json.Unmarshal(body, &out); err != nil {
-		return "", fmt.Errorf("llm decode failed: %w; raw=%s", err, strings.TrimSpace(string(body)))
+		res, err := c.HTTP.Do(httpReq)
+		if err != nil {
+			if attempt == 0 {
+				time.Sleep(3 * time.Second)
+				continue
+			}
+			return "", err
+		}
+		defer res.Body.Close()
+
+		body, _ := io.ReadAll(res.Body)
+		if res.StatusCode == http.StatusTooManyRequests { // 429
+			if attempt == 0 {
+				// Retry-After 헤더가 있으면 사용
+				if ra := strings.TrimSpace(res.Header.Get("Retry-After")); ra != "" {
+					if sec, _ := strconv.Atoi(ra); sec > 0 {
+						time.Sleep(time.Duration(sec) * time.Second)
+					} else {
+						time.Sleep(4 * time.Second)
+					}
+				} else {
+					time.Sleep(4 * time.Second)
+				}
+				continue
+			}
+			return "", fmt.Errorf("429 rate limit: %s", strings.TrimSpace(string(body)))
+		}
+		if res.StatusCode/100 != 2 {
+			if attempt == 0 {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			return "", fmt.Errorf("%d %s", res.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var out chatResp
+		if err := json.Unmarshal(body, &out); err != nil {
+			// OpenAI가 배열/다른 형태를 줄 때 보호
+			return "", fmt.Errorf("llm decode failed: %w; raw=%s", err, strings.TrimSpace(string(body)))
+		}
+		if out.Error != nil {
+			if attempt == 0 {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			return "", errors.New(strings.TrimSpace(out.Error.Message))
+		}
+		if len(out.Choices) == 0 {
+			if attempt == 0 {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			return "", errors.New("llm: empty choices")
+		}
+		return strings.TrimSpace(out.Choices[0].Message.Content), nil
 	}
-	if out.Error != nil {
-		return "", errors.New(strings.TrimSpace(out.Error.Message))
-	}
-	if len(out.Choices) == 0 {
-		return "", errors.New("llm: empty choices")
-	}
-	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+	return "", errors.New("llm: retry exhausted")
 }
 
 // ---------- Domain helpers (safe fallbacks inside) ----------
 
-// GeneratePaymentClarify returns ONE short question asking only missing fields.
-// Always returns non-empty string (falls back if LLM fails).
 func GeneratePaymentClarify(ctx context.Context, c Client, lang string, missing []string, userText string) string {
-	// fallback labels
 	if len(missing) == 0 {
 		missing = []string{"수신자", "금액(원)", "결제수단"}
 	}
@@ -181,15 +266,12 @@ func GeneratePaymentClarify(ctx context.Context, c Client, lang string, missing 
 		}
 	}
 
-	// fallback
 	if lang == "ko" {
 		return "부족한 항목만 한 문장으로 알려주세요: " + miss
 	}
 	return "Please provide the missing info in one short sentence: " + miss
 }
 
-// GeneratePaymentReceipt returns one-line receipt text.
-// Always returns non-empty string (falls back if LLM fails).
 func GeneratePaymentReceipt(ctx context.Context, c Client, lang string, to string, amountKRW int64, method, item, memo string) string {
 	amt := withComma(amountKRW)
 	if amt == "" {
@@ -208,7 +290,6 @@ func GeneratePaymentReceipt(ctx context.Context, c Client, lang string, to strin
 			return strings.TrimSpace(out)
 		}
 	}
-	// fallback
 	if lang == "ko" {
 		return fmt.Sprintf("%s님에 대한 결제 %s원(%s) 처리 완료%s.",
 			nz(to), amt, nz(method), optionalSuffix(" - "+nz(item)))
@@ -217,7 +298,7 @@ func GeneratePaymentReceipt(ctx context.Context, c Client, lang string, to strin
 		amt, nz(method), nz(to), optionalSuffix(" - "+nz(item)))
 }
 
-// ---------- shared helpers (LLM-side only) ----------
+// ---------- shared helpers ----------
 
 func firstNonEmpty(vs ...string) string {
 	for _, v := range vs {

@@ -59,7 +59,7 @@ build/
 .Trashes
 ehthumbs.db
 Thumbs.db
-
+.cid
 # Environment files
 .env
 .env.local
@@ -75,6 +75,7 @@ keys/
 *.pfx
 private_key.txt
 generated_agent_keys.json
+merged_agent_keys.json
 all_keys.json
 
 # Logs
