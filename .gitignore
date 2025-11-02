@@ -43,6 +43,9 @@ build/
 /enhanced_main
 /client-api
 
+# Claude Code files
+.claude/
+
 # Agent binaries
 /root-agent
 /payment-agent

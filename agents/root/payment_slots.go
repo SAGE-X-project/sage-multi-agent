@@ -455,6 +455,31 @@ func extractPaymentSlots(msg *types.AgentMessage) (s paySlots, missing []string,
 		}
 	}
 
+	// Recipient extraction (한테, 에게, to)
+	if s.To == "" {
+		// Pattern: "XXX한테", "XXX에게", "to XXX"
+		if m := regexp.MustCompile(`([가-힣a-zA-Z0-9]+)\s*(?:한테|에게)`).FindStringSubmatch(content); len(m) >= 2 {
+			s.To = strings.TrimSpace(m[1])
+		} else if m := regexp.MustCompile(`(?:to|받는사람|수신자)[:\s]+([가-힣a-zA-Z0-9\s]+?)(?:\s|$|,)`).FindStringSubmatch(content); len(m) >= 2 {
+			s.To = strings.TrimSpace(m[1])
+		}
+	}
+
+	// Shipping address extraction
+	if s.Shipping == "" {
+		// Pattern: "XXX로 배송", "배송지: XXX"
+		if m := regexp.MustCompile(`([가-힣a-zA-Z0-9\s]+?)\s*(?:로|으로)\s*배송`).FindStringSubmatch(content); len(m) >= 2 {
+			s.Shipping = strings.TrimSpace(m[1])
+		} else if m := regexp.MustCompile(`(?:배송지|주소|shipping)[:\s]+([가-힣a-zA-Z0-9\s,\-]+?)(?:\s*$|,)`).FindStringSubmatch(content); len(m) >= 2 {
+			s.Shipping = strings.TrimSpace(m[1])
+		}
+	}
+
+	// If shipping not specified, use recipient as default
+	if s.Shipping == "" && s.To != "" {
+		s.Shipping = s.To
+	}
+
 	missing = computeMissingPayment(s)
 	ok = true
 	return

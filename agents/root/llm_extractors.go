@@ -116,6 +116,11 @@ If "recipient" key is used, copy it to "to". Amounts are integers in KRW.`,
 		}
 	}
 
+	// If shipping not specified, use recipient as default
+	if strings.TrimSpace(xo.Fields.Shipping) == "" && strings.TrimSpace(xo.Fields.To) != "" {
+		xo.Fields.Shipping = xo.Fields.To
+	}
+
     // Fail if nothing extracted
 	if strings.TrimSpace(xo.Fields.Method) == "" &&
 		strings.TrimSpace(xo.Fields.Shipping) == "" &&
@@ -281,14 +286,35 @@ func pickItemAndModel(text, merchant, shipping string) (item string, model strin
 		exclude[m] = struct{}{}
 	}
 
-    // 1) Prefer quoted phrase: “ … ” / " … "
+    // 1) Prefer quoted phrase: " … " / " … "
 	if q := firstQuoted(t); q != "" && !isExcluded(q, exclude) {
 		return splitItemModel(q)
 	}
 
+	// 1.5) Common product names (아이폰, 맥북, etc.)
+	lowT := strings.ToLower(t)
+	if strings.Contains(lowT, "아이폰") || strings.Contains(lowT, "iphone") {
+		// Extract model if available (e.g., "16 pro", "15", etc.)
+		if m := regexp.MustCompile(`(?:아이폰|iphone)\s+(\d+\s*(?:pro|max|mini|plus)?)`).FindStringSubmatch(lowT); len(m) >= 2 {
+			return "아이폰", strings.TrimSpace(m[1])
+		}
+		return "아이폰", ""
+	}
+	if strings.Contains(lowT, "맥북") || strings.Contains(lowT, "macbook") {
+		if m := regexp.MustCompile(`(?:맥북|macbook)\s+(\w+(?:\s+\w+)?)`).FindStringSubmatch(lowT); len(m) >= 2 {
+			return "맥북", strings.TrimSpace(m[1])
+		}
+		return "맥북", ""
+	}
+
     // 2) Accusative + purchase-verb pattern:  (NOUN{1,6}) (accusative particle) (buy|order|pay|purchase)
-	re := regexp.MustCompile(`([^\s,]{1,80}(?:\s+[^\s,]{1,80}){0,5})\s*(?:을|를)\s*(?:구매|주문|결제|사|사줘|사주세요)`)
-	if m := re.FindStringSubmatch(t); len(m) > 1 {
+	// First, clean the text by removing amounts and recipients
+	cleanText := regexp.MustCompile(`\d+[만억천백\d,\.]*\s*(?:원|krw|만원)(?:으로|로)?\s+`).ReplaceAllString(t, "")
+	cleanText = regexp.MustCompile(`\s+(?:한테|에게)\s+[^\s]+\s+`).ReplaceAllString(cleanText, " ")
+	cleanText = regexp.MustCompile(`\s+(?:카드|토스|카카오페이|현금|계좌)(?:로|으로)\s+`).ReplaceAllString(cleanText, " ")
+
+	re := regexp.MustCompile(`([가-힣a-zA-Z0-9]+(?:\s+[가-힣a-zA-Z0-9]+){0,5}?)\s*(?:을|를)\s*(?:구매|주문|결제|사|사줘|사주세요|보내줘|보내|보내주세요)`)
+	if m := re.FindStringSubmatch(cleanText); len(m) > 1 {
 		cand := strings.TrimSpace(m[1])
 		if cand != "" && !isExcluded(cand, exclude) {
 			return splitItemModel(cand)
@@ -541,6 +567,10 @@ func pickMethod(t string) string {
 	if strings.Contains(t, "현금") {
 		return "현금"
 	}
+	// Generic "card" keyword
+	if strings.Contains(t, "카드") || strings.Contains(strings.ToLower(t), "card") {
+		return "card"
+	}
 	return ""
 }
 
@@ -565,8 +595,10 @@ func pickRecipient(t string) string {
 		seg := strings.TrimSpace(t[i:])
 		seg = strings.TrimPrefix(seg, "수령자")
 		seg = strings.Trim(seg, " 는은이가: ")
-		seg = strings.Fields(seg)[0]
-		return seg
+		if len(strings.Fields(seg)) > 0 {
+			seg = strings.Fields(seg)[0]
+			return seg
+		}
 	}
 	if i := strings.Index(t, "에게 배송"); i > 0 {
 		pre := strings.TrimSpace(t[:i])
@@ -574,6 +606,11 @@ func pickRecipient(t string) string {
 		if len(parts) > 0 {
 			return parts[len(parts)-1]
 		}
+	}
+	// Pattern: "XXX한테" or "XXX에게"
+	re := regexp.MustCompile(`([가-힣a-zA-Z0-9]+)\s*(?:한테|에게)`)
+	if m := re.FindStringSubmatch(t); len(m) >= 2 {
+		return strings.TrimSpace(m[1])
 	}
 	return ""
 }
