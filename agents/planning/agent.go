@@ -1,27 +1,45 @@
 package planning
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 
-	"github.com/sage-x-project/sage-multi-agent/adapters"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
+	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
+
+	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
+	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
+	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
-// PlanningAgent handles travel and accommodation planning requests
+// PlanningAgent handles travel & accommodation requests IN-PROC,
+// and (optionally) forwards to an EXTERNAL planning service.
+// Only the outbound call (agent -> external) is A2A-signed when SAGE is ON.
 type PlanningAgent struct {
 	Name        string
-	Port        int
 	SAGEEnabled bool
-	sageManager *adapters.FlexibleSAGEManager // Changed to FlexibleSAGEManager
-	hotels      []Hotel
+
+	ExternalURL string // e.g. http://external-planning:19081 (empty => local only)
+
+	// Outbound signing
+	myDID did.AgentDID
+	myKey sagecrypto.KeyPair
+	a2a   *a2aclient.A2AClient
+
+	httpClient *http.Client
+
+	hotels []Hotel
 }
 
-// Hotel represents hotel information
 type Hotel struct {
 	Name     string  `json:"name"`
 	Location string  `json:"location"`
@@ -30,18 +48,141 @@ type Hotel struct {
 	URL      string  `json:"url"`
 }
 
-// NewPlanningAgent creates a new planning agent instance
-func NewPlanningAgent(name string, port int) *PlanningAgent {
+func NewPlanningAgent(name string) *PlanningAgent {
 	return &PlanningAgent{
 		Name:        name,
-		Port:        port,
-		SAGEEnabled: true,
-		hotels:      initializeHotels(),
+		SAGEEnabled: envBool("PLANNING_SAGE_ENABLED", true),
+		ExternalURL: strings.TrimRight(envOr("PLANNING_EXTERNAL_URL", ""), "/"),
+		httpClient:  http.DefaultClient,
+		hotels:      initHotels(),
 	}
 }
 
-// initializeHotels creates sample hotel data
-func initializeHotels() []Hotel {
+// IN-PROC entrypoint (Root -> Planning)
+func (pa *PlanningAgent) Process(ctx context.Context, msg types.AgentMessage) (types.AgentMessage, error) {
+	// If external URL is set, prefer forwarding to external service.
+	if pa.ExternalURL != "" {
+		if out, err := pa.forwardExternal(ctx, &msg); err == nil {
+			return *out, nil
+		}
+		// On external error, gracefully fall back to local logic.
+	}
+
+	// Local logic (same UX as before)
+	content := strings.ToLower(msg.Content)
+	var responseContent string
+	if strings.Contains(content, "hotel") || strings.Contains(content, "accommodation") {
+		responseContent = pa.handleHotelRequest(msg.Content)
+	} else {
+		responseContent = pa.handleGeneralPlanningRequest(msg.Content)
+	}
+
+	return types.AgentMessage{
+		ID:        "resp-" + msg.ID,
+		From:      pa.Name,
+		To:        msg.From,
+		Type:      "response",
+		Content:   responseContent,
+		Timestamp: time.Now(),
+		Metadata:  map[string]any{"agent_type": "planning"},
+	}, nil
+}
+
+// ---- Outbound (agent -> external) ----
+
+func (pa *PlanningAgent) forwardExternal(ctx context.Context, msg *types.AgentMessage) (*types.AgentMessage, error) {
+	body, _ := json.Marshal(msg)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, pa.ExternalURL+"/process", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("new req: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// Optional body integrity (tamper detection)
+	req.Header.Set("Content-Digest", a2autil.ComputeContentDigest(body))
+
+	resp, err := pa.do(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out types.AgentMessage
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(resp.Body)
+
+	if resp.StatusCode/100 != 2 {
+		return &types.AgentMessage{
+			ID:        msg.ID + "-exterr",
+			From:      "external-planning",
+			To:        msg.From,
+			Type:      "error",
+			Content:   fmt.Sprintf("external error: %d %s", resp.StatusCode, strings.TrimSpace(buf.String())),
+			Timestamp: time.Now(),
+		}, nil
+	}
+
+	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
+		out = types.AgentMessage{
+			ID:        msg.ID + "-ext",
+			From:      "external-planning",
+			To:        msg.From,
+			Type:      "response",
+			Content:   strings.TrimSpace(buf.String()),
+			Timestamp: time.Now(),
+		}
+	}
+	return &out, nil
+}
+
+func (pa *PlanningAgent) do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	// Initialize signing client lazily (only when SAGE ON + actually needed)
+	if pa.SAGEEnabled {
+		if pa.a2a == nil {
+			if err := pa.initSigning(); err != nil {
+				return nil, err
+			}
+		}
+		return pa.a2a.Do(ctx, req)
+	}
+	return pa.httpClient.Do(req)
+}
+
+func (pa *PlanningAgent) initSigning() error {
+	jwk := strings.TrimSpace(os.Getenv("PLANNING_JWK_FILE"))
+	if jwk == "" {
+		return fmt.Errorf("PLANNING_JWK_FILE required for SAGE signing")
+	}
+	raw, err := os.ReadFile(jwk)
+	if err != nil {
+		return fmt.Errorf("read PLANNING_JWK_FILE: %w", err)
+	}
+	imp := formats.NewJWKImporter()
+	kp, err := imp.Import(raw, sagecrypto.KeyFormatJWK)
+	if err != nil {
+		return fmt.Errorf("import planning JWK: %w", err)
+	}
+
+	didStr := strings.TrimSpace(os.Getenv("PLANNING_DID"))
+	if didStr == "" {
+		if ecdsaPriv, ok := kp.PrivateKey().(*ecdsa.PrivateKey); ok {
+			addr := ethcrypto.PubkeyToAddress(ecdsaPriv.PublicKey).Hex()
+			didStr = "did:sage:ethereum:" + addr
+		} else if id := strings.TrimSpace(kp.ID()); id != "" {
+			didStr = "did:sage:generated:" + id
+		} else {
+			return fmt.Errorf("PLANNING_DID not set and cannot derive from key")
+		}
+	}
+
+	pa.myKey = kp
+	pa.myDID = did.AgentDID(didStr)
+	pa.a2a = a2aclient.NewA2AClient(pa.myDID, pa.myKey, http.DefaultClient)
+	return nil
+}
+
+// ---- Local helpers (unchanged UX) ----
+
+func initHotels() []Hotel {
 	return []Hotel{
 		{Name: "Grand Hotel Seoul", Location: "Myeongdong", Price: 250.0, Rating: 4.5, URL: "https://grandhotel.com/seoul"},
 		{Name: "Plaza Hotel", Location: "Myeongdong", Price: 300.0, Rating: 4.7, URL: "https://plaza.com/seoul"},
@@ -51,119 +192,50 @@ func initializeHotels() []Hotel {
 	}
 }
 
-// ProcessRequest processes planning requests
-func (pa *PlanningAgent) ProcessRequest(ctx context.Context, request *types.AgentMessage) (*types.AgentMessage, error) {
-	log.Printf("Planning Agent processing request: %s", request.Content)
-
-	// Verify message if SAGE is enabled (flexible mode allows non-DID messages)
-	if pa.SAGEEnabled && pa.sageManager != nil {
-		valid, err := pa.sageManager.VerifyMessage(request)
-		if err != nil {
-			log.Printf("Request verification warning: %v", err)
-			// Continue if it's a non-DID entity
-		} else if !valid {
-			log.Printf("Request verification failed - invalid signature")
-			return nil, fmt.Errorf("request verification failed")
-		}
-	}
-
-	// Process the planning request
-	var responseContent string
-	if strings.Contains(strings.ToLower(request.Content), "hotel") ||
-	   strings.Contains(strings.ToLower(request.Content), "accommodation") {
-		responseContent = pa.handleHotelRequest(request.Content)
-	} else {
-		responseContent = pa.handleGeneralPlanningRequest(request.Content)
-	}
-
-	// Create response
-	response := &types.AgentMessage{
-		ID:        fmt.Sprintf("resp-%s", request.ID),
-		From:      pa.Name,
-		To:        request.From,
-		Content:   responseContent,
-		Timestamp: request.Timestamp,
-		Type:      "response",
-		Metadata:  map[string]interface{}{"agent_type": "planning"},
-	}
-
-	// Process response with SAGE if enabled
-	if pa.SAGEEnabled && pa.sageManager != nil {
-		processedResponse, err := pa.sageManager.ProcessMessageWithSAGE(response)
-		if err != nil {
-			log.Printf("Failed to process response with SAGE: %v", err)
-			// Continue without SAGE features for non-DID entities
-			return response, nil
-		}
-		return processedResponse, nil
-	}
-
-	return response, nil
-}
-
-// handleHotelRequest handles hotel booking requests
 func (pa *PlanningAgent) handleHotelRequest(content string) string {
-	// Find hotels based on location
 	location := pa.extractLocation(content)
-	relevantHotels := pa.findHotelsByLocation(location)
-
-	if len(relevantHotels) == 0 {
+	relevant := pa.findHotelsByLocation(location)
+	if len(relevant) == 0 {
 		return fmt.Sprintf("No hotels found in %s. Please try another location.", location)
 	}
-
-	// Format response with hotel recommendations
-	var recommendations []string
-	recommendations = append(recommendations, fmt.Sprintf("Hotel recommendations for %s:", location))
-
-	for i, hotel := range relevantHotels {
-		if i >= 3 { // Limit to top 3 recommendations
+	var lines []string
+	lines = append(lines, fmt.Sprintf("Hotel recommendations for %s:", location))
+	for i, h := range relevant {
+		if i >= 3 {
 			break
 		}
-		recommendations = append(recommendations, fmt.Sprintf(
-			"%d. %s - $%.2f/night, Rating: %.1f/5 - Book at: %s",
-			i+1, hotel.Name, hotel.Price, hotel.Rating, hotel.URL,
-		))
+		lines = append(lines, fmt.Sprintf("%d. %s - $%.2f/night, Rating: %.1f/5 - Book at: %s",
+			i+1, h.Name, h.Price, h.Rating, h.URL))
 	}
-
-	return strings.Join(recommendations, "\n")
+	return strings.Join(lines, "\n")
 }
 
-// handleGeneralPlanningRequest handles general planning requests
 func (pa *PlanningAgent) handleGeneralPlanningRequest(content string) string {
 	return fmt.Sprintf("Planning Agent received your request: '%s'. I can help with hotel bookings, travel planning, and accommodation arrangements.", content)
 }
 
-// extractLocation extracts location from request content
 func (pa *PlanningAgent) extractLocation(content string) string {
-	// Common locations
 	locations := []string{"myeongdong", "gangnam", "jongno", "hongdae", "itaewon"}
-
-	contentLower := strings.ToLower(content)
+	c := strings.ToLower(content)
 	for _, loc := range locations {
-		if strings.Contains(contentLower, loc) {
+		if strings.Contains(c, loc) {
 			return strings.Title(loc)
 		}
 	}
-
-	// Default to Myeongdong if no specific location found
-	if strings.Contains(contentLower, "seoul") || strings.Contains(contentLower, "hotel") {
+	if strings.Contains(c, "seoul") || strings.Contains(c, "hotel") {
 		return "Myeongdong"
 	}
-
 	return "Seoul"
 }
 
-// findHotelsByLocation finds hotels in a specific location
 func (pa *PlanningAgent) findHotelsByLocation(location string) []Hotel {
 	var results []Hotel
-
-	for _, hotel := range pa.hotels {
-		if strings.EqualFold(hotel.Location, location) || location == "Seoul" {
-			results = append(results, hotel)
+	for _, h := range pa.hotels {
+		if strings.EqualFold(h.Location, location) || location == "Seoul" {
+			results = append(results, h)
 		}
 	}
-
-	// Sort by rating (simple bubble sort for small dataset)
+	// naive sort by rating desc
 	for i := 0; i < len(results)-1; i++ {
 		for j := 0; j < len(results)-i-1; j++ {
 			if results[j].Rating < results[j+1].Rating {
@@ -171,67 +243,20 @@ func (pa *PlanningAgent) findHotelsByLocation(location string) []Hotel {
 			}
 		}
 	}
-
 	return results
 }
 
-// Start starts the planning agent server
-func (pa *PlanningAgent) Start() error {
-	// Initialize SAGE manager if enabled
-	if pa.SAGEEnabled {
-		sageManager, err := adapters.NewSAGEManagerWithKeyType(pa.Name, "secp256k1")
-		if err != nil {
-			log.Printf("Failed to initialize SAGE manager: %v", err)
-			// Continue without SAGE
-		} else {
-			// Wrap with FlexibleSAGEManager to allow non-DID entities
-			pa.sageManager = adapters.NewFlexibleSAGEManager(sageManager)
-			pa.sageManager.SetAllowNonDID(true) // Allow non-DID messages by default
-			log.Printf("Flexible SAGE manager initialized for %s (non-DID messages allowed)", pa.Name)
-		}
+// ---- utils ----
+
+func envOr(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
 	}
-
-	// Create a new ServeMux for this agent
-	mux := http.NewServeMux()
-	mux.HandleFunc("/process", pa.handleProcessRequest)
-	mux.HandleFunc("/status", pa.handleStatus)
-
-	log.Printf("Planning Agent starting on port %d", pa.Port)
-	return http.ListenAndServe(fmt.Sprintf(":%d", pa.Port), mux)
+	return d
 }
-
-// handleProcessRequest handles incoming process requests
-func (pa *PlanningAgent) handleProcessRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+func envBool(k string, d bool) bool {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv(k))); v != "" {
+		return v == "1" || v == "true" || v == "on" || v == "yes"
 	}
-
-	var request types.AgentMessage
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	response, err := pa.ProcessRequest(r.Context(), &request)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
-
-// handleStatus returns the agent status
-func (pa *PlanningAgent) handleStatus(w http.ResponseWriter, r *http.Request) {
-	status := map[string]interface{}{
-		"name":         pa.Name,
-		"sage_enabled": pa.SAGEEnabled,
-		"type":         "planning",
-		"hotels_count": len(pa.hotels),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	return d
 }

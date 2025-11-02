@@ -7,6 +7,7 @@ import (
 // AgentMessage represents a message between agents (simplified structure for agent APIs)
 type AgentMessage struct {
 	ID        string                 `json:"id"`
+	ContextID string                 `json:"contextId,omitempty"`
 	From      string                 `json:"from"`
 	To        string                 `json:"to"`
 	Content   string                 `json:"content"`

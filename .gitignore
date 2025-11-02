@@ -27,13 +27,13 @@ build/
 # Binary files (from direct builds)
 /cli/cli
 /cli/root/root
-/cli/ordering/ordering
+/cli/medical/medical
 /cli/planning/planning
 /cli/register/register
 /client/client
 /client/enhanced_client
 /root
-/ordering
+/medical
 /planning
 /cli
 /register
@@ -59,7 +59,7 @@ build/
 .Trashes
 ehthumbs.db
 Thumbs.db
-
+.cid
 # Environment files
 .env
 .env.local
@@ -75,6 +75,7 @@ keys/
 *.pfx
 private_key.txt
 generated_agent_keys.json
+merged_agent_keys.json
 all_keys.json
 
 # Logs

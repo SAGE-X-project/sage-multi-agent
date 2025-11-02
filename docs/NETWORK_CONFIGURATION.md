@@ -6,13 +6,13 @@ This guide explains how to configure SAGE Multi-Agent system to work with differ
 
 The system supports the following networks:
 
-| Network | Chain ID | Type | Description |
-|---------|----------|------|-------------|
-| `local` | 31337 | Development | Local Hardhat node |
-| `ethereum` | 1 | Mainnet | Ethereum mainnet |
-| `sepolia` | 11155111 | Testnet | Ethereum Sepolia testnet |
-| `kaia` | 8217 | Mainnet | Kaia (formerly Klaytn) mainnet |
-| `kairos` | 1001 | Testnet | Kaia testnet (Kairos) |
+| Network    | Chain ID | Type        | Description                    |
+| ---------- | -------- | ----------- | ------------------------------ |
+| `local`    | 31337    | Development | Local Hardhat node             |
+| `ethereum` | 1        | Mainnet     | Ethereum mainnet               |
+| `sepolia`  | 11155111 | Testnet     | Ethereum Sepolia testnet       |
+| `kaia`     | 8217     | Mainnet     | Kaia (formerly Klaytn) mainnet |
+| `kairos`   | 1001     | Testnet     | Kaia testnet (Kairos)          |
 
 ## Configuration Steps
 
@@ -41,12 +41,13 @@ Based on your selected network, configure the appropriate variables:
 
 ```env
 SAGE_NETWORK=local
-LOCAL_CONTRACT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+LOCAL_CONTRACT_ADDRESS=0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
 LOCAL_RPC_ENDPOINT=http://localhost:8545
 LOCAL_CHAIN_ID=31337
 ```
 
 **Setup:**
+
 1. Start local Hardhat node:
    ```bash
    cd ../sage/contracts/ethereum
@@ -68,6 +69,7 @@ ETH_CHAIN_ID=1
 ```
 
 **Requirements:**
+
 - Alchemy or Infura API key
 - Deployed SAGE contract on Ethereum mainnet
 - ETH for gas fees
@@ -82,6 +84,7 @@ SEPOLIA_CHAIN_ID=11155111
 ```
 
 **Requirements:**
+
 - Alchemy or Infura API key
 - Deployed SAGE contract on Sepolia
 - Sepolia ETH from faucet
@@ -96,6 +99,7 @@ KAIA_CHAIN_ID=8217
 ```
 
 **Requirements:**
+
 - Deployed SAGE contract on Kaia mainnet
 - KAIA tokens for gas fees
 
@@ -109,6 +113,7 @@ KAIROS_CHAIN_ID=1001
 ```
 
 **Requirements:**
+
 - Deployed SAGE contract on Kairos
 - Test KAIA from faucet: https://kairos.wallet.kaia.io/faucet
 
@@ -120,7 +125,7 @@ Set the private key for agent registration (without 0x prefix):
 REGISTRATION_PRIVATE_KEY=your_private_key_here
 ```
 
- **Security Warning**: Never commit private keys to version control!
+**Security Warning**: Never commit private keys to version control!
 
 ### 5. Set API Keys
 
@@ -138,7 +143,7 @@ You can also override network settings in agent configuration files:
 
 ```yaml
 network:
-  chain: "kairos"  # Override SAGE_NETWORK from env
+  chain: "kairos" # Override SAGE_NETWORK from env
   confirmation_blocks: 3
   gas_limit: 3000000
 ```
@@ -158,20 +163,20 @@ network:
 
 ```bash
 # Default (uses SAGE_NETWORK from .env)
-./bin/ordering -port 8083
+./bin/medical -port 8083
 
 # Override network for specific run
-SAGE_NETWORK=sepolia ./bin/ordering -port 8083
+SAGE_NETWORK=sepolia ./bin/medical -port 8083
 ```
 
 ### Using Configuration File
 
 ```bash
 # Use local configuration
-AGENT_CONFIG_PATH=configs/agent_config_local.yaml ./bin/ordering
+AGENT_CONFIG_PATH=configs/agent_config_local.yaml ./bin/medical
 
 # Use production configuration
-AGENT_CONFIG_PATH=configs/agent_config.yaml ./bin/ordering
+AGENT_CONFIG_PATH=configs/agent_config.yaml ./bin/medical
 ```
 
 ## Troubleshooting
@@ -181,6 +186,7 @@ AGENT_CONFIG_PATH=configs/agent_config.yaml ./bin/ordering
 This error occurs when the contract address for the selected network is not configured.
 
 **Solution:**
+
 1. Check your `SAGE_NETWORK` setting
 2. Ensure the corresponding `*_CONTRACT_ADDRESS` is set
 3. Example for Kairos:
@@ -195,6 +201,7 @@ This error occurs when an invalid network name is specified.
 
 **Solution:**
 Use one of the supported network names:
+
 - `local` (or `localhost`, `hardhat`)
 - `ethereum` (or `eth`, `mainnet`)
 - `sepolia`
@@ -219,10 +226,10 @@ Test your configuration:
 make build
 
 # Test connection (will fail if network not configured properly)
-./bin/ordering -port 8083 -skip-verification
+./bin/medical -port 8083 -skip-verification
 
 # Check logs for network connection
-tail -f logs/ordering.log
+tail -f logs/medical.log
 ```
 
 ## Best Practices
@@ -230,7 +237,7 @@ tail -f logs/ordering.log
 1. **Development**: Use `local` network for development and testing
 2. **Staging**: Use `sepolia` or `kairos` for staging/testing
 3. **Production**: Use `ethereum` or `kaia` for production
-4. **Security**: 
+4. **Security**:
    - Never commit `.env` files with real private keys
    - Use different keys for different environments
    - Rotate keys regularly
@@ -270,10 +277,10 @@ Load specific environment:
 ```bash
 # Load staging environment
 cp .env.staging .env
-./bin/ordering
+./bin/medical
 
 # Or use dotenv directly
-dotenv -e .env.staging ./bin/ordering
+dotenv -e .env.staging ./bin/medical
 ```
 
 ## Contract Deployment

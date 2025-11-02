@@ -47,8 +47,8 @@ echo ""
 # Build Root Agent
 build_component "Root Agent" "./cli/root" "bin/root"
 
-# Build Ordering Agent
-build_component "Ordering Agent" "./cli/ordering" "bin/ordering"
+# Build MEDICAL Agent
+build_component "MEDICAL Agent" "./cli/medical" "bin/medical"
 
 # Build Planning Agent
 build_component "Planning Agent" "./cli/planning" "bin/planning"
@@ -56,11 +56,8 @@ build_component "Planning Agent" "./cli/planning" "bin/planning"
 # Build CLI Client
 build_component "CLI Client" "./cli" "bin/cli"
 
-# Build Client Server (basic version)
-build_component "Client Server" "./client/main.go" "bin/client"
-
-# Build Enhanced Client Server
-build_component "Enhanced Client Server" "./client/enhanced_main.go" "bin/enhanced_client"
+# Build Client Server (from cmd path)
+build_component "Client Server" "./cmd/client/main.go" "bin/client"
 
 echo ""
 echo "======================================"

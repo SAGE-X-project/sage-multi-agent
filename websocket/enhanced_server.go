@@ -388,7 +388,7 @@ func (s *EnhancedLogServer) corsMiddleware(next http.Handler) http.Handler {
 		// Set CORS headers
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-SAGE-Enabled, X-Scenario")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-SAGE-Enabled, X-HPKE-Enabled, X-Scenario")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		// Handle preflight requests

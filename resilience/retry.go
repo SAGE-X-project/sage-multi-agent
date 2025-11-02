@@ -197,8 +197,7 @@ func (p *LinearBackoffPolicy) ShouldRetry(err error, attempt int) bool {
 
 // RetryWithPolicy executes a function with a custom retry policy
 func RetryWithPolicy(ctx context.Context, policy RetryPolicy, fn func() error) error {
-	attempt := 0
-	var lastErr error
+    attempt := 0
 
 	for {
 		// Check context cancellation
@@ -209,14 +208,12 @@ func RetryWithPolicy(ctx context.Context, policy RetryPolicy, fn func() error) e
 		// Execute the function
 		if err := fn(); err == nil {
 			return nil
-		} else {
-			lastErr = err
-
-			// Check if we should retry
-			if !policy.ShouldRetry(err, attempt) {
-				return err
-			}
-		}
+        } else {
+            // Check if we should retry
+            if !policy.ShouldRetry(err, attempt) {
+                return err
+            }
+        }
 
 		// Calculate delay
 		delay := policy.NextDelay(attempt)
