@@ -16,9 +16,9 @@ import (
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
-	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
-	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
-	"github.com/sage-x-project/sage/pkg/agent/did"
+	// Use internal agent framework for key management
+	"github.com/sage-x-project/sage-multi-agent/internal/agent/keys"
+	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
 )
 
 // PlanningAgent handles travel & accommodation requests IN-PROC,
@@ -31,8 +31,8 @@ type PlanningAgent struct {
 	ExternalURL string // e.g. http://external-planning:19081 (empty => local only)
 
 	// Outbound signing
-	myDID did.AgentDID
-	myKey sagecrypto.KeyPair
+	myDID sagedid.AgentDID
+	myKey keys.KeyPair
 	a2a   *a2aclient.A2AClient
 
 	httpClient *http.Client
@@ -152,14 +152,9 @@ func (pa *PlanningAgent) initSigning() error {
 	if jwk == "" {
 		return fmt.Errorf("PLANNING_JWK_FILE required for SAGE signing")
 	}
-	raw, err := os.ReadFile(jwk)
+	kp, err := keys.LoadFromJWKFile(jwk)
 	if err != nil {
-		return fmt.Errorf("read PLANNING_JWK_FILE: %w", err)
-	}
-	imp := formats.NewJWKImporter()
-	kp, err := imp.Import(raw, sagecrypto.KeyFormatJWK)
-	if err != nil {
-		return fmt.Errorf("import planning JWK: %w", err)
+		return fmt.Errorf("load planning key: %w", err)
 	}
 
 	didStr := strings.TrimSpace(os.Getenv("PLANNING_DID"))
@@ -175,7 +170,7 @@ func (pa *PlanningAgent) initSigning() error {
 	}
 
 	pa.myKey = kp
-	pa.myDID = did.AgentDID(didStr)
+	pa.myDID = sagedid.AgentDID(didStr)
 	pa.a2a = a2aclient.NewA2AClient(pa.myDID, pa.myKey, http.DefaultClient)
 	return nil
 }
