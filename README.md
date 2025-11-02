@@ -195,6 +195,41 @@ await fetch("http://localhost:8086/api/request", {
 - Ensure keys exist: `keys/*.jwk`, `keys/kem/*.jwk`, `generated_agent_keys.json`
 - If developing without local `sage` repos, remove/adjust `replace` lines in `go.mod` and run `go mod tidy`
 
+## Migration to sage-a2a-go v1.7.0
+
+> ⚠️ **Important**: This project currently uses `internal/agent` framework. We recommend migrating to the official **sage-a2a-go v1.7.0 Agent Framework**.
+
+### Benefits
+
+- ✅ **Official Support**: Maintained by sage-a2a-go team
+- ✅ **78% Code Reduction**: Simplified initialization and configuration
+- ✅ **Comprehensive Testing**: 52 tests with 57.1% coverage
+- ✅ **Version Management**: Semantic versioning (v1.7.0+)
+
+### Quick Start
+
+```bash
+# 1. Add dependency
+go get github.com/sage-x-project/sage-a2a-go@v1.7.0
+
+# 2. Update imports
+find . -name "*.go" -type f -exec sed -i '' \
+  's|github.com/sage-x-project/sage-multi-agent/internal/agent|github.com/sage-x-project/sage-a2a-go/pkg/agent/framework|g' {} +
+
+# 3. Update types
+# internal/agent → framework (in type declarations)
+```
+
+### Documentation
+
+- 📖 [Full Migration Guide](./SAGE_A2A_GO_MIGRATION_GUIDE.md)
+- ⚡ [Quick Start](./MIGRATION_QUICKSTART.md)
+- 📚 [sage-a2a-go Framework Docs](https://github.com/sage-x-project/sage-a2a-go/blob/main/pkg/agent/framework/README.md)
+
+**Migration Timeline**: 5-9 days (includes testing and validation)
+
+---
+
 ## Security Notes
 
 - Demo keys are for local development only. Do not reuse in production.
