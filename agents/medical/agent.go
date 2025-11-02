@@ -326,7 +326,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}, nil
 	}
 
-    // ===== Metadata collection (prefer fields set by Root) =====
+	// ===== Metadata collection (prefer fields set by Root) =====
 	lang := getMetaString(in.Metadata, "lang")
 	if lang == "" {
 		lang = llm.DetectLang(in.Content)
@@ -354,7 +354,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		history = history[len(history)-int(histN):]
 	}
 
-    // User question body (fallback to lastMsg/symptoms if missing)
+	// User question body (fallback to lastMsg/symptoms if missing)
 	query := strings.TrimSpace(in.Content)
 	if query == "" {
 		if lastMsg != "" {
@@ -364,14 +364,14 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}
 	}
 
-    // ===== Build LLM prompt =====
+	// ===== Build LLM prompt =====
 	sys := map[string]string{
 		"ko": "너는 의료 정보 도우미야. 진단/처방 없이, 안전하고 일반적인 의학 정보를 한 문장으로만 제공해. 응급 징후가 의심되면 전문의 진료를 권유해. 목록/코드블록/장황한 설명 금지.",
 		"en": "You are a medical info assistant. Provide ONE short, safe, general informational sentence. No diagnosis/prescription. If red flags are possible, suggest seeing a professional. No lists or code blocks.",
 	}[lang]
 
 	var sb strings.Builder
-    // Summary context block (LLM-friendly format)
+	// Summary context block (LLM-friendly format)
 	if query != "" {
 		fmt.Fprintf(&sb, "UserQuestion: %s\n", query)
 	}
@@ -417,7 +417,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 	if lastMsg != "" {
 		fmt.Fprintf(&sb, "LastUserMessage: %s\n", lastMsg)
 	}
-    // Enforce output format
+	// Enforce output format
 	if lang == "ko" {
 		fmt.Fprint(&sb, "Output: 한 문장 한국어 답변만.\n")
 	} else {
@@ -425,11 +425,11 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 	}
 	usr := sb.String()
 
-    // ===== LLM call (fallback on failure) =====
+	// ===== LLM call (fallback on failure) =====
 	text := ""
 	if e.llmClient != nil {
 		out, err := e.llmClient.Chat(ctx, sys, usr)
-		e.logger.Println("[medical][llm]", out)
+		e.logger.Println("[medical][llm]", usr, out)
 		if err != nil {
 			e.logger.Printf("[medical][llm] chat error: %v", err)
 		} else if trimmed := strings.TrimSpace(out); trimmed != "" {
@@ -450,7 +450,7 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 		}
 	}
 
-    // ===== Response message =====
+	// ===== Response message =====
 	out := types.AgentMessage{
 		ID:        in.ID + "-medical",
 		From:      "medical",

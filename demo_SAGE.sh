@@ -54,7 +54,7 @@ fi
 : "${ROOT_PORT:=${ROOT_AGENT_PORT}}"
 : "${CLIENT_PORT:=8086}"
 : "${GATEWAY_PORT:=5500}"
-: "${EXT_PAYMENT_PORT:=19083}"
+: "${PAYMENT_AGENT_PORT:=19083}"
 : "${PAYMENT_AGENT_PORT:=18083}"
 
 # Default paths (will be normalized later)
@@ -185,7 +185,7 @@ SAGE_MODE="$SAGE_MODE" PAYMENT_JWK_FILE="$PAYMENT_JWK_FILE" PAYMENT_DID="$PAYMEN
 # ---------- 2) wait for endpoints ----------
 echo "[WAIT] endpoints"
 for url in \
-  "http://${HOST}:${EXT_PAYMENT_PORT}/status" \
+  "http://${HOST}:${PAYMENT_AGENT_PORT}/status" \
   "http://${HOST}:${GATEWAY_PORT}/status" \
   "http://${HOST}:${ROOT_PORT}/status" \
   "http://${HOST}:${CLIENT_PORT}/api/sage/config"

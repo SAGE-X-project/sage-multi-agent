@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send a prompt to the running Client API and (optionally) interact until Root collects info
-# and routes to Payment. Shows new Gateway/Root/Payment logs after each turn.
+# and routes to Payment/Medical. Shows new Gateway/Root/Medical/Payment logs after each turn.
 #
 # Usage:
 #   scripts/07_send_prompt.sh [--sage on|off] [--hpke on|off] [--prompt "<text>"]
@@ -116,10 +116,14 @@ RESP_PAYLOAD="$(mktemp -t prompt.resp.XXXX.json)"
 # ---------- logs ----------
 GW_LOG="logs/gateway.log"
 ROOT_LOG="logs/root.log"
+MED_LOG="logs/medical.log"     # <-- added
 PAY_LOG="logs/payment.log"
+
 get_lines() { [[ -f "$1" ]] && wc -l < "$1" || echo 0; }
+
 PRE_GW=$(get_lines "$GW_LOG")
 PRE_ROOT=$(get_lines "$ROOT_LOG")
+PRE_MED=$(get_lines "$MED_LOG")   # <-- added
 PRE_PAY=$(get_lines "$PAY_LOG")
 
 # ---------- conversation id ----------
@@ -129,7 +133,6 @@ else
   CID="cid-$(date +%s%N)"
   echo "$CID" > "$CID_FILE"
 fi
-
 
 # ---------- send once ----------
 send_once() {
@@ -186,6 +189,16 @@ send_once() {
     PRE_ROOT=$(get_lines "$ROOT_LOG")
   else
     echo "(root log not found: $ROOT_LOG)"
+  fi
+
+  if [[ -f "$MED_LOG" ]]; then
+    echo
+    echo "----- Medical service new logs (since request) -----"
+    local start=$((PRE_MED+1))
+    tail -n +"$start" "$MED_LOG" || true
+    PRE_MED=$(get_lines "$MED_LOG")
+  else
+    echo "(medical log not found: $MED_LOG)"
   fi
 
   if [[ -f "$PAY_LOG" ]]; then
@@ -273,4 +286,4 @@ else
 fi
 
 echo
-echo "[HINT] Check logs/root.log and logs/payment.log for full trace."
+echo "[HINT] Check logs/root.log, logs/medical.log and logs/payment.log for full trace."

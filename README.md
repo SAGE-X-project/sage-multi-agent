@@ -30,6 +30,7 @@ Notes on go.mod: this repo uses local `replace` directives to sibling checkouts 
 - Client API: `8086`
 - Gateway: `5500`
 - External Payment: `19083`
+- External Medical: `19082`
 
 All of these can be overridden via `.env` or flags (see scripts below).
 
@@ -49,206 +50,113 @@ Environment used by servers and middleware (with working defaults):
 
 Demo keys are provided under `keys/` and `generated_agent_keys.json` for convenience.
 
-## demo_SAGE
+## Quick Start: Register, Launch, Send
 
-1. Prerequisite — register agents on‑chain first
+1. Register agents (only once)
 
 ```bash
-# Writes/uses generated_agent_keys.json and registers to SageRegistryV4
-sh ./scripts/00_register_agents.sh --kem --agents "medical,planing,payment,external" --funding-key {private key}  # or --kem / --kem-only / signing only
+sh ./scripts/00_register_agents.sh \
+  --kem --merge \
+  --signing-keys ./generated_agent_keys.json \
+  --kem-keys ./keys/kem/generated_kem_keys.json \
+  --combined-out ./merged_agent_keys.json \
+  --agents "payment,planing,medical" \
+  --wait-seconds 60 \
+  --funding-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  --try-activate
 ```
 
-If you don't have keys yet:
+- Merges signing+KEM keys, commits→registers, and tries activation after the delay.
+- The `--funding-key` shown is the default Hardhat/Anvil dev key; replace if needed.
 
-- Generate signing (ECDSA secp256k1) keys and summary first (required before registration):
-  - `go run tools/keygen/gen_agents_key.go --agents "payment,medical,planing,external"`
-- To use HPKE, generate KEM (X25519) keys (External server requires a KEM private JWK):
-  - `go run tools/keygen/gen_kem_keys.go --agents "payment,external"`
-  - Ensure `PAYMENT_KEM_JWK_FILE` points to the external agent's KEM JWK (default: `keys/kem/external.x25519.jwk`).
+2. Launch services (Gateway tamper by default)
 
-2. Run the demo with three toggles
+```bash
+./scripts/06_start_all.sh --tamper  # tamper mode (default)
+./scripts/06_start_all.sh --pass   # pass-through (no tampering)
+```
 
-- SAGE on/off (request‑time):
+- `--pass`: Gateway forwards requests unchanged.
+- No flag: Gateway injects a small tamper string into JSON (or flips ciphertext when HPKE is on).
 
-  - SAGE ON: send requests with `-H 'X-SAGE-Enabled: true'` to sign agent→external (**default**)
-  - SAGE OFF: use `-H 'X-SAGE-Enabled: false'` (no signing)
-  - Optional global switch: `scripts/toggle_sage.sh on|off`
+3. Send a message
 
-- Gateway tamper/pass (process‑start):
+Using helper script (recommended):
 
-  - `./demo_SAGE.sh --tamper` (mutate bodies; demo attack) — **default**
-  - `./demo_SAGE.sh --pass` (pass‑through)
+```bash
+# Single turn (signed)
+./scripts/07_send_prompt.sh --sage on --prompt "iPhone 15 프로 구매해줘"
 
-- HPKE on/off (process‑start):
+# With HPKE (requires SAGE on)
+./scripts/07_send_prompt.sh --sage on --hpke on --prompt "고지혈증 진단을받았어. 어떻게 관리해야할까"
 
-  - `./demo_SAGE.sh --hpke on --hpke-keys generated_agent_keys.json`
-  - `./demo_SAGE.sh --hpke off` (**default**)
-  - Requires KEM keys (see above). HPKE is only available when SAGE mode is ON (`X-SAGE-Enabled: true`).
+# Interactive multi-turn
+./scripts/07_send_prompt.sh --sage on -i
+```
 
-- Prompt (request content):
-  - `./demo_SAGE.sh --prompt "<text>"` sets the prompt the Client API sends (default: `send 10 USDC to merchant`).
+Or via curl to the Client API:
 
-Defaults when flags are omitted
+```bash
+curl -sS -X POST http://localhost:8086/api/request \
+  -H 'Content-Type: application/json' \
+  -H 'X-SAGE-Enabled: true' \
+  --data-binary '{"prompt":"send 5 usdc to bob"}' | jq
+```
 
-- `--sage on`
-- `--tamper` (gateway mutates bodies)
-- `--hpke off`
-- `--hpke-keys generated_agent_keys.json`
-- `--prompt "send 10 USDC to merchant"`
+## Frontend Request Guide
+
+Endpoint
+
+- `POST http://localhost:8086/api/request`
+
+Headers
+
+- `Content-Type: application/json` (required)
+- `X-SAGE-Enabled: true|false` — enable/disable A2A signing (required for HPKE)
+- `X-HPKE-Enabled: true|false` — request HPKE (requires SAGE=true)
+- `X-Conversation-ID` or `X-SAGE-Context-ID` — optional; keeps conversation state across turns
+- `X-Scenario: <name>` — optional, for logging and demos
+
+Body
+
+- `{ "prompt": "..." }` (optionally include `conversationId` too)
+
+Rules
+
+- If `X-HPKE-Enabled: true` while `X-SAGE-Enabled: false`, the API returns `400 Bad Request`.
+- When HPKE is ON, the first request may perform a session handshake; subsequent requests carry ciphertext.
 
 Examples
 
 ```bash
-# Tamper + HPKE OFF (observe RFC9421 signature failure when SAGE=ON)
-sh ./demo_SAGE.sh --tamper --hpke off
-
-# Tamper + HPKE ON (observe HPKE decrypt error on manipulated ciphertext)
-sh ./demo_SAGE.sh --tamper --hpke on --hpke-keys generated_agent_keys.json
-
-# Pass‑through + HPKE ON (no manipulation; encrypted hop to External)
-sh ./demo_SAGE.sh --sage on --pass --hpke on --prompt "send me 100 USDC"
-```
-
-Send a request (SAGE ON/OFF is per request):
-
-```bash
-curl -sS POST http://localhost:8086/api/request \
+# SAGE ON (signed), HPKE OFF
+curl -sS -X POST http://localhost:8086/api/request \
   -H 'Content-Type: application/json' \
   -H 'X-SAGE-Enabled: true' \
-  -d '{"prompt":"send 5 usdc to bob"}' | jq
-```
+  --data-binary '{"prompt":"buy an iPhone 15"}' | jq
 
-3. What happens with HPKE/tamper/SAGE
-
-- HPKE ON → Gateway sees only ciphertext. If tamper=ON, it flips a byte; External rejects with HPKE decrypt error.
-- HPKE OFF + SAGE ON → Gateway changes plaintext; External’s DID middleware detects RFC 9421 signature mismatch (4xx).
-- HPKE OFF + SAGE OFF → Tampered payload passes through; demo shows why signing matters.
-
-## Manual Start (granular)
-
-1. External Payment (verifies RFC 9421 + DID)
-
-```bash
-# require signatures (default)
-EXTERNAL_REQUIRE_SIG=1 ./scripts/02_start_external_payment_agent.sh
-
-# or allow unsigned (demo)
-EXTERNAL_REQUIRE_SIG=0 ./scripts/02_start_external_payment_agent.sh
-```
-
-2. Gateway (tamper or pass‑through)
-
-```bash
-./scripts/03_start_gateway_tamper.sh
-# or
-./scripts/03_start_gateway_pass.sh
-```
-
-3. Root + HPKE (optional)
-
-```bash
-go run ./cmd/root/main.go \
-  -port 18080 \
-  -hpke \
-  -hpke-keys generated_agent_keys.json
-```
-
-4. Client API (signs client→root if provided a JWK)
-
-```bash
-go run ./cmd/client/main.go -port 8086 -root http://localhost:18080
-
-# Optional client signing
-go run ./cmd/client/main.go \
-  -client-jwk keys/payment.jwk \
-  -client-did did:sage:generated:client-1
-```
-
-## Registering Agents (on‑chain)
-
-The DID middleware resolves keys from the SAGE Registry V4. For a clean setup:
-
-- Generate ECDSA keys and summary (demo already includes `generated_agent_keys.json`):
-
-  - `go run -tags=reg_agents_key tools/keygen/gen_agents_key.go --agents "payment,medical,planing,external"`
-
-- Generate X25519 KEM keys (optional, demo includes `keys/kem/generated_kem_keys.json`):
-
-  - `go run -tags=reg_kem_key tools/keygen/gen_kem_keys.go --agents "payment,external"`
-
-- Register ECDSA and add KEM in one flow:
-
-```bash
-# Requires ETH_RPC_URL and SAGE_REGISTRY_ADDRESS (defaults are local dev)
-./scripts/00_register_agents.sh --both
-```
-
-Funding helpers are built‑in (Hardhat/Anvil setBalance; optional `--funding-key` + `cast`).
-
-## Making Requests
-
-- The Client API exposes a single endpoint. Root routes by content (planning/medical/payment).
-
-```bash
-curl -sS POST http://localhost:8086/api/request \
-  -H 'Content-Type: application/json' \
-  -H 'X-SAGE-Enabled: true' \
-  -d '{"prompt":"send 5 usdc to bob"}' | jq
-```
-
-Header semantics:
-
-- `X-SAGE-Enabled: true|false` toggles A2A signing at sub‑agents (Payment→External)
-- `X-Scenario` is forwarded to agents as metadata (optional)
-- `X-HPKE-Enabled: true|false` toggles HPKE per request. When omitted, the server uses its current session default (e.g., demo_SAGE.sh process‑start HPKE).
-
-## Frontend Integration
-
-- Endpoint
-
-  - `POST /api/request`
-  - Headers
-    - `X-SAGE-Enabled: true|false` (per-request signing toggle)
-    - `X-HPKE-Enabled: true|false` (per-request HPKE toggle; requires SAGE=true)
-  - Body
-    - `{ "prompt": "send 10 USDC" }`
-  - Response
-    - `{ response, sageVerification, metadata, logs? }`
-
-- Rules
-
-  - HPKE requires SAGE to be enabled. If `X-HPKE-Enabled: true` while `X-SAGE-Enabled: false`, the API returns `400 Bad Request` with `{ error: "bad_request" }`.
-  - When HPKE is ON:
-    - First request lazily bootstraps a session if needed; subsequent requests send ciphertext (`Content-Type: application/sage+hpke`).
-  - When HPKE is OFF:
-    - Plaintext JSON is sent, still signed if SAGE is ON.
-
-- Examples
-
-```bash
-# SAGE ON + HPKE ON (single request)
-curl -sS POST http://localhost:8086/api/request \
+# SAGE ON + HPKE ON
+curl -sS -X POST http://localhost:8086/api/request \
   -H 'Content-Type: application/json' \
   -H 'X-SAGE-Enabled: true' \
   -H 'X-HPKE-Enabled: true' \
-  -d '{"prompt":"send 10 USDC"}' | jq
+  --data-binary '{"prompt":"send 10 USDC to merchant"}' | jq
 
-# SAGE OFF + HPKE OFF (plaintext, unsigned)
-curl -sS POST http://localhost:8086/api/request \
+# Multi-turn with a fixed conversation id
+CID="demo-$(date +%s)"
+curl -sS -X POST http://localhost:8086/api/request \
   -H 'Content-Type: application/json' \
-  -H 'X-SAGE-Enabled: false' \
-  -H 'X-HPKE-Enabled: false' \
-  -d '{"prompt":"send 10 USDC"}' | jq
-
-# Invalid: HPKE ON while SAGE OFF → 400
-curl -sS -i POST http://localhost:8086/api/request \
+  -H "X-SAGE-Enabled: true" \
+  -H "X-Conversation-ID: $CID" -H "X-SAGE-Context-ID: $CID" \
+  --data-binary '{"prompt":"buy an iPhone 15"}' | jq
+curl -sS -X POST http://localhost:8086/api/request \
   -H 'Content-Type: application/json' \
-  -H 'X-SAGE-Enabled: false' \
-  -H 'X-HPKE-Enabled: true' \
-  -d '{"prompt":"send 10 USDC"}'
+  -H "X-SAGE-Enabled: true" \
+  -H "X-Conversation-ID: $CID" -H "X-SAGE-Context-ID: $CID" \
+  --data-binary '{"prompt":"ship to Seoul, card, budget 1,500,000 KRW"}' | jq
 ```
 
-- fetch example
+## Frontend request examples (fetch)
 
 ```ts
 await fetch("http://localhost:8086/api/request", {
@@ -256,7 +164,8 @@ await fetch("http://localhost:8086/api/request", {
   headers: {
     "Content-Type": "application/json",
     "X-SAGE-Enabled": "true",
-    "X-HPKE-Enabled": "true",
+    // "X-HPKE-Enabled": "true", // optional; requires SAGE=true
+    // "X-Conversation-ID": "demo-123", // optional conversation id
   },
   body: JSON.stringify({ prompt: "send 10 USDC" }),
 });
