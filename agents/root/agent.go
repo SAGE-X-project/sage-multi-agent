@@ -29,15 +29,13 @@ import (
 	prototx "github.com/sage-x-project/sage-multi-agent/protocol"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
-	// DID & crypto
-	"github.com/sage-x-project/sage-multi-agent/types"
-	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
-	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
-	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
-	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
-	"github.com/sage-x-project/sage/pkg/agent/hpke"
-	// Use internal agent framework for session management
+	// Use internal agent framework for DID, crypto, keys, and session management
+	"github.com/sage-x-project/sage-multi-agent/internal/agent/did"
+	"github.com/sage-x-project/sage-multi-agent/internal/agent/keys"
 	"github.com/sage-x-project/sage-multi-agent/internal/agent/session"
+	"github.com/sage-x-project/sage-multi-agent/types"
+	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
+	"github.com/sage-x-project/sage/pkg/agent/hpke"
 
 	// [LLM] light shim client
 	"github.com/sage-x-project/sage-multi-agent/llm"
@@ -66,7 +64,7 @@ type RootAgent struct {
 	httpClient  *http.Client
 	sageEnabled bool
 	myDID       sagedid.AgentDID
-	myKey       sagecrypto.KeyPair
+	myKey       keys.KeyPair
 	a2a         *a2aclient.A2AClient
 
 	// External base URLs per agent (routing target)
@@ -74,7 +72,7 @@ type RootAgent struct {
 
 	// HPKE per-target state
 	hpkeStates sync.Map // key: target string -> *hpkeState
-	resolver   sagedid.Resolver
+	resolver   *did.Resolver
 
 	// [LLM] lazy-initialized NLG client
 	llmClient llm.Client
@@ -162,14 +160,9 @@ func (r *RootAgent) initSigning() error {
 	if jwk == "" {
 		return fmt.Errorf("ROOT_JWK_FILE required for Root signing")
 	}
-	raw, err := os.ReadFile(jwk)
+	kp, err := keys.LoadFromJWKFile(jwk)
 	if err != nil {
-		return fmt.Errorf("read ROOT_JWK_FILE: %w", err)
-	}
-	imp := formats.NewJWKImporter()
-	kp, err := imp.Import(raw, sagecrypto.KeyFormatJWK)
-	if err != nil {
-		return fmt.Errorf("import ROOT_JWK_FILE: %w", err)
+		return fmt.Errorf("load ROOT_JWK_FILE: %w", err)
 	}
 
 	didStr := strings.TrimSpace(os.Getenv("ROOT_DID"))
@@ -200,19 +193,15 @@ func (r *RootAgent) ensureResolver() error {
 	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_ADDRESS"), "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")
 	priv := strings.TrimPrefix(strings.TrimSpace(os.Getenv("SAGE_EXTERNAL_KEY")), "0x")
 
-	cfgV4 := &sagedid.RegistryConfig{
-		RPCEndpoint:        rpc,
-		ContractAddress:    contract,
-		PrivateKey:         priv, // optional for read-only
-		GasPrice:           0,
-		MaxRetries:         24,
-		ConfirmationBlocks: 0,
-	}
-	ethV4, err := dideth.NewEthereumClient(cfgV4)
+	resolver, err := did.NewResolver(did.Config{
+		RPCEndpoint:     rpc,
+		ContractAddress: contract,
+		PrivateKey:      priv,
+	})
 	if err != nil {
 		return fmt.Errorf("HPKE: init resolver: %w", err)
 	}
-	r.resolver = ethV4
+	r.resolver = resolver
 	return nil
 }
 
@@ -279,7 +268,7 @@ func (r *RootAgent) EnableHPKE(ctx context.Context, target, keysFile string) err
 	t := prototx.NewA2ATransport(r, base, true, true)
 
 	sMgr := session.NewManager()
-	cli := hpke.NewClient(t, r.resolver, r.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr.GetUnderlying())
+	cli := hpke.NewClient(t, r.resolver.GetKeyClient(), r.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr.GetUnderlying())
 
 	ctxInit, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
