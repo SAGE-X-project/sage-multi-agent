@@ -30,9 +30,7 @@ import (
 
 	geth "github.com/ethereum/go-ethereum/crypto"
 
-	agentcrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
-	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
-	"github.com/sage-x-project/sage/pkg/agent/crypto/keys"
+	"github.com/sage-x-project/sage-a2a-go/pkg/crypto"
 )
 
 // ----- Inputs / Models -----
@@ -86,8 +84,6 @@ func main() {
 		_ = os.MkdirAll(dir, 0o755)
 	}
 
-	jwkExp := formats.NewJWKExporter()
-
 	var legacy []AgentKeyData
 	var ak AllKeys
 
@@ -105,15 +101,19 @@ func main() {
 		}
 
 		// Generate secp256k1 KeyPair
-		kp, err := keys.GenerateSecp256k1KeyPair()
+		kp, err := crypto.GenerateSecp256k1KeyPair()
 		if err != nil {
 			log.Fatalf("generate key for %s: %v", n, err)
 		}
 
 		// Export private JWK
-		jwkBytes, err := jwkExp.Export(kp, agentcrypto.KeyFormatJWK)
+		jwk, err := crypto.ExportPrivateKeyToJWK(kp.PrivateKey(), n)
 		if err != nil {
 			log.Fatalf("export JWK for %s: %v", n, err)
+		}
+		jwkBytes, err := crypto.MarshalJWK(jwk)
+		if err != nil {
+			log.Fatalf("marshal JWK for %s: %v", n, err)
 		}
 		perPath := filepath.Join(*outDir, fmt.Sprintf("%s.jwk", n))
 		if err := writeRaw(perPath, jwkBytes, 0o600); err != nil {

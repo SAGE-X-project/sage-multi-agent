@@ -24,8 +24,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 
-	"github.com/sage-x-project/sage/pkg/agent/did"
-	agentcard "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	"github.com/sage-x-project/sage-a2a-go/pkg/identity"
+	"github.com/sage-x-project/sage-a2a-go/pkg/registry"
 )
 
 type signingRow struct {
@@ -104,8 +104,11 @@ func main() {
 	}
 	fmt.Println("======================================")
 
-	viewCfg := &did.RegistryConfig{RPCEndpoint: *rpcURL, ContractAddress: *contract}
-	viewClient, err := agentcard.NewAgentCardClient(viewCfg)
+	viewClient, err := registry.NewRegistrationClient(&registry.ClientConfig{
+		RPCURL:          *rpcURL,
+		RegistryAddress: *contract,
+		PrivateKey:      "", // View-only client
+	})
 	if err != nil {
 		fatalf("init view client: %v")
 	}
@@ -124,13 +127,13 @@ func main() {
 
 	ctx := context.Background()
 
-    ownerCli, err := agentcard.NewAgentCardClient(&did.RegistryConfig{
-        RPCEndpoint:     *rpcURL,
-        ContractAddress: *contract,
+    ownerCli, err := registry.NewRegistrationClient(&registry.ClientConfig{
+        RPCURL:          *rpcURL,
+        RegistryAddress: *contract,
         PrivateKey:      "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80", // contract deployer/owner key
     })
 	if err == nil {
-		if err := ownerCli.SetActivationDelay(ctx, 0); err != nil {
+		if err := ownerCli.GetSAGEClient().SetActivationDelay(ctx, 0); err != nil {
 			fmt.Printf("SetActivationDelay(0) failed: %v\n", err)
 		} else {
 			fmt.Println("activationDelay set to 0s (for subsequent registrations)")
@@ -140,7 +143,7 @@ func main() {
 	}
 
     // (optional) log the current chain activationDelay
-	if d, err := viewClient.GetActivationDelay(ctx); err == nil {
+	if d, err := viewClient.GetSAGEClient().GetActivationDelay(ctx); err == nil {
 		fmt.Printf(" Current activationDelay = %s\n", d)
 	}
 	for _, a := range agents {
@@ -184,8 +187,11 @@ func main() {
 			continue
 		}
 
-		perAgentCfg := &did.RegistryConfig{RPCEndpoint: *rpcURL, ContractAddress: *contract, PrivateKey: normHex(sk.PrivateKey)}
-		client, err := agentcard.NewAgentCardClient(perAgentCfg)
+		client, err := registry.NewRegistrationClient(&registry.ClientConfig{
+			RPCURL:          *rpcURL,
+			RegistryAddress: *contract,
+			PrivateKey:      normHex(sk.PrivateKey),
+		})
 		if err != nil {
 			fmt.Printf("   init client failed for %s: %v\n", a.Name, err)
 			continue
@@ -198,7 +204,7 @@ func main() {
 			continue
 		}
 
-		if _, err := viewClient.GetAgentByDID(ctx, strings.TrimSpace(kr.DID)); err == nil {
+		if _, err := viewClient.GetSAGEClient().GetAgentByDID(ctx, strings.TrimSpace(kr.DID)); err == nil {
 			fmt.Printf(" - %s: DID already registered; skip\n", a.Name)
 			continue
 		}
@@ -239,7 +245,7 @@ func main() {
 			fmt.Printf(" - %s: (no KEM DID) skip verify\n", a.Name)
 			continue
 		}
-		if ag, err := viewClient.GetAgentByDID(context.Background(), strings.TrimSpace(kr.DID)); err == nil {
+		if ag, err := viewClient.GetSAGEClient().GetAgentByDID(context.Background(), strings.TrimSpace(kr.DID)); err == nil {
 			state := "Registered"
 			if ag.IsActive {
 				state = "Active"
@@ -419,12 +425,12 @@ func toEnvKey(name string) string {
 
 /* ==== params & signatures ==== */
 
-func buildRegParamsECDSAPlusKEM(a DemoAgent, didStr string, ecdsaPub, ecdsaSig, x25519Pub, x25519Sig []byte) (*did.RegistrationParams, error) {
+func buildRegParamsECDSAPlusKEM(a DemoAgent, didStr string, ecdsaPub, ecdsaSig, x25519Pub, x25519Sig []byte) (*registry.RegistrationParams, error) {
 	capsJSON := "{}"
 	keys := [][]byte{ecdsaPub, x25519Pub}
-	keyTypes := []did.KeyType{did.KeyTypeECDSA, did.KeyTypeX25519}
+	keyTypes := []identity.KeyType{identity.KeyTypeECDSA, identity.KeyTypeX25519}
 	sigs := [][]byte{ecdsaSig, x25519Sig}
-	return &did.RegistrationParams{
+	return &registry.RegistrationParams{
 		DID:          didStr,
 		Name:         a.Metadata.Name,
 		Description:  a.Metadata.Description,

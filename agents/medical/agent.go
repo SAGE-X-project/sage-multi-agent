@@ -29,7 +29,7 @@ import (
 	sagehttp "github.com/sage-x-project/sage/pkg/agent/transport/http"
 
 	// HPKE
-	"github.com/sage-x-project/sage/pkg/agent/hpke"
+	"github.com/sage-x-project/sage-a2a-go/pkg/hpke"
 	"github.com/sage-x-project/sage/pkg/agent/session"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
@@ -297,13 +297,17 @@ func (e *MedicalAgent) ensureHPKE() error {
 	}
 
 	e.hpkeMgr = hpkeMgr
-	e.hpkeSrv = hpke.NewServer(
+	hpkeSrv, err := hpke.NewServer(
 		signKP,
 		hpkeMgr,
 		serverDID,
 		resolver,
-		&hpke.ServerOpts{KEM: kemKP},
+		&hpke.ServerOptions{KEM: kemKP},
 	)
+	if err != nil {
+		return fmt.Errorf("create HPKE server: %w", err)
+	}
+	e.hpkeSrv = hpkeSrv
 	e.hsrv = sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
 		return e.hpkeSrv.HandleMessage(ctx, msg)
 	})

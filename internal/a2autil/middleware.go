@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	// a2a-go: DID verifier, key selector, RFC9421 verifier interfaces/implementations
+	"github.com/sage-x-project/sage-a2a-go/pkg/registry"
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
 	"github.com/sage-x-project/sage/pkg/agent/did"
 	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
@@ -38,28 +39,29 @@ func BuildDIDMiddleware(optional bool) (*server.DIDAuthMiddleware, error) {
 	}
 	priv = strings.TrimPrefix(priv, "0x") // normalize
 
-	cfg := &did.RegistryConfig{
-		RPCEndpoint:        rpc,
-		ContractAddress:    contract,
-		PrivateKey:         priv, // optional for read-only resolve; required for tx-signed ops
-		GasPrice:           0,    // use node suggestion
-		MaxRetries:         24,
-		ConfirmationBlocks: 0,
-	}
-
-	// 1) V4 AgentCard resolver (GetAgentByDID)
-	resolver, err := dideth.NewAgentCardClient(cfg)
+	// 1) Create registry client for DID resolution
+	registryClient, err := registry.NewRegistrationClient(&registry.ClientConfig{
+		RPCURL:          rpc,
+		RegistryAddress: contract,
+		PrivateKey:      priv,
+	})
 	if err != nil {
 		panic(err)
 	}
 
-	// 2) Public key client (ResolvePublicKey / ResolveKEMKey)
-	client, err := dideth.NewEthereumClient(cfg)
+	// 2) Create Ethereum client for public key resolution (need SAGE client directly)
+	keyClient, err := dideth.NewEthereumClient(&did.RegistryConfig{
+		RPCEndpoint:     rpc,
+		ContractAddress: contract,
+	})
 	if err != nil {
 		panic(err)
 	}
 
-	mw := server.NewDIDAuthMiddleware(resolver, client)
+	// Use SAGE DID client from registry wrapper + direct Ethereum client
+	sageDIDClient := registryClient.GetSAGEClient()
+
+	mw := server.NewDIDAuthMiddleware(sageDIDClient, keyClient)
 	mw.SetOptional(optional)
 	return mw, nil
 }

@@ -41,6 +41,7 @@ build/
 /enhanced_client
 /main
 /enhanced_main
+/client-api
 
 # Agent binaries
 /root-agent

@@ -26,8 +26,8 @@ import (
 	gethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 
-	"github.com/sage-x-project/sage/pkg/agent/did"
-	agentcard "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
+	"github.com/sage-x-project/sage-a2a-go/pkg/identity"
+	"github.com/sage-x-project/sage-a2a-go/pkg/registry"
 )
 
 type AgentKeyData struct {
@@ -111,12 +111,11 @@ func main() {
 
 	agents := buildAgentsFromKeys(keys, selected)
 
-	viewCfg := &did.RegistryConfig{
-		RPCEndpoint:     *rpcURL,
-		ContractAddress: *contract,
-		PrivateKey:      "",
-	}
-	viewClient, err := agentcard.NewAgentCardClient(viewCfg)
+	viewClient, err := registry.NewRegistrationClient(&registry.ClientConfig{
+		RPCURL:          *rpcURL,
+		RegistryAddress: *contract,
+		PrivateKey:      "", // View-only client
+	})
 	if err != nil {
 		log.Fatalf("init view client: %v", err)
 	}
@@ -166,12 +165,11 @@ func main() {
 			continue
 		}
 
-		perAgentCfg := &did.RegistryConfig{
-			RPCEndpoint:     *rpcURL,
-			ContractAddress: *contract,
+		client, err := registry.NewRegistrationClient(&registry.ClientConfig{
+			RPCURL:          *rpcURL,
+			RegistryAddress: *contract,
 			PrivateKey:      normHex(k.PrivateKey),
-		}
-		client, err := agentcard.NewAgentCardClient(perAgentCfg)
+		})
 		if err != nil {
 			fmt.Printf("   init client failed for %s: %v\n", a.Name, err)
 			continue
@@ -179,7 +177,7 @@ func main() {
 
 		ctx := context.Background()
 
-		if _, err := viewClient.GetAgentByDID(ctx, a.DID); err == nil {
+		if _, err := viewClient.GetSAGEClient().GetAgentByDID(ctx, a.DID); err == nil {
 			fmt.Printf(" - %s: already registered (DID=%s)\n", a.Name, a.DID)
 			continue
 		}
@@ -215,7 +213,7 @@ func main() {
 
 	fmt.Println("\nVerification:")
 	for _, a := range agents {
-		if ag, err := viewClient.GetAgentByDID(context.Background(), a.DID); err == nil {
+		if ag, err := viewClient.GetSAGEClient().GetAgentByDID(context.Background(), a.DID); err == nil {
 			state := "Registered"
 			if ag.IsActive {
 				state = "Active"
@@ -353,7 +351,7 @@ func buildAgentsFromKeys(keys []AgentKeyData, filter []string) []DemoAgent {
 	return out
 }
 
-func buildRegParamsECDSA(a DemoAgent, ecdsaPub []byte, ecdsaSig []byte) (*did.RegistrationParams, error) {
+func buildRegParamsECDSA(a DemoAgent, ecdsaPub []byte, ecdsaSig []byte) (*registry.RegistrationParams, error) {
 	capsJSON := "{}"
 	if a.Metadata.Capabilities != nil {
 		if b, err := json.Marshal(a.Metadata.Capabilities); err == nil {
@@ -361,9 +359,9 @@ func buildRegParamsECDSA(a DemoAgent, ecdsaPub []byte, ecdsaSig []byte) (*did.Re
 		}
 	}
 	keys := [][]byte{ecdsaPub}
-	keyTypes := []did.KeyType{did.KeyTypeECDSA}
+	keyTypes := []identity.KeyType{identity.KeyTypeECDSA}
 	sigs := [][]byte{ecdsaSig}
-	return &did.RegistrationParams{
+	return &registry.RegistrationParams{
 		DID:          a.DID,
 		Name:         a.Metadata.Name,
 		Description:  a.Metadata.Description,
