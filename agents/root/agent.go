@@ -29,7 +29,7 @@ import (
 	prototx "github.com/sage-x-project/sage-multi-agent/protocol"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
-	// Use internal agent framework for DID, crypto, keys, and session management
+	// Use sage-a2a-go v1.7.0 Agent Framework for DID, crypto, keys, and session management
 	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/did"
 	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/keys"
 	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/session"

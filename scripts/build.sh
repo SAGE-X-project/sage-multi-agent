@@ -45,19 +45,22 @@ echo "Building agents..."
 echo ""
 
 # Build Root Agent
-build_component "Root Agent" "./cli/root" "bin/root"
+build_component "Root Agent" "./cmd/root" "bin/root"
 
-# Build MEDICAL Agent
-build_component "MEDICAL Agent" "./cli/medical" "bin/medical"
+# Build Payment Agent
+build_component "Payment Agent" "./cmd/payment" "bin/payment"
+
+# Build Medical Agent
+build_component "Medical Agent" "./cmd/medical" "bin/medical"
 
 # Build Planning Agent
-build_component "Planning Agent" "./cli/planning" "bin/planning"
+build_component "Planning Agent" "./cmd/planning" "bin/planning"
 
-# Build CLI Client
-build_component "CLI Client" "./cli" "bin/cli"
+# Build Gateway
+build_component "Gateway" "./cmd/gateway" "bin/gateway"
 
-# Build Client Server (from cmd path)
-build_component "Client Server" "./cmd/client/main.go" "bin/client"
+# Build Client API Server
+build_component "Client API" "./cmd/client" "bin/client"
 
 echo ""
 echo "======================================"

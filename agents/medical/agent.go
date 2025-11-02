@@ -23,8 +23,8 @@ import (
 	"github.com/sage-x-project/sage-multi-agent/internal/agentmux"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
-	// Use internal agent framework for HPKE and crypto
-	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework"
+	// Use sage-a2a-go v1.7.0 Agent Framework for HPKE and crypto
+	framework "github.com/sage-x-project/sage-a2a-go/pkg/agent/framework"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
 	// Middleware
@@ -43,7 +43,7 @@ type MedicalAgent struct {
 	logger *log.Logger
 
 	// Framework agent (manages HPKE, keys, DID, etc.)
-	agent *agent.Agent
+	agent *framework.Agent
 
 	mw      *server.DIDAuthMiddleware // from a2autil.BuildDIDMiddleware
 	openMux *http.ServeMux            // /status
@@ -60,7 +60,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 	logger := log.New(os.Stdout, "[medical] ", log.LstdFlags)
 
 	// Create framework agent (Eager pattern - HPKE always initialized if keys present)
-	fwAgent, err := agent.NewAgentFromEnv("medical", "MEDICAL", true, requireSignature)
+	fwAgent, err := framework.NewAgentFromEnv("medical", "MEDICAL", true, requireSignature)
 	if err != nil {
 		logger.Printf("[medical] Framework agent init failed: %v (continuing without HPKE)", err)
 		fwAgent = nil // graceful degradation
