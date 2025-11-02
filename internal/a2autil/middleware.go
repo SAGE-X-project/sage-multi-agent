@@ -1,7 +1,7 @@
 package a2autil
 
 import (
-	// Use internal agent framework instead of direct sage imports
+	// Use internal agent framework (will migrate to sage-a2a-go/pkg/agent when v1.7.0 is released)
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
 	"github.com/sage-x-project/sage-multi-agent/internal/agent/did"
 	"github.com/sage-x-project/sage-multi-agent/internal/agent/middleware"
