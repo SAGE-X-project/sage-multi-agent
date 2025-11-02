@@ -42,6 +42,27 @@ build/
 /main
 /enhanced_main
 
+# Agent binaries
+/root-agent
+/payment-agent
+/medical-agent
+/planning-agent
+/gateway-agent
+*-agent
+
+# cmd output binaries
+/cmd/root/root
+/cmd/payment/payment
+/cmd/medical/medical
+/cmd/planning/planning
+/cmd/client/client
+/cmd/gateway/gateway
+/cmd/*/main
+
+# Go build outputs (catch-all for any binary from go build)
+/*-server
+/*-client
+
 # IDE specific files
 .idea/
 *.swp
