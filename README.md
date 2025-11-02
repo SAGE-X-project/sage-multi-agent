@@ -85,10 +85,10 @@ Using helper script (recommended):
 
 ```bash
 # Single turn (signed)
-./scripts/07_send_prompt.sh --sage on --prompt "iPhone 15 프로 구매해줘"
+./scripts/07_send_prompt.sh --sage on --prompt "iPhone 15 프로를 쿠팡에서 구매해서 서울 특별시 00길로 배송해줘"
 
 # With HPKE (requires SAGE on)
-./scripts/07_send_prompt.sh --sage on --hpke on --prompt "고지혈증 진단을받았어. 어떻게 관리해야할까"
+./scripts/07_send_prompt.sh --sage on --hpke on --prompt "당뇨병 진단을 받았어. 혈당은 180이야. 식단  관리 방법 알려줘"
 
 # Interactive multi-turn
 ./scripts/07_send_prompt.sh --sage on -i

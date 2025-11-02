@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Send a prompt to the running Client API and (optionally) interact until Root collects info
-# and routes to Payment/Medical. Shows new Gateway/Root/Medical/Payment logs after each turn.
+# and routes to external agents. Shows new Gateway/Root/Medical/Payment logs after each turn.
 #
 # Usage:
 #   scripts/07_send_prompt.sh [--sage on|off] [--hpke on|off] [--prompt "<text>"]
@@ -11,6 +11,8 @@
 # Notes:
 # - SAGE/HPKE headers are per-request and preserved across turns.
 # - If jq is available, we auto-detect "need more info" and "routed to payment".
+# - Default: when an external forward is detected, .cid is deleted automatically.
+#   Disable this behavior with --keep-cid (or --no-clear-cid-on-external).
 
 [ -n "$BASH_VERSION" ] || exec bash "$0" "$@"
 set -Eeuo pipefail
@@ -36,6 +38,7 @@ cd "$ROOT_DIR"
 : "${ROOT_AGENT_PORT:=18080}"
 : "${GATEWAY_PORT:=5500}"
 : "${CID_FILE:=.cid}"
+: "${CLEAR_CID_ON_EXTERNAL:=1}"   # <— default ON
 
 # Normalize env values (remove CR/LF, trim)
 HOST="$(trim_ws "$(strip_cr "${HOST}")")"
@@ -50,8 +53,7 @@ CID_FILE="$(trim_ws "$(strip_cr "${CID_FILE}")")"
 
 usage() {
   cat <<EOF
-Usage: $0 [--sage on|off] [--hpke on|off] [--prompt "<text>"] [--prompt-file <path>] [--scenario <name>] [--payment] [--interactive|-i]
-If no --prompt/--prompt-file given, reads stdin.
+Usage: $0 [--sage on|off] [--hpke on|off] [--prompt "<text>"] [--prompt-file <path>] [--scenario <name>] [--payment] [--interactive|-i] [--keep-cid]
 EOF
 }
 
@@ -72,6 +74,8 @@ while [[ $# -gt 0 ]]; do
       CID="cid-$(date +%s%N)"
       echo "$CID" > "$CID_FILE"
       shift ;;
+    --keep-cid|--no-clear-cid-on-external)
+      CLEAR_CID_ON_EXTERNAL=0; shift ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "[WARN] unknown arg: $1"; shift ;;
   esac
@@ -116,27 +120,33 @@ RESP_PAYLOAD="$(mktemp -t prompt.resp.XXXX.json)"
 # ---------- logs ----------
 GW_LOG="logs/gateway.log"
 ROOT_LOG="logs/root.log"
-MED_LOG="logs/medical.log"     # <-- added
+MED_LOG="logs/medical.log"
 PAY_LOG="logs/payment.log"
-
 get_lines() { [[ -f "$1" ]] && wc -l < "$1" || echo 0; }
 
-PRE_GW=$(get_lines "$GW_LOG")
-PRE_ROOT=$(get_lines "$ROOT_LOG")
-PRE_MED=$(get_lines "$MED_LOG")   # <-- added
-PRE_PAY=$(get_lines "$PAY_LOG")
-
 # ---------- conversation id ----------
-if [[ -s "$CID_FILE" ]]; then
-  CID="$(cat "$CID_FILE")"
-else
-  CID="cid-$(date +%s%N)"
-  echo "$CID" > "$CID_FILE"
-fi
+ensure_cid() {
+  if [[ -s "$CID_FILE" ]]; then
+    CID="$(cat "$CID_FILE")"
+  else
+    CID="cid-$(date +%s%N)"
+    echo "$CID" > "$CID_FILE"
+  fi
+}
 
 # ---------- send once ----------
 send_once() {
   local text="$1"
+
+  # Snapshot log lines BEFORE request
+  local PRE_GW PRE_ROOT PRE_MED PRE_PAY
+  PRE_GW=$(get_lines "$GW_LOG")
+  PRE_ROOT=$(get_lines "$ROOT_LOG")
+  PRE_MED=$(get_lines "$MED_LOG")
+  PRE_PAY=$(get_lines "$PAY_LOG")
+
+  # CID for this turn
+  ensure_cid
 
   # Write JSON body (with conversationId)
   if command -v jq >/dev/null 2>&1; then
@@ -156,7 +166,7 @@ send_once() {
     -H "X-HPKE-Enabled: $HPKE_HDR" \
     -H "X-Scenario: $SCENARIO" \
     -H "X-Conversation-ID: $CID" \
-    -H "X-SAGE-Context-ID: $CID"\
+    -H "X-SAGE-Context-ID: $CID" \
     -X POST "http://${HOST}:${CLIENT_PORT}/api/request" \
     --data-binary @"$REQ_PAYLOAD" || true)
   echo "[HTTP] client-api status: $code"
@@ -170,13 +180,15 @@ send_once() {
   fi
   echo "==================================================="
 
-  # Show new logs since previous turn
+  # Show new logs since previous turn — capture to variables for detection
+  local GW_NEW="" ROOT_NEW="" MED_NEW="" PAY_NEW=""
+
   if [[ -f "$GW_LOG" ]]; then
     echo
     echo "----- Gateway new logs (since request) -----"
     local start=$((PRE_GW+1))
-    tail -n +"$start" "$GW_LOG" || true
-    PRE_GW=$(get_lines "$GW_LOG")
+    GW_NEW="$(tail -n +"$start" "$GW_LOG" || true)"
+    printf "%s\n" "$GW_NEW"
   else
     echo "(gateway log not found: $GW_LOG)"
   fi
@@ -185,8 +197,8 @@ send_once() {
     echo
     echo "----- Root new logs (since request) -----"
     local start=$((PRE_ROOT+1))
-    tail -n +"$start" "$ROOT_LOG" || true
-    PRE_ROOT=$(get_lines "$ROOT_LOG")
+    ROOT_NEW="$(tail -n +"$start" "$ROOT_LOG" || true)"
+    printf "%s\n" "$ROOT_NEW"
   else
     echo "(root log not found: $ROOT_LOG)"
   fi
@@ -195,8 +207,8 @@ send_once() {
     echo
     echo "----- Medical service new logs (since request) -----"
     local start=$((PRE_MED+1))
-    tail -n +"$start" "$MED_LOG" || true
-    PRE_MED=$(get_lines "$MED_LOG")
+    MED_NEW="$(tail -n +"$start" "$MED_LOG" || true)"
+    printf "%s\n" "$MED_NEW"
   else
     echo "(medical log not found: $MED_LOG)"
   fi
@@ -205,10 +217,33 @@ send_once() {
     echo
     echo "----- Payment service new logs (since request) -----"
     local start=$((PRE_PAY+1))
-    tail -n +"$start" "$PAY_LOG" || true
-    PRE_PAY=$(get_lines "$PAY_LOG")
+    PAY_NEW="$(tail -n +"$start" "$PAY_LOG" || true)"
+    printf "%s\n" "$PAY_NEW"
   else
     echo "(payment log not found: $PAY_LOG)"
+  fi
+
+  echo
+  echo "[HINT] Check logs/root.log, logs/medical.log and logs/payment.log for full trace."
+
+  # --- Detect external forwarding in the NEW logs we just printed ---
+  if [[ "${CLEAR_CID_ON_EXTERNAL}" -eq 1 ]]; then
+    external_sent=0
+    # 1) Gateway OUTBOUND to external agents
+    if grep -Eq 'GW OUTBOUND >>> POST .*\/(payment|medical|planning)\/process' <<<"$GW_NEW"; then
+      external_sent=1
+    fi
+    # 2) Root-side explicit forward/send markers
+    if [[ $external_sent -eq 0 ]]; then
+      if grep -Ei '\[root\]\[(payment|medical|planning)\]\[(send|forward)\].*(sendExternal|-> external)' <<<"$ROOT_NEW"; then
+        external_sent=1
+      fi
+    fi
+    if [[ $external_sent -eq 1 ]]; then
+      rm -f "$CID_FILE" 2>/dev/null || true
+      echo "[CID] cleared (.cid) because this turn was forwarded to an external agent"
+      CID=""
+    fi
   fi
 }
 
@@ -284,6 +319,3 @@ if [[ "${INTERACTIVE:-0}" -eq 1 ]]; then
 else
   send_once "$PROMPT"
 fi
-
-echo
-echo "[HINT] Check logs/root.log, logs/medical.log and logs/payment.log for full trace."
