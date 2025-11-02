@@ -2,6 +2,7 @@
 // as payment: RFC9421 DID signature verification middleware + HPKE (handshake/data)
 // + plain JSON fallback when HPKE is off.
 // Endpoints: /status, /process (identical behavior/headers to payment).
+// Uses internal agent framework for crypto, HPKE, and DID resolution (Eager pattern).
 package medical
 
 import (
@@ -16,27 +17,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sage-x-project/sage-multi-agent/internal/a2autil"
 	"github.com/sage-x-project/sage-multi-agent/internal/agentmux"
 	"github.com/sage-x-project/sage-multi-agent/types"
 
-	// DID / Resolver
-	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
-	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
-	sagehttp "github.com/sage-x-project/sage/pkg/agent/transport/http"
-
-	// HPKE
-	"github.com/sage-x-project/sage-a2a-go/pkg/hpke"
-	"github.com/sage-x-project/sage/pkg/agent/session"
+	// Use internal agent framework for HPKE and crypto
+	"github.com/sage-x-project/sage-multi-agent/internal/agent"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
-	// Keys
+	// Middleware
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
-	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
-	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 
 	// [LLM] shim
 	"github.com/sage-x-project/sage-multi-agent/llm"
@@ -50,11 +42,8 @@ type MedicalAgent struct {
 	// internals
 	logger *log.Logger
 
-	// HPKE (lazy enabled)
-	hpkeMgr *session.Manager
-	hpkeSrv *hpke.Server
-	hsrv    *sagehttp.HTTPServer // handshake adapter
-	hpkeMu  sync.Mutex           // lazy enable lock
+	// Framework agent (manages HPKE, keys, DID, etc.)
+	agent *agent.Agent
 
 	mw      *server.DIDAuthMiddleware // from a2autil.BuildDIDMiddleware
 	openMux *http.ServeMux            // /status
@@ -68,39 +57,50 @@ type MedicalAgent struct {
 
 // NewMedicalAgent builds the agent (same signature as payment.NewPaymentAgent).
 func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
-	agent := &MedicalAgent{
+	logger := log.New(os.Stdout, "[medical] ", log.LstdFlags)
+
+	// Create framework agent (Eager pattern - HPKE always initialized if keys present)
+	fwAgent, err := agent.NewAgentFromEnv("medical", "MEDICAL", true, requireSignature)
+	if err != nil {
+		logger.Printf("[medical] Framework agent init failed: %v (continuing without HPKE)", err)
+		fwAgent = nil // graceful degradation
+	}
+
+	ma := &MedicalAgent{
 		RequireSignature: requireSignature,
-		logger:           log.New(os.Stdout, "[medical] ", log.LstdFlags),
+		logger:           logger,
+		agent:            fwAgent,
 	}
 
 	// ===== DID middleware =====
-	if agent.RequireSignature {
+	if ma.RequireSignature {
 		mw, err := a2autil.BuildDIDMiddleware(true)
 		if err != nil {
-			agent.logger.Printf("[medical] DID middleware init failed: %v (running without verify)", err)
-			agent.mw = nil
+			ma.logger.Printf("[medical] DID middleware init failed: %v (running without verify)", err)
+			ma.mw = nil
 		} else {
-			mw.SetErrorHandler(newCompactDIDErrorHandler(agent.logger))
-			agent.mw = mw
+			mw.SetErrorHandler(newCompactDIDErrorHandler(ma.logger))
+			ma.mw = mw
 		}
 	} else {
-		agent.logger.Printf("[medical] DID middleware disabled (requireSignature=false)")
-		agent.mw = nil
+		ma.logger.Printf("[medical] DID middleware disabled (requireSignature=false)")
+		ma.mw = nil
 	}
 
 	// ===== Open mux: /status =====
 	open := http.NewServeMux()
 	open.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		hpkeReady := ma.agent != nil && ma.agent.GetHTTPServer() != nil
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"name":         "medical",
 			"type":         "medical",
-			"sage_enabled": agent.RequireSignature,
-			"hpke_ready":   agent.hpkeSrv != nil,
+			"sage_enabled": ma.RequireSignature,
+			"hpke_ready":   hpkeReady,
 			"time":         time.Now().Format(time.RFC3339),
 		})
 	})
-	agent.openMux = open
+	ma.openMux = open
 
 	// ===== Protected mux: /process =====
 	protected := http.NewServeMux()
@@ -116,8 +116,8 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 
 		// HPKE path?
 		if isHPKE(r) {
-			if err := agent.ensureHPKE(); err != nil {
-				agent.logger.Printf("[medical] ensureHPKE: %v", err)
+			if ma.agent == nil || ma.agent.GetHTTPServer() == nil {
+				ma.logger.Printf("[medical] HPKE not available")
 				http.Error(w, "hpke disabled", http.StatusBadRequest)
 				return
 			}
@@ -126,24 +126,17 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 
 			// --- Handshake (no KID) ---
 			if kid == "" {
-				if agent.hsrv == nil {
-					http.Error(w, "hpke handshake disabled", http.StatusBadRequest)
-					return
-				}
 				r.Body = io.NopCloser(bytes.NewReader(body))
-				agent.hsrv.MessagesHandler().ServeHTTP(w, r)
+				ma.agent.GetHTTPServer().MessagesHandler().ServeHTTP(w, r)
 				return
 			}
 
 			// --- Data mode (has KID) ---
-			sess, ok := agent.hpkeMgr.GetByKeyID(kid)
+			sess, ok := ma.agent.GetSessionManager().GetUnderlying().GetByKeyID(kid)
 			if !ok {
-				if agent.hsrv != nil {
-					r.Body = io.NopCloser(bytes.NewReader(body))
-					agent.hsrv.MessagesHandler().ServeHTTP(w, r)
-					return
-				}
-				http.Error(w, "hpke session not found", http.StatusBadRequest)
+				// Try to treat as handshake if session vanished
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				ma.agent.GetHTTPServer().MessagesHandler().ServeHTTP(w, r)
 				return
 			}
 			pt, err := sess.Decrypt(body)
@@ -161,7 +154,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 				Role:      "agent",
 			}
 
-			resp, _ := agent.appHandler(r.Context(), sm)
+			resp, _ := ma.appHandler(r.Context(), sm)
 			if !resp.Success {
 				http.Error(w, "application error", http.StatusBadRequest)
 				return
@@ -190,7 +183,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 			Metadata:  map[string]string{"hpke": "false"},
 			Role:      "agent",
 		}
-		resp, _ := agent.appHandler(r.Context(), sm)
+		resp, _ := ma.appHandler(r.Context(), sm)
 		if !resp.Success {
 			http.Error(w, "application error", http.StatusBadRequest)
 			return
@@ -199,12 +192,12 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(resp.Data)
 	})
-	agent.protMux = protected
-	agent.handler = agentmux.BuildAgentHandler("medical", open, protected, agent.mw)
+	ma.protMux = protected
+	ma.handler = agentmux.BuildAgentHandler("medical", open, protected, ma.mw)
 	// ===== Compose final handler =====
 	var h http.Handler = open
-	if agent.mw != nil {
-		wrapped := agent.mw.Wrap(protected)
+	if ma.mw != nil {
+		wrapped := ma.mw.Wrap(protected)
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/status" {
 				open.ServeHTTP(w, r)
@@ -218,20 +211,19 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 		root.Handle("/process", protected)
 		h = root
 	}
-	agent.handler = h
+	ma.handler = h
 
-	// ===== Optional eager HPKE boot =====
-	_ = agent.ensureHPKE()
+	// HPKE is now eagerly initialized via framework agent (no ensureHPKE needed)
 
 	// [LLM] lazy: only init when used
 	if c, err := llm.NewFromEnv(); err == nil {
-		agent.llmClient = c
-		agent.logger.Printf("[medical] LLM ready")
+		ma.llmClient = c
+		ma.logger.Printf("[medical] LLM ready")
 	} else {
-		agent.logger.Printf("[medical] LLM disabled: %v", err)
+		ma.logger.Printf("[medical] LLM disabled: %v", err)
 	}
 
-	return agent, nil
+	return ma, nil
 }
 
 // Return the handler
@@ -243,7 +235,8 @@ func (e *MedicalAgent) Start(addr string) error {
 		return fmt.Errorf("handler not initialized")
 	}
 	e.httpSrv = &http.Server{Addr: addr, Handler: e.handler}
-	e.logger.Printf("[boot] medical on %s (requireSig=%v, hpke_ready=%v)", addr, e.RequireSignature, e.hpkeSrv != nil)
+	hpkeReady := e.agent != nil && e.agent.GetHTTPServer() != nil
+	e.logger.Printf("[boot] medical on %s (requireSig=%v, hpke_ready=%v)", addr, e.RequireSignature, hpkeReady)
 	return e.httpSrv.ListenAndServe()
 }
 
@@ -254,69 +247,6 @@ func (e *MedicalAgent) Shutdown(ctx context.Context) error {
 	}
 	return e.httpSrv.Shutdown(ctx)
 }
-
-// -------- Lazy HPKE enable --------
-
-func (e *MedicalAgent) ensureHPKE() error {
-	e.hpkeMu.Lock()
-	defer e.hpkeMu.Unlock()
-
-	if e.hpkeSrv != nil && e.hpkeMgr != nil && e.hsrv != nil {
-		return nil
-	}
-
-	sigPath := strings.TrimSpace(os.Getenv("MEDICAL_JWK_FILE"))
-	kemPath := strings.TrimSpace(os.Getenv("MEDICAL_KEM_JWK_FILE"))
-	if sigPath == "" || kemPath == "" {
-		e.logger.Printf("[boot] medical HPKE disabled (missing MEDICAL_JWK_FILE or MEDICAL_KEM_JWK_FILE)")
-		return fmt.Errorf("missing MEDICAL_JWK_FILE or MEDICAL_KEM_JWK_FILE")
-	}
-
-	hpkeMgr := session.NewManager()
-	signKP, err := loadServerSigningKeyFromEnv()
-	if err != nil {
-		return fmt.Errorf("hpke signing key: %w", err)
-	}
-	resolver, err := buildResolver()
-	if err != nil {
-		return fmt.Errorf("hpke resolver: %w", err)
-	}
-	kemKP, err := loadServerKEMFromEnv()
-	if err != nil {
-		return fmt.Errorf("hpke kem key: %w", err)
-	}
-
-	keysPath := firstNonEmpty(os.Getenv("HPKE_KEYS_FILE"), "merged_agent_keys.json")
-	nameToDID, err := loadDIDsFromKeys(keysPath)
-	if err != nil {
-		return fmt.Errorf("HPKE: load keys (%s): %w", keysPath, err)
-	}
-	serverDID := strings.TrimSpace(nameToDID["medical"])
-	if serverDID == "" {
-		return fmt.Errorf("HPKE: server DID not found for name 'medical' in %s", keysPath)
-	}
-
-	e.hpkeMgr = hpkeMgr
-	hpkeSrv, err := hpke.NewServer(
-		signKP,
-		hpkeMgr,
-		serverDID,
-		resolver,
-		&hpke.ServerOptions{KEM: kemKP},
-	)
-	if err != nil {
-		return fmt.Errorf("create HPKE server: %w", err)
-	}
-	e.hpkeSrv = hpkeSrv
-	e.hsrv = sagehttp.NewHTTPServer(func(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
-		return e.hpkeSrv.HandleMessage(ctx, msg)
-	})
-
-	e.logger.Printf("[boot] medical HPKE enabled (lazy)")
-	return nil
-}
-
-// -------- Application handler (LLM-driven medical info) --------
 
 // -------- Application handler (LLM-driven medical info with history) --------
 func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMessage) (*transport.Response, error) {
@@ -495,11 +425,6 @@ func (e *MedicalAgent) appHandler(ctx context.Context, msg *transport.SecureMess
 
 // -------- Internals (ported & helpers) --------
 
-type agentKeyRow struct {
-	Name string `json:"name"`
-	DID  string `json:"did"`
-}
-
 func isHPKE(r *http.Request) bool {
 	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	if strings.HasPrefix(ct, "application/sage+hpke") {
@@ -509,76 +434,6 @@ func isHPKE(r *http.Request) bool {
 		return true
 	}
 	return false
-}
-
-func loadServerSigningKeyFromEnv() (sagecrypto.KeyPair, error) {
-	path := strings.TrimSpace(os.Getenv("MEDICAL_JWK_FILE"))
-	if path == "" {
-		return nil, fmt.Errorf("missing MEDICAL_JWK_FILE for server signing key (JWK)")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read MEDICAL_JWK_FILE (%s): %w", path, err)
-	}
-	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
-	if err != nil {
-		return nil, fmt.Errorf("import MEDICAL_JWK_FILE (%s) as JWK: %w", path, err)
-	}
-	return kp, nil
-}
-
-func loadServerKEMFromEnv() (sagecrypto.KeyPair, error) {
-	path := strings.TrimSpace(os.Getenv("MEDICAL_KEM_JWK_FILE"))
-	if path == "" {
-		return nil, fmt.Errorf("missing MEDICAL_KEM_JWK_FILE for server KEM key (JWK)")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read MEDICAL_KEM_JWK_FILE (%s): %w", path, err)
-	}
-	kp, err := formats.NewJWKImporter().Import(raw, sagecrypto.KeyFormatJWK)
-	if err != nil {
-		return nil, fmt.Errorf("import MEDICAL_KEM_JWK_FILE (%s) as JWK: %w", path, err)
-	}
-	return kp, nil
-}
-
-func buildResolver() (sagedid.Resolver, error) {
-	rpc := firstNonEmpty(os.Getenv("ETH_RPC_URL"), "http://127.0.0.1:8545")
-	contract := firstNonEmpty(os.Getenv("SAGE_REGISTRY_ADDRESS"), "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512")
-	priv := strings.TrimPrefix(strings.TrimSpace(os.Getenv("SAGE_EXTERNAL_KEY")), "0x")
-
-	cfgV4 := &sagedid.RegistryConfig{
-		RPCEndpoint:        rpc,
-		ContractAddress:    contract,
-		PrivateKey:         priv, // optional (read-only)
-		GasPrice:           0,
-		MaxRetries:         24,
-		ConfirmationBlocks: 0,
-	}
-	ethV4, err := dideth.NewEthereumClient(cfgV4)
-	if err != nil {
-		return nil, fmt.Errorf("HPKE: init resolver failed: %w", err)
-	}
-	return ethV4, nil
-}
-
-func loadDIDsFromKeys(path string) (map[string]string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var rows []agentKeyRow
-	if err := json.Unmarshal(b, &rows); err != nil {
-		return nil, err
-	}
-	m := make(map[string]string, len(rows))
-	for _, r := range rows {
-		if n := strings.TrimSpace(r.Name); n != "" && strings.TrimSpace(r.DID) != "" {
-			m[n] = r.DID
-		}
-	}
-	return m, nil
 }
 
 func newCompactDIDErrorHandler(l *log.Logger) func(w http.ResponseWriter, r *http.Request, err error) {
@@ -605,19 +460,6 @@ func rootError(err error) error {
 		}
 		e = u
 	}
-}
-
-func firstNonEmpty(vs ...string) string {
-	for _, v := range vs {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func itoa(n int64) string {
-	return fmt.Sprintf("%d", n)
 }
 
 // Reuse if already exists; add if not
