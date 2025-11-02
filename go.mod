@@ -8,7 +8,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/joho/godotenv v1.5.1
 	github.com/sage-x-project/sage v1.5.2
-	github.com/sage-x-project/sage-a2a-go v1.6.0
+	github.com/sage-x-project/sage-a2a-go v1.7.0
 	golang.org/x/crypto v0.43.0
 )
 

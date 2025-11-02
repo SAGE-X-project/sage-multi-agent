@@ -3,8 +3,8 @@ package a2autil
 import (
 	// Use internal agent framework (will migrate to sage-a2a-go/pkg/agent when v1.7.0 is released)
 	"github.com/sage-x-project/sage-a2a-go/pkg/server"
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/did"
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/middleware"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/did"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/middleware"
 )
 
 // DIDAuth wraps the a2a-go server middleware so callers don't depend on a2a-go directly.

@@ -30,9 +30,9 @@ import (
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
 	// Use internal agent framework for DID, crypto, keys, and session management
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/did"
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/keys"
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/session"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/did"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/keys"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/session"
 	"github.com/sage-x-project/sage-multi-agent/types"
 	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
 	"github.com/sage-x-project/sage/pkg/agent/hpke"

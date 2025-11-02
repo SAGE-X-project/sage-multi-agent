@@ -28,7 +28,7 @@ import (
 	"github.com/sage-x-project/sage-multi-agent/types"
 
 	// Use internal agent framework for HPKE and crypto
-	"github.com/sage-x-project/sage-multi-agent/internal/agent"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework"
 	"github.com/sage-x-project/sage/pkg/agent/transport"
 
 	// Middleware

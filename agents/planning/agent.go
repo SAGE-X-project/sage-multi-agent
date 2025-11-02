@@ -17,7 +17,7 @@ import (
 	"github.com/sage-x-project/sage-multi-agent/types"
 
 	// Use internal agent framework for key management
-	"github.com/sage-x-project/sage-multi-agent/internal/agent/keys"
+	"github.com/sage-x-project/sage-a2a-go/pkg/agent/framework/keys"
 	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
 )
 
