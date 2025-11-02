@@ -36,7 +36,8 @@ import (
 	sagedid "github.com/sage-x-project/sage/pkg/agent/did"
 	dideth "github.com/sage-x-project/sage/pkg/agent/did/ethereum"
 	"github.com/sage-x-project/sage/pkg/agent/hpke"
-	"github.com/sage-x-project/sage/pkg/agent/session"
+	// Use internal agent framework for session management
+	"github.com/sage-x-project/sage-multi-agent/internal/agent/session"
 
 	// [LLM] light shim client
 	"github.com/sage-x-project/sage-multi-agent/llm"
@@ -278,7 +279,7 @@ func (r *RootAgent) EnableHPKE(ctx context.Context, target, keysFile string) err
 	t := prototx.NewA2ATransport(r, base, true, true)
 
 	sMgr := session.NewManager()
-	cli := hpke.NewClient(t, r.resolver, r.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr)
+	cli := hpke.NewClient(t, r.resolver, r.myKey, clientDID, hpke.DefaultInfoBuilder{}, sMgr.GetUnderlying())
 
 	ctxInit, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -303,7 +304,7 @@ func (r *RootAgent) encryptIfHPKE(target string, plaintext []byte) ([]byte, stri
 		return nil, "", false, nil
 	}
 	st := v.(*hpkeState)
-	sess, ok := st.sMgr.GetByKeyID(st.kid)
+	sess, ok := st.sMgr.GetUnderlying().GetByKeyID(st.kid)
 	if !ok {
 		return nil, "", true, fmt.Errorf("HPKE: session not found for kid=%s", st.kid)
 	}
@@ -324,7 +325,7 @@ func (r *RootAgent) decryptIfHPKEResponse(target, kid string, data []byte) ([]by
 		return nil, true, fmt.Errorf("HPKE: state missing")
 	}
 	st := v.(*hpkeState)
-	sess, ok := st.sMgr.GetByKeyID(kid)
+	sess, ok := st.sMgr.GetUnderlying().GetByKeyID(kid)
 	if !ok {
 		return nil, true, fmt.Errorf("HPKE: session not found for kid=%s", kid)
 	}
