@@ -93,6 +93,7 @@ func NewRootAgent(name string, port int) *RootAgent {
 	// Resolve external URLs from env (defaults allow per-agent separation)
 	ext := map[string]string{
 		"planning": strings.TrimRight(envOr("PLANNING_EXTERNAL_URL", ""), "/"),
+		"ordering": strings.TrimRight(envOr("ORDERING_EXTERNAL_URL", ""), "/"),
 		"medical":  strings.TrimRight(envOr("MEDICAL_URL", "http://localhost:5500/medical"), "/"),
 		"payment":  strings.TrimRight(envOr("PAYMENT_URL", "http://localhost:5500/payment"), "/"),
 	}
@@ -336,7 +337,7 @@ func (r *RootAgent) externalURLFor(agent string) string {
 }
 
 // pickAgent decides which agent to route to.
-// Returns "payment" | "medical" | "planning" | ""(chat)
+// Returns "payment" | "medical" | "planning" | "ordering" | ""(chat)
 func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 	// 0) explicit metadata override
 	if msg != nil && msg.Metadata != nil {
@@ -344,7 +345,7 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 			if s, ok2 := v.(string); ok2 && s != "" {
 				s = strings.ToLower(strings.TrimSpace(s))
 				switch s {
-				case "payment", "medical", "planning":
+				case "payment", "medical", "planning", "ordering":
 					return s
 				case "chat":
 					return ""
@@ -364,6 +365,9 @@ func (r *RootAgent) pickAgent(msg *types.AgentMessage) string {
 	}
 	if isPlanningActionIntent(c) {
 		return "planning"
+	}
+	if isOrderingActionIntent(c) {
+		return "ordering"
 	}
 
 	return ""
