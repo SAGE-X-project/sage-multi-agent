@@ -739,6 +739,17 @@ func (r *RootAgent) mountRoutes() {
 
 	// Main in-proc processing (full handler)
 	r.mux.HandleFunc("/process", func(w http.ResponseWriter, req *http.Request) {
+		// CORS headers for browser requests
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-SAGE-Enabled, X-HPKE-Enabled, X-Scenario, X-Conversation-ID, X-SAGE-Context-ID")
+
+		// Handle preflight OPTIONS request
+		if req.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// Method guard
 		if req.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

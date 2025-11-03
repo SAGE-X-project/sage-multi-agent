@@ -1,292 +1,175 @@
 # SAGE Multi-Agent System Makefile
-# Build, test, and manage the multi-agent system
 
 # Version
 VERSION := 1.0.0
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-# Go parameters
-GOCMD=go
-GOBUILD=$(GOCMD) build
-GOCLEAN=$(GOCMD) clean
-GOTEST=$(GOCMD) test
-GOGET=$(GOCMD) get
-GOMOD=$(GOCMD) mod
+# Go parameters with gvm
+GOCMD := source ~/.gvm/scripts/gvm && gvm use go1.25.2 && go
+GOBUILD := $(GOCMD) build
+GOCLEAN := $(GOCMD) clean
+GOTEST := $(GOCMD) test
+GOMOD := $(GOCMD) mod
 
-# Binary names
-BINARY_CLI=cli
-BINARY_ROOT=root
-BINARY_MEDICAL=medical
-BINARY_PLANNING=planning
-BINARY_PAYMENT=payment
-BINARY_REGISTER=register
-BINARY_CLIENT=client
-BINARY_ENHANCED_CLIENT=enhanced_client
-BINARY_LAUNCHER=launcher
+# Build directory
+BUILD_DIR := build/bin
 
-# Directories
-BIN_DIR=bin
-CLI_DIR=cli
-CLIENT_DIR=client
-TOOLS_DIR=tools
+# Agent targets
+AGENTS := root payment medical client gateway planning ordering
 
 # Build flags
-LDFLAGS=-ldflags "-w -s -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)"
-BUILD_FLAGS=-trimpath
+LDFLAGS := -ldflags "-w -s -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)"
+BUILD_FLAGS := -trimpath
 
-# Colors for output
-RED=\033[0;31m
-GREEN=\033[0;32m
-YELLOW=\033[1;33m
-NC=\033[0m # No Color
-
-.PHONY: all build clean test help
+# Colors
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+NC := \033[0m
 
 # Default target
+.PHONY: all
 all: build
 
-# Help target
-help:
-	@echo "$(GREEN)SAGE Multi-Agent System - Makefile$(NC)"
-	@echo ""
-	@echo "Available targets:"
-	@echo "  $(YELLOW)all$(NC)              - Build all components (default)"
-	@echo "  $(YELLOW)build$(NC)            - Build all binaries"
-	@echo "  $(YELLOW)build-agents$(NC)     - Build only agent binaries"
-	@echo "  $(YELLOW)build-cli$(NC)        - Build CLI client"
-	@echo "  $(YELLOW)build-root$(NC)       - Build root agent"
-	@echo "  $(YELLOW)build-medical$(NC)   - Build medical agent"
-	@echo "  $(YELLOW)build-planning$(NC)   - Build planning agent"
-	@echo "  $(YELLOW)build-register$(NC)   - Build registration tool"
-	@echo "  $(YELLOW)build-client$(NC)     - Build client servers"
-	@echo "  $(YELLOW)clean$(NC)            - Remove all binaries and build artifacts"
-	@echo "  $(YELLOW)test$(NC)             - Run all tests"
-	@echo "  $(YELLOW)test-verbose$(NC)     - Run tests with verbose output"
-	@echo "  $(YELLOW)test-coverage$(NC)    - Run tests with coverage report"
-	@echo "  $(YELLOW)deps$(NC)             - Download and verify dependencies"
-	@echo "  $(YELLOW)tidy$(NC)             - Tidy go.mod and go.sum"
-	@echo "  $(YELLOW)run-root$(NC)         - Run root agent"
-	@echo "  $(YELLOW)run-medical$(NC)     - Run medical agent"
-	@echo "  $(YELLOW)run-planning$(NC)     - Run planning agent"
-	@echo "  $(YELLOW)run-cli$(NC)          - Run CLI client"
-	@echo "  $(YELLOW)install$(NC)          - Install binaries to GOPATH/bin"
-	@echo ""
+# Build all agents
+.PHONY: build
+build: $(BUILD_DIR)
+	@echo "$(GREEN)Building all agents...$(NC)"
+	@for agent in $(AGENTS); do \
+		echo "$(YELLOW)Building $$agent...$(NC)"; \
+		$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$$agent ./cmd/$$agent || exit 1; \
+	done
+	@echo "$(GREEN)✅ All agents built successfully in $(BUILD_DIR)/$(NC)"
+	@ls -lh $(BUILD_DIR)/
 
-# Build all binaries
-build: deps build-dir
-	@echo "$(GREEN)Building all components...$(NC)"
-	@$(MAKE) build-agents
-	@$(MAKE) build-cli
-	@$(MAKE) build-register
-	@$(MAKE) build-client
-	@echo "$(GREEN)All components built successfully!$(NC)"
-	@echo "Binaries are available in $(BIN_DIR)/"
-	@ls -la $(BIN_DIR)/
-
-# Build only agent binaries
-build-agents: build-root build-medical build-planning build-payment
-	@echo "$(GREEN)All agents built$(NC)"
-
-# Build launcher
-build-launcher: build-dir
-	@echo "$(YELLOW)Building multi-agent launcher...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_LAUNCHER) ./cmd/launcher
-	@echo "$(GREEN)Launcher built$(NC)"
-
-# Create bin directory
-build-dir:
-	@mkdir -p $(BIN_DIR)
-
-# Build individual components
-build-cli: build-dir
-	@echo "$(YELLOW)Building CLI client...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLI) ./$(CLI_DIR)
-	@echo "$(GREEN)CLI client built$(NC)"
-
-build-root: build-dir
+# Build individual agents
+.PHONY: root
+root: $(BUILD_DIR)
 	@echo "$(YELLOW)Building root agent...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_ROOT) ./$(CLI_DIR)/root
-	@echo "$(GREEN)Root agent built$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/root ./cmd/root
+	@echo "$(GREEN)✅ Root agent built$(NC)"
 
-build-medical: build-dir
-	@echo "$(YELLOW)Building medical agent...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_MEDICAL) ./$(CLI_DIR)/medical
-	@echo "$(GREEN)MEDICAL agent built$(NC)"
-
-build-planning: build-dir
-	@echo "$(YELLOW)Building planning agent...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_PLANNING) ./$(CLI_DIR)/planning
-	@echo "$(GREEN)Planning agent built$(NC)"
-
-build-payment: build-dir
+.PHONY: payment
+payment: $(BUILD_DIR)
 	@echo "$(YELLOW)Building payment agent...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_PAYMENT) ./$(CLI_DIR)/payment
-	@echo "$(GREEN)Payment agent built$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/payment ./cmd/payment
+	@echo "$(GREEN)✅ Payment agent built$(NC)"
 
-build-register: build-dir
-	@echo "$(YELLOW)Building registration tool...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_REGISTER) ./$(CLI_DIR)/register
-	@echo "$(GREEN)Registration tool built$(NC)"
+.PHONY: medical
+medical: $(BUILD_DIR)
+	@echo "$(YELLOW)Building medical agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/medical ./cmd/medical
+	@echo "$(GREEN)✅ Medical agent built$(NC)"
 
-build-client: build-dir
-	@echo "$(YELLOW)Building client server...$(NC)"
-	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_CLIENT) ./cmd/client/main.go
-	@echo "$(GREEN)Client server built$(NC)"
+.PHONY: client
+client: $(BUILD_DIR)
+	@echo "$(YELLOW)Building client agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/client ./cmd/client
+	@echo "$(GREEN)✅ Client agent built$(NC)"
 
-# Clean build artifacts
+.PHONY: gateway
+gateway: $(BUILD_DIR)
+	@echo "$(YELLOW)Building gateway...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/gateway ./cmd/gateway
+	@echo "$(GREEN)✅ Gateway built$(NC)"
+
+.PHONY: planning
+planning: $(BUILD_DIR)
+	@echo "$(YELLOW)Building planning agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/planning ./cmd/planning
+	@echo "$(GREEN)✅ Planning agent built$(NC)"
+
+.PHONY: ordering
+ordering: $(BUILD_DIR)
+	@echo "$(YELLOW)Building ordering agent...$(NC)"
+	@$(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(BUILD_DIR)/ordering ./cmd/ordering
+	@echo "$(GREEN)✅ Ordering agent built$(NC)"
+
+# Create build directory
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)
+
+# Clean all build artifacts
+.PHONY: clean
 clean:
 	@echo "$(YELLOW)Cleaning build artifacts...$(NC)"
-	@$(GOCLEAN)
-	@rm -rf $(BIN_DIR)
+	@rm -rf build/
+	@rm -f root payment medical client gateway planning ordering
 	@rm -f coverage.out coverage.html
-	@find . -maxdepth 1 -type f -perm +111 -name "*" ! -name "*.sh" -delete 2>/dev/null || true
-	@echo "$(GREEN)Clean complete$(NC)"
-
-# Run tests
-test:
-	@echo "$(YELLOW)Running tests...$(NC)"
-	@$(GOTEST) -short \
-		./adapters/... \
-		./config/... \
-		./gateway/... \
-		./types/... \
-		./websocket/... 2>/dev/null || true
-	@echo "$(GREEN)Tests complete$(NC)"
-
-# Run tests with verbose output
-test-verbose:
-	@echo "$(YELLOW)Running tests with verbose output...$(NC)"
-	@$(GOTEST) -v \
-		./adapters/... \
-		./config/... \
-		./gateway/... \
-		./types/... \
-		./websocket/...
-
-# Run tests with coverage
-test-coverage:
-	@echo "$(YELLOW)Running tests with coverage...$(NC)"
-	@$(GOTEST) -cover \
-		./adapters/... \
-		./config/... \
-		./gateway/... \
-		./types/... \
-		./websocket/...
-	@echo ""
-	@echo "$(YELLOW)Generating coverage report...$(NC)"
-	@$(GOTEST) -coverprofile=coverage.out \
-		./adapters/... \
-		./config/... \
-		./gateway/... \
-		./types/... \
-		./websocket/...
-	@$(GOCMD) tool cover -html=coverage.out -o coverage.html 2>/dev/null || true
-	@echo "$(GREEN)Coverage report generated: coverage.html$(NC)"
+	@$(GOCLEAN)
+	@echo "$(GREEN)✅ Clean complete$(NC)"
 
 # Dependency management
+.PHONY: deps
 deps:
 	@echo "$(YELLOW)Downloading dependencies...$(NC)"
-	@$(GOGET) -v ./...
-	@echo "$(GREEN)Dependencies downloaded$(NC)"
+	@$(GOMOD) download
+	@echo "$(GREEN)✅ Dependencies downloaded$(NC)"
 
+.PHONY: tidy
 tidy:
 	@echo "$(YELLOW)Tidying go.mod...$(NC)"
 	@$(GOMOD) tidy
-	@echo "$(GREEN)go.mod tidied$(NC)"
+	@echo "$(GREEN)✅ go.mod tidied$(NC)"
 
-# Run targets (for development)
-run-root:
-	@echo "$(YELLOW)Starting root agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/root -port 8080
+# Run tests
+.PHONY: test
+test:
+	@echo "$(YELLOW)Running tests...$(NC)"
+	@$(GOTEST) -short ./...
+	@echo "$(GREEN)✅ Tests complete$(NC)"
 
-run-medical:
-	@echo "$(YELLOW)Starting medical agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/medical -port 8083
+.PHONY: test-verbose
+test-verbose:
+	@echo "$(YELLOW)Running tests with verbose output...$(NC)"
+	@$(GOTEST) -v ./...
 
-run-planning:
-	@echo "$(YELLOW)Starting planning agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/planning -port 8084
-
-run-cli:
-	@echo "$(YELLOW)Starting CLI client...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)
-
-run-payment:
-	@echo "$(YELLOW)Starting payment agent...$(NC)"
-	@$(GOCMD) run ./$(CLI_DIR)/payment -port 18083
-
-# Run multi-agent system launcher
-run: build-launcher
-	@echo "$(YELLOW)Starting SAGE Multi-Agent System...$(NC)"
-	@./$(BIN_DIR)/$(BINARY_LAUNCHER)
-
-run-sage-on: build-launcher
-	@echo "$(YELLOW)Starting Multi-Agent System with SAGE ENABLED...$(NC)"
-	@./$(BIN_DIR)/$(BINARY_LAUNCHER) -sage=true
-
-run-sage-off: build-launcher
-	@echo "$(YELLOW)Starting Multi-Agent System with SAGE DISABLED...$(NC)"
-	@./$(BIN_DIR)/$(BINARY_LAUNCHER) -sage=false
-
-# Install binaries to GOPATH/bin
-install: build
-	@echo "$(YELLOW)Installing binaries to GOPATH/bin...$(NC)"
-	@cp $(BIN_DIR)/$(BINARY_CLI) $(GOPATH)/bin/sage-cli
-	@cp $(BIN_DIR)/$(BINARY_ROOT) $(GOPATH)/bin/sage-root
-	@cp $(BIN_DIR)/$(BINARY_MEDICAL) $(GOPATH)/bin/sage-medical
-	@cp $(BIN_DIR)/$(BINARY_PLANNING) $(GOPATH)/bin/sage-planning
-	@cp $(BIN_DIR)/$(BINARY_REGISTER) $(GOPATH)/bin/sage-register
-	@echo "$(GREEN)Installation complete$(NC)"
-	@echo ""
-	@echo "Installed binaries:"
-	@echo "  sage-cli       - CLI client"
-	@echo "  sage-root      - Root agent"
-	@echo "  sage-medical  - MEDICAL agent"
-	@echo "  sage-planning  - Planning agent"
-	@echo "  sage-register  - Registration tool"
+.PHONY: test-coverage
+test-coverage:
+	@echo "$(YELLOW)Running tests with coverage...$(NC)"
+	@$(GOTEST) -coverprofile=coverage.out ./...
+	@$(GOCMD) tool cover -html=coverage.out -o coverage.html
+	@echo "$(GREEN)✅ Coverage report: coverage.html$(NC)"
 
 # Development helpers
-.PHONY: fmt lint vet
-
+.PHONY: fmt
 fmt:
 	@echo "$(YELLOW)Formatting code...$(NC)"
 	@$(GOCMD) fmt ./...
-	@echo "$(GREEN)Code formatted$(NC)"
+	@echo "$(GREEN)✅ Code formatted$(NC)"
 
-lint:
-	@echo "$(YELLOW)Running linter...$(NC)"
-	@command -v golangci-lint >/dev/null 2>&1 || { echo "$(RED)golangci-lint not installed$(NC)"; exit 1; }
-	@golangci-lint run
-	@echo "$(GREEN)Lint complete$(NC)"
-
+.PHONY: vet
 vet:
 	@echo "$(YELLOW)Running go vet...$(NC)"
 	@$(GOCMD) vet ./...
-	@echo "$(GREEN)Vet complete$(NC)"
+	@echo "$(GREEN)✅ Vet complete$(NC)"
 
-# Quick start targets
-.PHONY: quick-start stop-all
-
-quick-start: build
-	@echo "$(GREEN)Starting all agents...$(NC)"
-	@./scripts/start-backend.sh
-
-stop-all:
-	@echo "$(YELLOW)Stopping all agents...$(NC)"
-	@./scripts/stop-backend.sh
-
-# Docker targets (if needed in the future)
-.PHONY: docker-build docker-run docker-clean
-
-docker-build:
-	@echo "$(YELLOW)Building Docker images...$(NC)"
-	@echo "$(RED)Docker support not yet implemented$(NC)"
-
-docker-run:
-	@echo "$(YELLOW)Running Docker containers...$(NC)"
-	@echo "$(RED)Docker support not yet implemented$(NC)"
-
-docker-clean:
-	@echo "$(YELLOW)Cleaning Docker artifacts...$(NC)"
-	@echo "$(RED)Docker support not yet implemented$(NC)"
+# Show help
+.PHONY: help
+help:
+	@echo "$(GREEN)SAGE Multi-Agent Build System$(NC)"
+	@echo ""
+	@echo "Usage:"
+	@echo "  make [target]"
+	@echo ""
+	@echo "Build Targets:"
+	@echo "  $(YELLOW)all$(NC)         - Build all agents (default)"
+	@echo "  $(YELLOW)build$(NC)       - Build all agents"
+	@echo "  $(YELLOW)root$(NC)        - Build root agent only"
+	@echo "  $(YELLOW)payment$(NC)     - Build payment agent only"
+	@echo "  $(YELLOW)medical$(NC)     - Build medical agent only"
+	@echo "  $(YELLOW)client$(NC)      - Build client agent only"
+	@echo "  $(YELLOW)gateway$(NC)     - Build gateway only"
+	@echo "  $(YELLOW)planning$(NC)    - Build planning agent only"
+	@echo "  $(YELLOW)ordering$(NC)    - Build ordering agent only"
+	@echo ""
+	@echo "Maintenance:"
+	@echo "  $(YELLOW)clean$(NC)       - Remove all build artifacts"
+	@echo "  $(YELLOW)deps$(NC)        - Download dependencies"
+	@echo "  $(YELLOW)tidy$(NC)        - Tidy go.mod"
+	@echo "  $(YELLOW)test$(NC)        - Run tests"
+	@echo "  $(YELLOW)fmt$(NC)         - Format code"
+	@echo "  $(YELLOW)vet$(NC)         - Run go vet"
+	@echo ""
+	@echo "Build output: $(BUILD_DIR)/"
+	@echo "Go version: 1.25.2 (via gvm)"

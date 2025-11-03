@@ -104,7 +104,9 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 
 	// ===== Protected mux: /process =====
 	protected := http.NewServeMux()
-	protected.HandleFunc("/medical/process", func(w http.ResponseWriter, r *http.Request) {
+
+	// Handler function for processing requests (both /process and /medical/process)
+	processHandler := func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		_ = r.Body.Close()
 
@@ -191,7 +193,11 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(resp.Data)
-	})
+	}
+
+	// Register handler for both paths
+	protected.HandleFunc("/process", processHandler)
+	protected.HandleFunc("/medical/process", processHandler)
 	ma.protMux = protected
 	ma.handler = agentmux.BuildAgentHandler("medical", open, protected, ma.mw)
 	// ===== Compose final handler =====
@@ -199,8 +205,15 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 	if ma.mw != nil {
 		wrapped := ma.mw.Wrap(protected)
 		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ma.logger.Printf("[debug] Request: %s %s", r.Method, r.URL.Path)
 			if r.URL.Path == "/status" {
 				open.ServeHTTP(w, r)
+				return
+			}
+			// Expose framework HPKE handshake endpoint
+			if r.URL.Path == "/messages" && ma.agent != nil && ma.agent.GetHTTPServer() != nil {
+				ma.logger.Printf("[debug] Handling HPKE handshake via /messages")
+				ma.agent.GetHTTPServer().MessagesHandler().ServeHTTP(w, r)
 				return
 			}
 			wrapped.ServeHTTP(w, r)
@@ -209,7 +222,14 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 		root := http.NewServeMux()
 		root.Handle("/status", open)
 		root.Handle("/medical/", protected)  // prefix match to handle /medical/process
-		h = root
+		// Expose framework HPKE handshake endpoint
+		if ma.agent != nil && ma.agent.GetHTTPServer() != nil {
+			root.Handle("/messages", ma.agent.GetHTTPServer().MessagesHandler())
+		}
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ma.logger.Printf("[debug] Request: %s %s", r.Method, r.URL.Path)
+			root.ServeHTTP(w, r)
+		})
 	}
 	ma.handler = h
 

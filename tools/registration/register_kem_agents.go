@@ -104,13 +104,18 @@ func main() {
 	}
 	fmt.Println("======================================")
 
+	// Use Hardhat test account #0 for view operations
+	viewPrivKey := strings.TrimSpace(os.Getenv("SAGE_VIEW_PRIVATE_KEY"))
+	if viewPrivKey == "" {
+		viewPrivKey = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+	}
 	viewClient, err := registry.NewRegistrationClient(&registry.ClientConfig{
 		RPCURL:          *rpcURL,
 		RegistryAddress: *contract,
-		PrivateKey:      "", // View-only client
+		PrivateKey:      viewPrivKey,
 	})
 	if err != nil {
-		fatalf("init view client: %v")
+		fatalf("init view client: %v", err)
 	}
 
 	// chainId & registry address for signing

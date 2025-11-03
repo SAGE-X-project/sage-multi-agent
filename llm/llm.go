@@ -66,7 +66,7 @@ type chatChoice struct {
 // NewFromEnv creates a client with OpenAI defaults.
 // Provider selection (optional):
 //
-//	LLM_PROVIDER=openai|gemini
+//	LLM_PROVIDER=openai|gemini|gemini-native|anthropic|claude
 //
 // OpenAI (default):
 //
@@ -74,11 +74,21 @@ type chatChoice struct {
 //	Key:      OPENAI_API_KEY > LLM_API_KEY
 //	Model:    OPENAI_MODEL > LLM_MODEL > gpt-4o-mini
 //
-// Gemini (fallback):
+// Gemini (OpenAI-compatible endpoint):
 //
 //	Base URL: GEMINI_API_URL > LLM_BASE_URL > LLM_URL > https://generativelanguage.googleapis.com/v1beta/openai
 //	Key:      GEMINI_API_KEY > GOOGLE_API_KEY > LLM_API_KEY
 //	Model:    GEMINI_MODEL > LLM_MODEL > gemini-2.5-flash
+//
+// Gemini-Native (Google's native REST API):
+//
+//	Key:      GEMINI_API_KEY > GOOGLE_API_KEY > LLM_API_KEY
+//	Model:    GEMINI_MODEL > LLM_MODEL > gemini-2.0-flash-exp
+//
+// Anthropic/Claude:
+//
+//	Key:      ANTHROPIC_API_KEY > LLM_API_KEY
+//	Model:    ANTHROPIC_MODEL > LLM_MODEL > claude-3-5-sonnet-20241022
 //
 // Localhost/127.* base allows no key or LLM_ALLOW_NO_KEY=true.
 func NewFromEnv() (Client, error) {
@@ -87,10 +97,64 @@ func NewFromEnv() (Client, error) {
 		provider = "openai"
 	}
 
+	// Timeout: prefer seconds string in LLM_TIMEOUT or millis in LLM_TIMEOUT_MS
+	timeout := 12 * time.Second
+	if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			timeout = d
+		}
+	} else if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT_MS")); v != "" {
+		if d, err := time.ParseDuration(v + "ms"); err == nil {
+			timeout = d
+		}
+	}
+
 	var base, key, model string
 
 	switch provider {
+	case "gemini-native":
+		// Use Google's native REST API
+		key = firstNonEmpty(
+			os.Getenv("GEMINI_API_KEY"),
+			os.Getenv("GOOGLE_API_KEY"),
+			os.Getenv("LLM_API_KEY"),
+		)
+		if key == "" {
+			return nil, ErrLLMDisabled
+		}
+
+		model = firstNonEmpty(
+			os.Getenv("GEMINI_MODEL"),
+			os.Getenv("LLM_MODEL"),
+		)
+		if model == "" {
+			model = "gemini-2.0-flash-exp"
+		}
+
+		return NewGeminiClient(key, model, timeout), nil
+
+	case "anthropic", "claude":
+		// Use Anthropic's Claude API
+		key = firstNonEmpty(
+			os.Getenv("ANTHROPIC_API_KEY"),
+			os.Getenv("LLM_API_KEY"),
+		)
+		if key == "" {
+			return nil, ErrLLMDisabled
+		}
+
+		model = firstNonEmpty(
+			os.Getenv("ANTHROPIC_MODEL"),
+			os.Getenv("LLM_MODEL"),
+		)
+		if model == "" {
+			model = "claude-3-5-sonnet-20241022"
+		}
+
+		return NewAnthropicClient(key, model, timeout), nil
+
 	case "gemini":
+		// Use Gemini's OpenAI-compatible endpoint
 		base = firstNonEmpty(
 			os.Getenv("GEMINI_API_URL"),
 			os.Getenv("LLM_BASE_URL"),
@@ -137,18 +201,6 @@ func NewFromEnv() (Client, error) {
 		)
 		if model == "" {
 			model = "gpt-4o-mini"
-		}
-	}
-
-	// Timeout: prefer seconds string in LLM_TIMEOUT or millis in LLM_TIMEOUT_MS
-	timeout := 12 * time.Second
-	if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT")); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			timeout = d
-		}
-	} else if v := strings.TrimSpace(os.Getenv("LLM_TIMEOUT_MS")); v != "" {
-		if d, err := time.ParseDuration(v + "ms"); err == nil {
-			timeout = d
 		}
 	}
 

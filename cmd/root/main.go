@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/root"
+	"github.com/sage-x-project/sage-multi-agent/internal/bootstrap"
 )
 
 // env-backed defaults
@@ -64,13 +65,43 @@ func main() {
 
 	// === LLM config for Root pre-ask (added) ===
 	llmEnable := flag.Bool("llm", getenvBool("LLM_ENABLED", true), "enable LLM prompts (root pre-ask)")
+	llmProvider := flag.String("llm-provider", getenvStr("LLM_PROVIDER", "openai"), "LLM provider (openai|gemini-native|gemini|anthropic)")
 	llmURL := flag.String("llm-url", getenvStr("LLM_BASE_URL", "http://localhost:11434"), "LLM base URL (Zamiai/Ollama/etc.)")
 	llmKey := flag.String("llm-key", getenvStr("LLM_API_KEY", ""), "LLM API key (if required)")
+	geminiKey := flag.String("gemini-key", getenvStr("GEMINI_API_KEY", ""), "Gemini API key")
 	llmModel := flag.String("llm-model", getenvStr("LLM_MODEL", "gemma2:2b"), "LLM model name/id")
+	geminiModel := flag.String("gemini-model", getenvStr("GEMINI_MODEL", ""), "Gemini model name")
 	llmLang := flag.String("llm-lang", getenvStr("LLM_LANG_DEFAULT", "auto"), "default language (auto|ko|en)")
 	llmTimeout := flag.Int("llm-timeout", getenvInt("LLM_TIMEOUT_MS", 80000), "LLM timeout in milliseconds")
 
 	flag.Parse()
+
+	// ---- Bootstrap: Ensure keys exist before starting ----
+	log.Println("[root] Initializing agent keys...")
+	bootstrapCfg := bootstrap.LoadConfigFromEnv("root")
+
+	// Override with command-line flags if provided
+	if *rootJWK != "" {
+		bootstrapCfg.SigningKeyFile = *rootJWK
+	}
+	if *rootDID != "" {
+		bootstrapCfg.DID = *rootDID
+	}
+
+	agentKeys, err := bootstrap.EnsureAgentKeys(context.Background(), bootstrapCfg)
+	if err != nil {
+		log.Fatalf("[root] Failed to initialize keys: %v", err)
+	}
+
+	log.Printf("[root] Agent initialized with DID: %s", agentKeys.DID)
+
+	// Update flags with bootstrapped values
+	if *rootJWK == "" && bootstrapCfg.SigningKeyFile != "" {
+		*rootJWK = bootstrapCfg.SigningKeyFile
+	}
+	if *rootDID == "" {
+		*rootDID = agentKeys.DID
+	}
 
 	// ---- Export env BEFORE constructing Root (Root reads env on NewRootAgent) ----
 	if *planningExternal != "" {
@@ -92,14 +123,23 @@ func main() {
 
 	// === Export LLM env for Root pre-ask (added) ===
 	_ = os.Setenv("LLM_ENABLED", fmt.Sprintf("%v", *llmEnable))
+	if *llmProvider != "" {
+		_ = os.Setenv("LLM_PROVIDER", *llmProvider)
+	}
 	if *llmURL != "" {
 		_ = os.Setenv("LLM_BASE_URL", *llmURL)
 	}
 	if *llmKey != "" {
 		_ = os.Setenv("LLM_API_KEY", *llmKey)
 	}
+	if *geminiKey != "" {
+		_ = os.Setenv("GEMINI_API_KEY", *geminiKey)
+	}
 	if *llmModel != "" {
 		_ = os.Setenv("LLM_MODEL", *llmModel)
+	}
+	if *geminiModel != "" {
+		_ = os.Setenv("GEMINI_MODEL", *geminiModel)
 	}
 	if *llmLang != "" {
 		_ = os.Setenv("LLM_LANG_DEFAULT", *llmLang)
@@ -129,13 +169,13 @@ func main() {
 	}
 
 	log.Printf(
-		"[boot] root:%d  ext{planning=%s medical=%s payment=%s}  SAGE=%v  llm={enable:%v url:%q model:%q lang:%q timeout:%dms}",
+		"[boot] root:%d  ext{planning=%s medical=%s payment=%s}  SAGE=%v  llm={enable:%v provider:%q url:%q model:%q lang:%q timeout:%dms}",
 		*rootPort,
 		os.Getenv("PLANNING_EXTERNAL_URL"),
 		os.Getenv("MEDICAL_URL"),
 		os.Getenv("PAYMENT_URL"),
 		*sage,
-		*llmEnable, os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout,
+		*llmEnable, os.Getenv("LLM_PROVIDER"), os.Getenv("LLM_BASE_URL"), os.Getenv("LLM_MODEL"), os.Getenv("LLM_LANG_DEFAULT"), *llmTimeout,
 	)
 	if err := r.Start(); err != nil {
 		log.Fatal(err)

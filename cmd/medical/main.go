@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 
 	"github.com/sage-x-project/sage-multi-agent/agents/medical"
+	"github.com/sage-x-project/sage-multi-agent/internal/bootstrap"
 )
 
 func getenvInt(keys []string, def int) int {
@@ -92,6 +94,33 @@ func main() {
 	llmTimeout := flag.Int("llm-timeout", getenvInt([]string{"LLM_TIMEOUT_MS"}, 8000), "LLM timeout in milliseconds")
 
 	flag.Parse()
+
+	// ---- Bootstrap: Ensure keys exist before starting ----
+	log.Println("[medical] Initializing agent keys...")
+	bootstrapCfg := bootstrap.LoadConfigFromEnv("medical")
+
+	// Override with command-line flags if provided
+	if *signJWK != "" {
+		bootstrapCfg.SigningKeyFile = *signJWK
+	}
+	if *kemJWK != "" {
+		bootstrapCfg.KEMKeyFile = *kemJWK
+	}
+
+	agentKeys, err := bootstrap.EnsureAgentKeys(context.Background(), bootstrapCfg)
+	if err != nil {
+		log.Fatalf("[medical] Failed to initialize keys: %v", err)
+	}
+
+	log.Printf("[medical] Agent initialized with DID: %s", agentKeys.DID)
+
+	// Update flags with bootstrapped values
+	if *signJWK == "" && bootstrapCfg.SigningKeyFile != "" {
+		*signJWK = bootstrapCfg.SigningKeyFile
+	}
+	if *kemJWK == "" && bootstrapCfg.KEMKeyFile != "" {
+		*kemJWK = bootstrapCfg.KEMKeyFile
+	}
 
 	// ---------- Auto-detect default key paths if not provided ----------
 	if *signJWK == "" {

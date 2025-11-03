@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net/http"
@@ -10,18 +11,65 @@ import (
 
 	a2aclient "github.com/sage-x-project/sage-a2a-go/pkg/client"
 	"github.com/sage-x-project/sage-multi-agent/api"
+	"github.com/sage-x-project/sage-multi-agent/internal/bootstrap"
 	sagecrypto "github.com/sage-x-project/sage/pkg/agent/crypto"
 	"github.com/sage-x-project/sage/pkg/agent/crypto/formats"
 	"github.com/sage-x-project/sage/pkg/agent/did"
 )
 
-func main() {
-	port := flag.Int("port", 8086, "client api port")
-	rootBase := flag.String("root", "http://localhost:18080", "root base URL")
+func getenvInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
 
-	clientJWK := flag.String("client-jwk", "", "optional: path to JWK (private) for signing client->root")
-	clientDID := flag.String("client-did", "", "optional: DID to use for client signing")
+func getenvStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func main() {
+	log.SetFlags(log.LstdFlags)
+	log.SetPrefix("[client] ")
+
+	port := flag.Int("port", getenvInt("CLIENT_API_PORT", 8086), "client api port")
+	rootBase := flag.String("root", getenvStr("ROOT_AGENT_URL", "http://localhost:18080"), "root base URL")
+
+	clientJWK := flag.String("client-jwk", getenvStr("CLIENT_JWK_FILE", ""), "optional: path to JWK (private) for signing client->root")
+	clientDID := flag.String("client-did", getenvStr("CLIENT_DID", ""), "optional: DID to use for client signing")
 	flag.Parse()
+
+	// ---- Bootstrap: Ensure keys exist before starting ----
+	log.Println("[client] Initializing agent keys...")
+	bootstrapCfg := bootstrap.LoadConfigFromEnv("client")
+
+	// Override with command-line flags if provided
+	if *clientJWK != "" {
+		bootstrapCfg.SigningKeyFile = *clientJWK
+	}
+	if *clientDID != "" {
+		bootstrapCfg.DID = *clientDID
+	}
+
+	agentKeys, err := bootstrap.EnsureAgentKeys(context.Background(), bootstrapCfg)
+	if err != nil {
+		log.Fatalf("[client] Failed to initialize keys: %v", err)
+	}
+
+	log.Printf("[client] Agent initialized with DID: %s", agentKeys.DID)
+
+	// Update flags with bootstrapped values
+	if *clientJWK == "" && bootstrapCfg.SigningKeyFile != "" {
+		*clientJWK = bootstrapCfg.SigningKeyFile
+	}
+	if *clientDID == "" {
+		*clientDID = agentKeys.DID
+	}
 
 	var a2a *a2aclient.A2AClient
 	if *clientJWK != "" {
