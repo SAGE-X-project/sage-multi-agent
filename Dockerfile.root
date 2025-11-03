@@ -1,0 +1,52 @@
+# Build stage
+FROM golang:1.25.2-alpine AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+# Copy go mod files
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build root agent
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-w -s" \
+    -o /app/bin/root \
+    ./cmd/root
+
+# Runtime stage
+FROM alpine:latest
+
+WORKDIR /app
+
+# Install ca-certificates for HTTPS
+RUN apk --no-cache add ca-certificates
+
+# Copy binary from builder
+COPY --from=builder /app/bin/root /app/root
+
+# Copy necessary files
+COPY --from=builder /app/.env.example /app/.env.example
+
+# Create directories for keys and logs
+RUN mkdir -p /app/keys /app/logs
+
+# Expose port (default 18080)
+EXPOSE 18080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:18080/health || exit 1
+
+# Run as non-root user
+RUN addgroup -S sage && adduser -S sage -G sage
+RUN chown -R sage:sage /app
+USER sage
+
+CMD ["/app/root", "--port=18080"]

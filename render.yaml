@@ -1,0 +1,126 @@
+services:
+  # ============================================
+  # Root Agent
+  # ============================================
+  - type: web
+    name: sage-root-agent
+    env: docker
+    dockerfilePath: ./Dockerfile.root
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: ETH_RPC_URL
+        value: https://eth-sepolia.g.alchemy.com/v2/v4TawV7y1l8GhqM_4_KZu5x7H9R6poNW
+      - key: SAGE_REGISTRY_ADDRESS
+        value: 0xC7eCF7Ad6ee71CB0d94f0eb00F46f1DDf432a808
+      - key: CHAIN_ID
+        value: 11155111
+      - key: ROOT_AGENT_PORT
+        value: 18080
+      - key: ROOT_SAGE_ENABLED
+        value: true
+      - key: ROOT_HPKE
+        value: true
+      - key: LLM_ENABLED
+        value: true
+      - key: LLM_PROVIDER
+        value: gemini-native
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash-exp
+      - key: LLM_TIMEOUT
+        value: 15s
+      - key: LOG_LEVEL
+        value: info
+      - key: ROOT_JWK
+        sync: false
+      - key: ROOT_KEM_JWK
+        sync: false
+
+  # ============================================
+  # Payment Agent
+  # ============================================
+  - type: web
+    name: sage-payment-agent
+    env: docker
+    dockerfilePath: ./Dockerfile.payment
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: ETH_RPC_URL
+        value: https://eth-sepolia.g.alchemy.com/v2/v4TawV7y1l8GhqM_4_KZu5x7H9R6poNW
+      - key: SAGE_REGISTRY_ADDRESS
+        value: 0xC7eCF7Ad6ee71CB0d94f0eb00F46f1DDf432a808
+      - key: CHAIN_ID
+        value: 11155111
+      - key: PAYMENT_AGENT_PORT
+        value: 19083
+      - key: PAYMENT_SAGE_ENABLED
+        value: true
+      - key: PAYMENT_REQUIRE_SIGNATURE
+        value: true
+      - key: LLM_ENABLED
+        value: true
+      - key: LLM_PROVIDER
+        value: gemini-native
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash-exp
+      - key: LOG_LEVEL
+        value: info
+      - key: PAYMENT_JWK
+        sync: false
+      - key: PAYMENT_KEM_JWK
+        sync: false
+      - key: ROOT_AGENT_URL
+        fromService:
+          name: sage-root-agent
+          type: web
+          property: host
+
+  # ============================================
+  # Medical Agent
+  # ============================================
+  - type: web
+    name: sage-medical-agent
+    env: docker
+    dockerfilePath: ./Dockerfile.medical
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: ETH_RPC_URL
+        value: https://eth-sepolia.g.alchemy.com/v2/v4TawV7y1l8GhqM_4_KZu5x7H9R6poNW
+      - key: SAGE_REGISTRY_ADDRESS
+        value: 0xC7eCF7Ad6ee71CB0d94f0eb00F46f1DDf432a808
+      - key: CHAIN_ID
+        value: 11155111
+      - key: MEDICAL_AGENT_PORT
+        value: 19082
+      - key: MEDICAL_SAGE_ENABLED
+        value: true
+      - key: MEDICAL_REQUIRE_SIGNATURE
+        value: true
+      - key: LLM_ENABLED
+        value: true
+      - key: LLM_PROVIDER
+        value: gemini-native
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash-exp
+      - key: LOG_LEVEL
+        value: info
+      - key: MEDICAL_JWK
+        sync: false
+      - key: MEDICAL_KEM_JWK
+        sync: false
+      - key: ROOT_AGENT_URL
+        fromService:
+          name: sage-root-agent
+          type: web
+          property: host
