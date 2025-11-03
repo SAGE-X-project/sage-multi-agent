@@ -274,30 +274,32 @@ All agents benefit from sage-a2a-go v1.7.0 framework features:
 
 ## 🐛 Known Issues
 
-### Issue #1: Payment Endpoint Routing
+### ~~Issue #1: Payment Endpoint Routing~~ ✅ FIXED
 
-**Status**: 🟡 Minor - Does not block migration
+**Status**: ✅ **RESOLVED** (commit fc66e47)
 
-**Description**: When `requireSignature=false`, the Payment agent's endpoint routing has a mismatch:
+**Description**: When `requireSignature=false`, the Payment agent's endpoint routing had a mismatch:
 - Protected mux registers `/payment/process` handler
-- Root mux registers `/process` pattern
+- Root mux registered `/process` pattern (incorrect)
 - Result: 404 on POST /payment/process
 
-**Impact**:
-- Does NOT affect SAGE ON mode (signature verification enabled)
-- Does NOT affect migration to v1.7.0 framework
-- Root agent and planning flow work correctly
-
-**Workaround**: Use SAGE ON mode with proper middleware
-
-**Fix Required**: Update `agents/payment/agent.go` line 212:
+**Fix Applied**:
 ```go
-// Current
-root.Handle("/process", protected)
+// Before (Line 212)
+root.Handle("/process", protected)  // ❌ Pattern mismatch
 
-// Should be
-root.Handle("/payment/", protected)
+// After
+root.Handle("/payment/", protected)  // ✅ Prefix match works
 ```
+
+**Same fix applied to Medical agent**: `/process` → `/medical/`
+
+**Verification**:
+- ✅ Direct endpoint test: `POST /payment/process` → 200 OK + receipt
+- ✅ End-to-end flow: Client API → Root → Gateway → Payment → receipt
+- ✅ Full payment scenario working in SAGE OFF mode
+
+**No remaining known issues**
 
 ---
 
@@ -362,7 +364,7 @@ sage-a2a-go/  (external dependency)
 - [x] Test service startup
 
 ### Short-term (Recommended)
-- [ ] Fix Payment agent endpoint routing (Issue #1)
+- [x] Fix Payment agent endpoint routing (Issue #1) ✅ **COMPLETED**
 - [ ] Add unit tests for agent initialization
 - [ ] Document environment variables for agents
 - [ ] Create integration test suite
@@ -436,7 +438,7 @@ The migration to **sage-a2a-go v1.7.0 Agent Framework** is **100% complete** and
 
 ### Recommendation
 
-**APPROVED for merge to main** with minor fix for Payment endpoint routing to be addressed in follow-up PR.
+**APPROVED for merge to main**. All issues resolved, production-ready.
 
 ---
 
@@ -444,6 +446,8 @@ The migration to **sage-a2a-go v1.7.0 Agent Framework** is **100% complete** and
 
 ### Git Commits
 ```
+fc66e47 - fix: Correct endpoint routing for Payment and Medical agents in SAGE OFF mode
+6ac9ae0 - docs: Add comprehensive migration completion report
 4e6ee79 - Migrate to sage-a2a-go v1.7.0 Agent Framework
 c88eb3b - Update middleware comment to reference upcoming migration
 c55af43 - Add comprehensive migration documentation for sage-a2a-go v1.7.0
@@ -462,5 +466,5 @@ c55af43 - Add comprehensive migration documentation for sage-a2a-go v1.7.0
 
 **Migration Completed By**: Claude Code
 **Review Status**: Ready for Review
-**Merge Status**: Ready for Merge (with minor follow-up fix)
+**Merge Status**: ✅ Ready for Merge (all issues resolved)
 
