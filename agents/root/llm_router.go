@@ -12,7 +12,7 @@ import (
 )
 
 type routeOut struct {
-	Domain string // "payment" | "medical" | "planning" | ""
+	Domain string // "payment" | "medical" | "planning" | "ordering" | ""
 	Lang   string // "ko" | "en"
 }
 
@@ -31,6 +31,9 @@ func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) 
 	if isPlanningActionIntent(low) {
 		return routeOut{Domain: "planning", Lang: llm.DetectLang(text)}, true
 	}
+	if isOrderingActionIntent(low) {
+		return routeOut{Domain: "ordering", Lang: llm.DetectLang(text)}, true
+	}
 
     // 2) Use LLM (when available)
 	r.ensureLLM()
@@ -39,7 +42,7 @@ func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) 
 	}
 
 	sys := `You are an intent classifier.
-Return a single JSON object with fields: domain in ["payment","medical","planning","chat"], lang in ["ko","en"].
+Return a single JSON object with fields: domain in ["payment","medical","planning","ordering","chat"], lang in ["ko","en"].
 Pick the most likely domain.`
 	pr := map[string]any{"text": text}
 	jb, _ := json.Marshal(pr)
@@ -58,7 +61,7 @@ Pick the most likely domain.`
 	if lg != "ko" && lg != "en" {
 		lg = llm.DetectLang(text)
 	}
-	if m.Domain == "payment" || m.Domain == "medical" || m.Domain == "planning" || m.Domain == "" {
+	if m.Domain == "payment" || m.Domain == "medical" || m.Domain == "planning" || m.Domain == "ordering" || m.Domain == "" {
 		return routeOut{Domain: m.Domain, Lang: lg}, true
 	}
 	return routeOut{}, false

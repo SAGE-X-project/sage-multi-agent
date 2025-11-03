@@ -370,3 +370,19 @@ func isPlanningActionIntent(c string) bool {
 // Route to planning when 'plan/schedule' keywords exist and it's not phrased as a question
 	return containsAny(c, "계획", "일정", "플랜", "todo") && !isQuestionLike(c)
 }
+
+func isOrderingActionIntent(c string) bool {
+	if containsAny(c, "주문해", "구매해", "사줘", "배송", "order", "buy", "purchase", "deliver") {
+		return true
+	}
+	// Route to ordering when product/shopping keywords exist
+	if containsAny(c, "주문", "구매", "상품", "제품", "배송", "product", "shopping", "구입") && !isQuestionLike(c) {
+		return true
+	}
+	// Product names (from Ordering Agent catalog)
+	if containsAny(c, "아이폰", "iphone", "맥북", "macbook", "에어팟", "airpods",
+		"갤럭시", "galaxy", "헤드폰", "headphone", "아이패드", "ipad", "tv", "티비") {
+		return true
+	}
+	return false
+}
