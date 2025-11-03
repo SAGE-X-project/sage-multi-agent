@@ -208,7 +208,7 @@ func NewMedicalAgent(requireSignature bool) (*MedicalAgent, error) {
 	} else {
 		root := http.NewServeMux()
 		root.Handle("/status", open)
-		root.Handle("/process", protected)
+		root.Handle("/medical/", protected)  // prefix match to handle /medical/process
 		h = root
 	}
 	ma.handler = h

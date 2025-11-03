@@ -209,7 +209,7 @@ func NewPaymentAgent(requireSignature bool) (*PaymentAgent, error) {
 	} else {
 		root := http.NewServeMux()
 		root.Handle("/status", open)
-		root.Handle("/process", protected)
+		root.Handle("/payment/", protected)  // prefix match to handle /payment/process
 		h = root
 	}
 	pa.handler = h
