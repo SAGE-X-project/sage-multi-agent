@@ -20,10 +20,11 @@ var routerJSONRe = regexp.MustCompile(`(?s)\{.*\}`)
 
 // llmRoute uses the LLM to classify domain, with minimal hard guards as safety rails.
 func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) {
-    // 1) Fast rule-first decision
+    // 1) Fast rule-first decision (check specific domains first, then general)
 	low := strings.ToLower(strings.TrimSpace(text))
-	if isPaymentActionIntent(low) {
-		return routeOut{Domain: "payment", Lang: llm.DetectLang(text)}, true
+	// Check ordering before payment since "주문" can be in both
+	if isOrderingActionIntent(low) {
+		return routeOut{Domain: "ordering", Lang: llm.DetectLang(text)}, true
 	}
 	if isMedicalActionIntent(low) {
 		return routeOut{Domain: "medical", Lang: llm.DetectLang(text)}, true
@@ -31,8 +32,8 @@ func (r *RootAgent) llmRoute(ctx context.Context, text string) (routeOut, bool) 
 	if isPlanningActionIntent(low) {
 		return routeOut{Domain: "planning", Lang: llm.DetectLang(text)}, true
 	}
-	if isOrderingActionIntent(low) {
-		return routeOut{Domain: "ordering", Lang: llm.DetectLang(text)}, true
+	if isPaymentActionIntent(low) {
+		return routeOut{Domain: "payment", Lang: llm.DetectLang(text)}, true
 	}
 
     // 2) Use LLM (when available)
