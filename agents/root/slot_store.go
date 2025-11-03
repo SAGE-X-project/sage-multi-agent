@@ -372,17 +372,26 @@ func isPlanningActionIntent(c string) bool {
 }
 
 func isOrderingActionIntent(c string) bool {
-	if containsAny(c, "주문해", "구매해", "사줘", "배송", "order", "buy", "purchase", "deliver") {
+	// Ordering Agent는 상품 정보 조회 전용 (카탈로그, 가격, 재고)
+	// 실제 구매/주문은 Payment Agent가 처리
+
+	// 1) 상품 목록/카탈로그 조회
+	if containsAny(c, "상품 목록", "제품 목록", "카탈로그", "product list", "catalog", "뭐 팔아", "뭐 있어") {
 		return true
 	}
-	// Route to ordering when product/shopping keywords exist
-	if containsAny(c, "주문", "구매", "상품", "제품", "배송", "product", "shopping", "구입") && !isQuestionLike(c) {
+
+	// 2) 가격/재고 문의
+	if containsAny(c, "가격", "얼마", "price", "재고", "stock", "남았", "있어") &&
+	   containsAny(c, "아이폰", "맥북", "갤럭시", "에어팟", "아이패드", "헤드폰", "tv", "티비",
+	              "iphone", "macbook", "galaxy", "airpods", "ipad", "headphone") {
 		return true
 	}
-	// Product names (from Ordering Agent catalog)
-	if containsAny(c, "아이폰", "iphone", "맥북", "macbook", "에어팟", "airpods",
-		"갤럭시", "galaxy", "헤드폰", "headphone", "아이패드", "ipad", "tv", "티비") {
+
+	// 3) 상품 정보 요청
+	if containsAny(c, "정보", "스펙", "spec", "알려줘", "설명") &&
+	   containsAny(c, "상품", "제품", "product", "아이폰", "맥북", "갤럭시") {
 		return true
 	}
+
 	return false
 }
